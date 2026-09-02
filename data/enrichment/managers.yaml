@@ -1,0 +1,263 @@
+# 운용사/발행사 정규화 사전. canonical = 정규화 이름, aliases = 원천 데이터·상품명·질문에 등장하는 표기.
+# 원천: pref01n001.cu_fund_mgmt_co (국내ETF/ETN), pref02n001.cu_fund_mgmt_co (해외ETF), prfd01n001.itm_nm 접두어 (펀드)
+- id: mirae_am
+  canonical: 미래에셋자산운용
+  group: 미래에셋
+  country: KR
+  aliases: [미래에셋, 미래에셋자산운용, TIGER, 타이거, Mirae Asset, Mirae Asset Global Investments, 미래에셋자산운용(주)]
+- id: mirae_sec
+  canonical: 미래에셋증권
+  group: 미래에셋
+  country: KR
+  aliases: [미래에셋증권 주식회사, 미래에셋증권, Mirae Asset Securities]
+- id: samsung_am
+  canonical: 삼성자산운용
+  group: 삼성
+  country: KR
+  aliases: [삼성, 삼성자산운용, KODEX, 코덱스, Samsung Asset Management Co Ltd, Samsung Asset Management]
+- id: samsung_active
+  canonical: 삼성액티브자산운용
+  group: 삼성
+  country: KR
+  aliases: [삼성액티브, 삼성액티브자산운용, KoAct, 코액트]
+- id: samsung_sec
+  canonical: 삼성증권
+  group: 삼성
+  country: KR
+  aliases: [삼성증권(주), 삼성증권, Samsung Securities]
+- id: kb_am
+  canonical: KB자산운용
+  group: KB
+  country: KR
+  aliases: [KB, KB자산운용, RISE, 라이즈, KBSTAR, KB Asset Ltd, KB Asset Management]
+- id: kb_sec
+  canonical: KB증권
+  group: KB
+  country: KR
+  aliases: [KB증권(주), KB증권]
+- id: korea_inv_am
+  canonical: 한국투자신탁운용
+  group: 한국투자
+  country: KR
+  aliases: [한국투자, 한국투자신탁운용, ACE, 에이스, KINDEX, 한투운용, Korea Investment Management]
+- id: korea_inv_sec
+  canonical: 한국투자증권
+  group: 한국투자
+  country: KR
+  aliases: [한국투자증권(주), 한국투자증권]
+- id: shinhan_am
+  canonical: 신한자산운용
+  group: 신한
+  country: KR
+  aliases: [신한, 신한자산운용, SOL, 솔, 신한BNPP, 신한BNP파리바, Shinhan Asset Management]
+- id: shinhan_sec
+  canonical: 신한투자증권
+  group: 신한
+  country: KR
+  aliases: [신한투자증권 주식회사, 신한투자증권, 신한금융투자]
+- id: hanwha_am
+  canonical: 한화자산운용
+  group: 한화
+  country: KR
+  aliases: [한화, 한화자산운용, PLUS, 플러스, ARIRANG, 아리랑, Hanwha Asset Management]
+- id: kiwoom_am
+  canonical: 키움투자자산운용
+  group: 키움
+  country: KR
+  aliases: [키움, 키움투자자산운용, KIWOOM, KOSEF, 코세프, Kiwoom Asset Management]
+- id: kiwoom_sec
+  canonical: 키움증권
+  group: 키움
+  country: KR
+  aliases: [키움증권(주), 키움증권]
+- id: nh_amundi
+  canonical: NH-Amundi자산운용
+  group: NH
+  country: KR
+  aliases: [NH-Amundi, NH아문디, NH-Amundi자산운용, HANARO, 하나로, NH-Amundi Asset Management]
+- id: nh_sec
+  canonical: NH투자증권
+  group: NH
+  country: KR
+  aliases: [엔에이치투자증권(주), 엔에이치투자증권, NH투자증권]
+- id: hana_am
+  canonical: 하나자산운용
+  group: 하나
+  country: KR
+  aliases: [하나, 하나자산운용, 1Q, 하나UBS, Hana Asset Management]
+- id: hana_sec
+  canonical: 하나증권
+  group: 하나
+  country: KR
+  aliases: [하나증권주식회사, 하나증권]
+- id: woori_am
+  canonical: 우리자산운용
+  group: 우리
+  country: KR
+  aliases: [우리, 우리자산운용, WON, Woori Asset Management]
+- id: daishin_sec
+  canonical: 대신증권
+  group: 대신
+  country: KR
+  aliases: [대신증권(주), 대신증권]
+- id: daishin_am
+  canonical: 대신자산운용
+  group: 대신
+  country: KR
+  aliases: [대신자산운용, 대신, "343"]
+- id: meritz_sec
+  canonical: 메리츠증권
+  group: 메리츠
+  country: KR
+  aliases: [메리츠증권 주식회사, 메리츠증권, 메리츠]
+- id: timefolio
+  canonical: 타임폴리오자산운용
+  country: KR
+  aliases: [타임폴리오, 타임폴리오자산운용, TIME, Timefolio]
+- id: assetplus
+  canonical: 에셋플러스자산운용
+  country: KR
+  aliases: [에셋플러스, 에셋플러스자산운용]
+- id: bnk_am
+  canonical: BNK자산운용
+  group: BNK
+  country: KR
+  aliases: [BNK, BNK자산운용]
+- id: vi_am
+  canonical: 브이아이자산운용
+  country: KR
+  aliases: [브이아이, 브이아이자산운용, VI자산운용]
+- id: ibk_am
+  canonical: IBK자산운용
+  group: IBK
+  country: KR
+  aliases: [IBK, IBK자산운용]
+- id: hyundai_am
+  canonical: 현대자산운용
+  country: KR
+  aliases: [현대자산운용, UNICORN, 유니콘]
+- id: yurie_am
+  canonical: 유리자산운용
+  country: KR
+  aliases: [유리, 유리자산운용]
+- id: kyobo_axa
+  canonical: 교보악사자산운용
+  country: KR
+  aliases: [교보악사, 교보악사자산운용, 교보AXA]
+- id: db_am
+  canonical: DB자산운용
+  country: KR
+  aliases: [DB자산운용, DB, 동부자산운용]
+- id: eugene_am
+  canonical: 유진자산운용
+  country: KR
+  aliases: [유진, 유진자산운용]
+- id: heungkuk_am
+  canonical: 흥국자산운용
+  country: KR
+  aliases: [흥국, 흥국자산운용]
+- id: midas_am
+  canonical: 마이다스에셋자산운용
+  country: KR
+  aliases: [마이다스, 마이다스에셋, 마이다스에셋자산운용]
+- id: truston_am
+  canonical: 트러스톤자산운용
+  country: KR
+  aliases: [트러스톤, 트러스톤자산운용]
+- id: shinyoung_am
+  canonical: 신영자산운용
+  country: KR
+  aliases: [신영, 신영자산운용]
+- id: kvalue_am
+  canonical: 한국투자밸류자산운용
+  group: 한국투자
+  country: KR
+  aliases: [한국밸류, 한국투자밸류, 한국투자밸류자산운용]
+- id: kcgi_am
+  canonical: KCGI자산운용
+  country: KR
+  aliases: [KCGI, KCGI자산운용, 메리츠자산운용]
+- id: daol_am
+  canonical: 다올자산운용
+  country: KR
+  aliases: [다올, 다올자산운용, KTB자산운용]
+- id: fidelity
+  canonical: 피델리티자산운용
+  country: KR
+  aliases: [피델리티, 피델리티자산운용, Fidelity, Fidelity Management & Research Co LLC]
+- id: schroders
+  canonical: 슈로더투자신탁운용
+  country: KR
+  aliases: [슈로더, 슈로더투자신탁운용, Schroders]
+- id: franklin
+  canonical: 프랭클린템플턴투자신탁운용
+  country: KR
+  aliases: [프랭클린, 프랭클린템플턴, Franklin Templeton, Franklin Advisers Inc]
+- id: eastspring
+  canonical: 이스트스프링자산운용
+  country: KR
+  aliases: [이스트스프링, 이스트스프링자산운용]
+- id: ab_am
+  canonical: AB자산운용
+  country: KR
+  aliases: [AB자산운용, 얼라이언스번스틴, AllianceBernstein]
+- id: blackrock
+  canonical: BlackRock
+  country: US
+  aliases: [BlackRock, BlackRock Fund Advisors, iShares, 블랙록, 아이셰어즈]
+- id: vanguard
+  canonical: Vanguard
+  country: US
+  aliases: [Vanguard, The Vanguard Group Inc, 뱅가드]
+- id: state_street
+  canonical: State Street Global Advisors
+  country: US
+  aliases: [State Street, SSGA Funds Management Inc, SPDR, 스테이트스트리트]
+- id: invesco
+  canonical: Invesco
+  country: US
+  aliases: [Invesco, Invesco Capital Management LLC, 인베스코]
+- id: first_trust
+  canonical: First Trust
+  country: US
+  aliases: [First Trust, First Trust Advisors LP, 퍼스트트러스트]
+- id: global_x
+  canonical: Global X
+  country: US
+  aliases: [Global X, Global X Management Co LLC, 글로벌X]
+- id: kraneshares
+  canonical: KraneShares
+  country: US
+  aliases: [KraneShares, Krane Funds Advisors LLC, 크레인셰어즈]
+- id: proshares
+  canonical: ProShares
+  country: US
+  aliases: [ProShares, ProShare Advisors LLC, 프로셰어즈]
+- id: direxion
+  canonical: Direxion
+  country: US
+  aliases: [Direxion, Rafferty Asset Management LLC, 디렉시온]
+- id: vaneck
+  canonical: VanEck
+  country: US
+  aliases: [VanEck, Van Eck Associates Corp, 반에크]
+- id: wisdomtree
+  canonical: WisdomTree
+  country: US
+  aliases: [WisdomTree, WisdomTree Asset Management Inc, 위즈덤트리]
+- id: ark
+  canonical: ARK Invest
+  country: US
+  aliases: [ARK, ARK Investment Management LLC, 아크]
+- id: jpmorgan
+  canonical: JPMorgan Asset Management
+  country: US
+  aliases: [JPMorgan, J.P. Morgan Investment Management Inc, JPMorgan Investment Management Inc, JP모건]
+- id: schwab
+  canonical: Charles Schwab
+  country: US
+  aliases: [Schwab, Charles Schwab Investment Management Inc, 슈왑]
+- id: dimensional
+  canonical: Dimensional Fund Advisors
+  country: US
+  aliases: [Dimensional, Dimensional Fund Advisors LP, 디멘셔널]

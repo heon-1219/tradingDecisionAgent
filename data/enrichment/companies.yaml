@@ -1,0 +1,339 @@
+# 기업(편입종목·기초자산·질문에 등장하는 회사) 사전. parent = 모회사 id (자회사 관계), not_listed = 비상장.
+# 질문 예시 대응: 에코프로 자회사(에코프로비엠·에코프로에이치엔·에코프로머티리얼즈), 캠브리콘(중국 AI 반도체), Kimi(Moonshot AI, 비상장)
+- id: ecopro
+  name_ko: 에코프로
+  name_en: EcoPro
+  aliases: [에코프로, EcoPro Co Ltd, EcoPro Co]
+  tickers: ["086520"]
+  country: KR
+- id: ecopro_bm
+  name_ko: 에코프로비엠
+  name_en: EcoPro BM
+  aliases: [에코프로비엠, 에코프로BM, EcoPro BM Co Ltd, EcoPro BM]
+  tickers: ["247540"]
+  parent: ecopro
+  country: KR
+- id: ecopro_hn
+  name_ko: 에코프로에이치엔
+  name_en: EcoPro HN
+  aliases: [에코프로에이치엔, 에코프로HN, EcoPro HN Co Ltd, EcoPro HN]
+  tickers: ["383310"]
+  parent: ecopro
+  country: KR
+- id: ecopro_materials
+  name_ko: 에코프로머티리얼즈
+  name_en: EcoPro Materials
+  aliases: [에코프로머티리얼즈, 에코프로머티, EcoPro Materials Co Ltd, EcoPro Materials]
+  tickers: ["450080"]
+  parent: ecopro
+  country: KR
+- id: cambricon
+  name_ko: 캠브리콘
+  name_en: Cambricon Technologies
+  aliases: [캠브리콘, 캄브리콘, 캠브리콘테크놀로지, Cambricon, Cambricon Technologies Corp Ltd, 寒武纪, "688256"]
+  tickers: ["688256"]
+  country: CN
+- id: smic
+  name_ko: SMIC(중신궈지)
+  name_en: Semiconductor Manufacturing International Corp
+  aliases: [SMIC, 중신궈지, 중심국제, 中芯国际, "0981", "688981"]
+  tickers: ["0981", "688981"]
+  country: CN
+- id: hua_hong
+  name_ko: 화훙반도체
+  name_en: Hua Hong Semiconductor
+  aliases: [화훙, 화홍반도체, Hua Hong, "1347"]
+  tickers: ["1347"]
+  country: CN
+- id: naura
+  name_ko: 나우라
+  name_en: NAURA Technology Group
+  aliases: [나우라, NAURA, 北方华创, "002371"]
+  tickers: ["002371"]
+  country: CN
+- id: samsung_elec
+  name_ko: 삼성전자
+  name_en: Samsung Electronics
+  aliases: [삼성전자, Samsung Electronics Co Ltd, "005930"]
+  tickers: ["005930"]
+  country: KR
+- id: sk_hynix
+  name_ko: SK하이닉스
+  name_en: SK hynix
+  aliases: [SK하이닉스, 하이닉스, SK Hynix Inc, "000660"]
+  tickers: ["000660"]
+  country: KR
+- id: samsung_sdi
+  name_ko: 삼성SDI
+  name_en: Samsung SDI
+  aliases: [삼성SDI, "006400"]
+  tickers: ["006400"]
+  country: KR
+- id: lg_es
+  name_ko: LG에너지솔루션
+  name_en: LG Energy Solution
+  aliases: [LG에너지솔루션, LG엔솔, "373220"]
+  tickers: ["373220"]
+  country: KR
+- id: posco_fm
+  name_ko: 포스코퓨처엠
+  name_en: POSCO Future M
+  aliases: [포스코퓨처엠, 포스코케미칼, "003670"]
+  tickers: ["003670"]
+  country: KR
+- id: hanwha_aero
+  name_ko: 한화에어로스페이스
+  name_en: Hanwha Aerospace
+  aliases: [한화에어로스페이스, 한화에어로, "012450"]
+  tickers: ["012450"]
+  country: KR
+- id: kai
+  name_ko: 한국항공우주
+  name_en: Korea Aerospace Industries
+  aliases: [한국항공우주, KAI, "047810"]
+  tickers: ["047810"]
+  country: KR
+- id: lig_nex1
+  name_ko: LIG넥스원
+  name_en: LIG Nex1
+  aliases: [LIG넥스원, "079550"]
+  tickers: ["079550"]
+  country: KR
+- id: hyundai_rotem
+  name_ko: 현대로템
+  name_en: Hyundai Rotem
+  aliases: [현대로템, "064350"]
+  tickers: ["064350"]
+  country: KR
+- id: doosan_enerbility
+  name_ko: 두산에너빌리티
+  name_en: Doosan Enerbility
+  aliases: [두산에너빌리티, 두산중공업, "034020"]
+  tickers: ["034020"]
+  country: KR
+- id: hd_hhi
+  name_ko: HD현대중공업
+  name_en: HD Hyundai Heavy Industries
+  aliases: [HD현대중공업, 현대중공업, "329180"]
+  tickers: ["329180"]
+  country: KR
+- id: hanwha_ocean
+  name_ko: 한화오션
+  name_en: Hanwha Ocean
+  aliases: [한화오션, 대우조선해양, "042660"]
+  tickers: ["042660"]
+  country: KR
+- id: celltrion
+  name_ko: 셀트리온
+  name_en: Celltrion
+  aliases: [셀트리온, "068270"]
+  tickers: ["068270"]
+  country: KR
+- id: alteogen
+  name_ko: 알테오젠
+  name_en: Alteogen
+  aliases: [알테오젠, "196170"]
+  tickers: ["196170"]
+  country: KR
+- id: nvidia
+  name_ko: 엔비디아
+  name_en: NVIDIA
+  aliases: [엔비디아, 엔비디아, NVIDIA Corp, NVDA]
+  tickers: [NVDA]
+  country: US
+- id: tsmc
+  name_ko: TSMC
+  name_en: Taiwan Semiconductor Manufacturing
+  aliases: [TSMC, 대만반도체, 타이완세미컨덕터, TSM, "2330"]
+  tickers: [TSM, "2330"]
+  country: TW
+- id: asml
+  name_ko: ASML
+  name_en: ASML Holding
+  aliases: [ASML, 에이에스엠엘]
+  tickers: [ASML]
+  country: NL
+- id: tesla
+  name_ko: 테슬라
+  name_en: Tesla
+  aliases: [테슬라, Tesla Inc, TSLA]
+  tickers: [TSLA]
+  country: US
+- id: apple
+  name_ko: 애플
+  name_en: Apple
+  aliases: [애플, Apple Inc, AAPL]
+  tickers: [AAPL]
+  country: US
+- id: microsoft
+  name_ko: 마이크로소프트
+  name_en: Microsoft
+  aliases: [마이크로소프트, MS, Microsoft Corp, MSFT]
+  tickers: [MSFT]
+  country: US
+- id: alphabet
+  name_ko: 알파벳(구글)
+  name_en: Alphabet
+  aliases: [알파벳, 구글, Google, Alphabet Inc, GOOGL, GOOG]
+  tickers: [GOOGL, GOOG]
+  country: US
+- id: amazon
+  name_ko: 아마존
+  name_en: Amazon
+  aliases: [아마존, Amazon.com Inc, AMZN]
+  tickers: [AMZN]
+  country: US
+- id: meta
+  name_ko: 메타
+  name_en: Meta Platforms
+  aliases: [메타, 페이스북, Meta Platforms Inc, META]
+  tickers: [META]
+  country: US
+- id: broadcom
+  name_ko: 브로드컴
+  name_en: Broadcom
+  aliases: [브로드컴, Broadcom Inc, AVGO]
+  tickers: [AVGO]
+  country: US
+- id: amd
+  name_ko: AMD
+  name_en: Advanced Micro Devices
+  aliases: [AMD, 에이엠디]
+  tickers: [AMD]
+  country: US
+- id: intel
+  name_ko: 인텔
+  name_en: Intel
+  aliases: [인텔, Intel Corp, INTC]
+  tickers: [INTC]
+  country: US
+- id: micron
+  name_ko: 마이크론
+  name_en: Micron Technology
+  aliases: [마이크론, Micron, MU]
+  tickers: [MU]
+  country: US
+- id: rocket_lab
+  name_ko: 로켓랩
+  name_en: Rocket Lab
+  aliases: [로켓랩, Rocket Lab USA, RKLB]
+  tickers: [RKLB]
+  country: US
+- id: ast_spacemobile
+  name_ko: AST스페이스모바일
+  name_en: AST SpaceMobile
+  aliases: [AST스페이스모바일, AST SpaceMobile, ASTS]
+  tickers: [ASTS]
+  country: US
+- id: lockheed
+  name_ko: 록히드마틴
+  name_en: Lockheed Martin
+  aliases: [록히드마틴, 록히드, Lockheed Martin Corp, LMT]
+  tickers: [LMT]
+  country: US
+- id: rtx
+  name_ko: RTX(레이시온)
+  name_en: RTX Corp
+  aliases: [RTX, 레이시온, Raytheon]
+  tickers: [RTX]
+  country: US
+- id: northrop
+  name_ko: 노스롭그루먼
+  name_en: Northrop Grumman
+  aliases: [노스롭그루먼, 노스롭, Northrop Grumman Corp, NOC]
+  tickers: [NOC]
+  country: US
+- id: boeing
+  name_ko: 보잉
+  name_en: Boeing
+  aliases: [보잉, Boeing Co, BA]
+  tickers: [BA]
+  country: US
+- id: airbus
+  name_ko: 에어버스
+  name_en: Airbus
+  aliases: [에어버스, Airbus SE, AIR]
+  tickers: [AIR]
+  country: FR
+- id: spacex
+  name_ko: 스페이스X
+  name_en: SpaceX
+  aliases: [스페이스X, 스페이스엑스, SpaceX, Space Exploration Technologies]
+  tickers: []
+  country: US
+  not_listed: true
+  note: "비상장. 일부 해외 ETF가 간접 익스포저(예. 2x Long SpaceX Daily)를 표방하나 직접 편입 불가."
+- id: moonshot_kimi
+  name_ko: 문샷AI(Kimi)
+  name_en: Moonshot AI (Kimi)
+  aliases: [Kimi, 키미, 문샷AI, Moonshot AI, 月之暗面]
+  tickers: []
+  country: CN
+  not_listed: true
+  note: "비상장 스타트업. 제공 데이터에 관련 상품 없음."
+- id: hyundai_motor
+  name_ko: 현대차
+  name_en: Hyundai Motor
+  aliases: [현대차, 현대자동차, "005380"]
+  tickers: ["005380"]
+  country: KR
+- id: kia
+  name_ko: 기아
+  name_en: Kia
+  aliases: [기아, 기아차, "000270"]
+  tickers: ["000270"]
+  country: KR
+- id: naver
+  name_ko: 네이버
+  name_en: NAVER
+  aliases: [네이버, NAVER, "035420"]
+  tickers: ["035420"]
+  country: KR
+- id: kakao
+  name_ko: 카카오
+  name_en: Kakao
+  aliases: [카카오, "035720"]
+  tickers: ["035720"]
+  country: KR
+- id: kb_financial
+  name_ko: KB금융
+  name_en: KB Financial Group
+  aliases: [KB금융, KB금융지주, "105560"]
+  tickers: ["105560"]
+  country: KR
+- id: shinhan_fg
+  name_ko: 신한지주
+  name_en: Shinhan Financial Group
+  aliases: [신한지주, 신한금융지주, "055550"]
+  tickers: ["055550"]
+  country: KR
+- id: rainbow_robotics
+  name_ko: 레인보우로보틱스
+  name_en: Rainbow Robotics
+  aliases: [레인보우로보틱스, "277810"]
+  tickers: ["277810"]
+  country: KR
+- id: doosan_robotics
+  name_ko: 두산로보틱스
+  name_en: Doosan Robotics
+  aliases: [두산로보틱스, "454910"]
+  tickers: ["454910"]
+  country: KR
+- id: palantir
+  name_ko: 팔란티어
+  name_en: Palantir Technologies
+  aliases: [팔란티어, Palantir, PLTR]
+  tickers: [PLTR]
+  country: US
+- id: coinbase
+  name_ko: 코인베이스
+  name_en: Coinbase Global
+  aliases: [코인베이스, Coinbase, COIN]
+  tickers: [COIN]
+  country: US
+- id: microstrategy
+  name_ko: 마이크로스트래티지(스트래티지)
+  name_en: Strategy (MicroStrategy)
+  aliases: [마이크로스트래티지, 스트래티지, MicroStrategy, Strategy Inc, MSTR]
+  tickers: [MSTR]
+  country: US
