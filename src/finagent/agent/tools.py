@@ -1,0 +1,248 @@
+"""Tools exposed to the LLM: typed schemas + executors that also capture evidence."""
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+
+from ..kb.rdb import SQLGuardError
+from .answer import FINAL_ANSWER_SCHEMA, Evidence
+from .llm import ToolSpec
+
+log = logging.getLogger("finagent.tools")
+
+VIEW_ID_NAME = {
+    "v_bond_kr": ("pd_no", "pd_nm"),
+    "v_etf_kr": ("pd_itm_no", "pd_abrv_nm"),
+    "v_etf_gl": ("ticker", "pd_nm"),
+    "v_fund_pub": ("itm_no", "itm_nm"),
+}
+SEMANTICS = {
+    "v_bond_kr": "판매가능(매수가능) 채권 = is_sellable=1 (634건, 모두 장외·'온오프 겸용'). crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 같은 pd_no가 장내/장외 행으로 중복될 수 있으니 DISTINCT 고려.",
+    "v_etf_kr": "판매중 = is_on_sale=1. ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 18%만 수록(NULL이면 '데이터 없음'). 순자산 pd_net_tamt(KRW). 상장일 listing_date. 대표명 pd_abrv_nm.",
+    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. 레버리지/인버스 제외 시 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL.",
+    "v_fund_pub": "공모펀드 = product_type='공모펀드'. 판매중 = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY. 보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(상대 비교만). 수익률은 약 30%만 수록.",
+}
+
+
+@dataclass
+class ToolResult:
+    content: str
+    is_error: bool = False
+    evidence: Evidence | None = None
+
+
+def _fmt_val(v, width: int = 70) -> str:
+    if v is None:
+        return "NULL"
+    if isinstance(v, float):
+        if v.is_integer() and abs(v) >= 1000:
+            return f"{int(v):,}"
+        return f"{v:,.4f}".rstrip("0").rstrip(".") if abs(v) < 1000 else f"{v:,.2f}"
+    s = str(v)
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def rows_to_text(cols: list[str], rows: list[dict], max_rows: int = 40) -> str:
+    if not rows:
+        return "(0건)"
+    lines = [" | ".join(cols)]
+    for r in rows[:max_rows]:
+        lines.append(" | ".join(_fmt_val(r.get(c)) for c in cols))
+    if len(rows) > max_rows:
+        lines.append(f"... (표시 {max_rows}건 / 반환 {len(rows)}건)")
+    return "\n".join(lines)
+
+
+class ToolRegistry:
+    def __init__(self, rdb, index, resolver, kg, docs, ontology, lexicon, settings):
+        self.rdb, self.index, self.resolver, self.kg, self.docs = rdb, index, resolver, kg, docs
+        self.ontology, self.lexicon, self.settings = ontology, lexicon, settings
+        self.meta = rdb.meta() if rdb is not None else {}
+
+    # ------------------------------------------------------------------ specs
+    def specs(self) -> list[ToolSpec]:
+        tables = "v_bond_kr(국내채권) | v_etf_kr(국내ETF/ETN) | v_etf_gl(해외ETF) | v_fund_pub(공모/사모펀드)"
+        return [
+            ToolSpec(
+                "table_info",
+                f"테이블(뷰)의 컬럼 정의·한글 의미·허용값·기준일·판매가능 판정 규칙을 반환합니다. 테이블: {tables}. SQL 작성 전에 컬럼명이 불확실하면 호출하세요.",
+                {"type": "object", "properties": {"table": {"type": "string", "enum": list(VIEW_ID_NAME)}}, "required": ["table"]},
+            ),
+            ToolSpec(
+                "sql_query",
+                "SQLite 읽기 전용 SELECT 를 실행합니다(단일 문장, 최대 200행, 5초). 뷰 이름: v_bond_kr, v_etf_kr, v_etf_gl, v_fund_pub. "
+                "필터·정렬·집계·비교는 이 도구로 수행하세요. 문자열 매칭은 LIKE '%키워드%' (해외ETF는 영문). 결과 0건이면 조건을 완화해 재시도할 수 있습니다.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "실행할 SELECT 문"},
+                        "purpose": {"type": "string", "description": "이 질의의 목적(추적용, 한 문장)"},
+                    },
+                    "required": ["sql"],
+                },
+            ),
+            ToolSpec(
+                "search_products",
+                "상품명·운용사·기초지수·전략 텍스트에 대한 키워드/유사 검색(BM25). 정확한 상품명을 모르거나 테마 키워드(예: 우주항공, robot, China semiconductor)로 후보를 찾을 때 사용. "
+                "해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "table": {"type": "string", "enum": list(VIEW_ID_NAME), "description": "특정 테이블로 제한(선택)"},
+                        "k": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
+                    },
+                    "required": ["query"],
+                },
+            ),
+            ToolSpec(
+                "resolve_entity",
+                "질문 속 고유명사(상품명, 기업명, 운용사, 테마)를 사전·색인으로 해석합니다. 정확 일치 여부(exact), 유사 후보, 기업의 모회사/자회사·상장 여부, 테마 동의어를 반환합니다. "
+                "상품이 실제로 존재하는지 확인할 때 먼저 호출하세요.",
+                {"type": "object", "properties": {"mention": {"type": "string"}}, "required": ["mention"]},
+            ),
+            ToolSpec(
+                "graph_neighbors",
+                "지식그래프에서 엔티티(상품명/코드/티커/기업명/테마명/운용사명)의 관계를 조회합니다. 관계 예: managedBy, hasTheme, hasConstituent(편입종목), constituentOf_inverse, "
+                "subsidiaryOf, hasSubsidiary, tracksIndex, hasBenchmark, memberOfFamily, investsInRegion, hasAssetClass, hasRiskGrade, hasTheme_inverse(테마→상품). "
+                "예: graph_neighbors('에코프로','hasSubsidiary'), graph_neighbors('에코프로비엠','constituentOf'), graph_neighbors('우주항공','hasTheme_inverse').",
+                {
+                    "type": "object",
+                    "properties": {"entity": {"type": "string"}, "relation": {"type": "string", "description": "특정 관계만(선택)"}},
+                    "required": ["entity"],
+                },
+            ),
+            ToolSpec(
+                "graph_query",
+                "지식그래프 SPARQL SELECT. 접두사 fp:(스키마), d:(데이터)는 자동 추가. 상품 IRI: d:etf_kr/{ISIN}, d:etf_gl/{RIC}, d:bond/{ISIN}, d:fund/{itm_no}. "
+                "예: SELECT ?etf ?name WHERE { ?etf fp:hasConstituent ?c . ?c fp:subsidiaryOf ?p . ?p fp:name '에코프로' . ?etf fp:name ?name } / "
+                "SELECT ?p ?n WHERE { ?p fp:hasTheme d:theme/space_aero ; fp:name ?n ; fp:listingDate ?d . FILTER(?d >= '2026-02-21'^^xsd:date) }",
+                {"type": "object", "properties": {"sparql": {"type": "string"}}, "required": ["sparql"]},
+            ),
+            ToolSpec(
+                "search_documents",
+                "외부 참고 문서(마크다운: 국민성장펀드 개요, ETF 용어·지표 해설, ETF 위험요인 일반)를 검색합니다. 상품 마스터에 없는 배경 설명·위험요인·용어가 필요할 때 사용. "
+                "출처·기준일이 함께 반환되며, 주최측 제공 데이터가 우선합니다.",
+                {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 4}}, "required": ["query"]},
+            ),
+            ToolSpec(
+                "final_answer",
+                "최종 답변을 제출하고 종료합니다. 반드시 마지막에 한 번 호출하세요. status: answered(근거 있음) / cannot_confirm(제공 데이터로 확인 불가) / clarify(조건 모호·역질문).",
+                FINAL_ANSWER_SCHEMA,
+            ),
+        ]
+
+    # ------------------------------------------------------------------ exec
+    async def execute(self, name: str, args: dict) -> ToolResult:
+        try:
+            fn = getattr(self, f"_t_{name}", None)
+            if fn is None:
+                return ToolResult(f"알 수 없는 도구: {name}", True)
+            return fn(**(args or {}))
+        except TypeError as e:
+            return ToolResult(f"잘못된 인자: {e}", True)
+        except SQLGuardError as e:
+            return ToolResult(str(e), True)
+        except Exception as e:  # noqa: BLE001 - tool errors go back to the model
+            log.exception("tool %s failed", name)
+            return ToolResult(f"도구 오류({type(e).__name__}): {e}", True)
+
+    def _meta_line(self, view: str) -> tuple[str | None, str | None]:
+        m = self.meta.get(view) or {}
+        return m.get("korean_name"), m.get("base_date")
+
+    def _t_table_info(self, table: str) -> ToolResult:
+        if table not in VIEW_ID_NAME:
+            return ToolResult(f"알 수 없는 테이블: {table}. 사용 가능: {', '.join(VIEW_ID_NAME)}", True)
+        kname, base = self._meta_line(table)
+        m = self.meta.get(table) or {}
+        card = self.ontology.schema_card(table) if self.ontology is not None else "### " + table + "\n- " + "\n- ".join(self.rdb.columns(table))
+        text = f"{card}\n기준일: {base} · 행수: {m.get('row_count')}\n판정 규칙: {SEMANTICS[table]}"
+        return ToolResult(text, False, Evidence("schema", table, kname, base, "table_info", None))
+
+    def _t_sql_query(self, sql: str, purpose: str = "") -> ToolResult:
+        r = self.rdb.query(sql)
+        view = next((v for v in VIEW_ID_NAME if v in r.sql), None)
+        kname, base = self._meta_line(view) if view else (None, None)
+        refs = []
+        if view:
+            idc, namec = VIEW_ID_NAME[view]
+            for row in r.rows[:50]:
+                cid, cname = row.get(idc), row.get(namec)
+                if cid or cname:
+                    refs.append(f"{cid or ''} {cname or ''}".strip())
+        text = rows_to_text(r.columns, r.rows)
+        text += f"\n총 {r.row_count}건" + (" (LIMIT로 잘림 — 집계가 필요하면 COUNT/GROUP BY 사용)" if r.truncated else "")
+        return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, r.row_count, refs))
+
+    def _t_search_products(self, query: str, table: str | None = None, k: int = 10) -> ToolResult:
+        hits = self.index.search(query, k=int(k), table=table)
+        if not hits:
+            return ToolResult("검색 결과 없음", False, Evidence("search", table, None, None, f"search_products('{query}')", 0))
+        lines, refs = [], []
+        for h in hits:
+            idc, _ = VIEW_ID_NAME.get(h.table, ("id", "name"))
+            key = {k2: v for k2, v in h.payload.items() if v not in (None, "") and k2 not in (idc,)}
+            lines.append(f"- [{h.table}] id={h.id} | {h.title} | " + ", ".join(f"{a}={_fmt_val(b, 40)}" for a, b in list(key.items())[:8]))
+            refs.append(f"{h.id} {h.title}")
+        return ToolResult("\n".join(lines), False, Evidence("search", table, None, None, f"search_products('{query}')", len(hits), refs))
+
+    def _t_resolve_entity(self, mention: str) -> ToolResult:
+        r = self.resolver.resolve(mention, k=5)
+        text = r.summary()
+        for c in r.companies:
+            subs = self.lexicon.subsidiaries_of(c.id)
+            if subs:
+                text += f"\n{c.name_ko}의 자회사(사전): " + ", ".join(s.name_ko for s in subs)
+            if self.kg is not None:
+                nb = self.kg.neighbors(c.name_ko, relation="constituentOf", limit=30)
+                cons = nb.get("constituentOf", [])
+                if cons:
+                    text += f"\n{c.name_ko}를 편입한 상품(그래프, {len(cons)}건): " + ", ".join(x["label"] for x in cons[:15])
+                elif not c.not_listed:
+                    text += f"\n{c.name_ko}를 편입한 상품: 편입 데이터 없음"
+            if c.note:
+                text += f"\n비고: {c.note}"
+        refs = [f"{h.id} {h.title}" for h in r.products[:5]]
+        return ToolResult(text, False, Evidence("entity", None, None, None, f"resolve_entity('{mention}') exact={r.exact}", None, refs))
+
+    def _t_graph_neighbors(self, entity: str, relation: str | None = None) -> ToolResult:
+        if self.kg is None:
+            return ToolResult("지식그래프가 로드되지 않았습니다.", True)
+        nb = self.kg.neighbors(entity, relation=relation, limit=60)
+        if not nb:
+            return ToolResult(f"'{entity}' 에 해당하는 노드/관계 없음", False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", 0))
+        lines, refs = [], []
+        for rel, items in nb.items():
+            lines.append(f"{rel} ({len(items)}): " + ", ".join(x["label"] for x in items[:40]) + (" ..." if len(items) > 40 else ""))
+            refs += [x["label"] for x in items[:10]]
+        return ToolResult("\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(len(v) for v in nb.values()), refs[:30]))
+
+    def _t_graph_query(self, sparql: str) -> ToolResult:
+        if self.kg is None:
+            return ToolResult("지식그래프가 로드되지 않았습니다.", True)
+        try:
+            rows = self.kg.query(sparql, limit=100)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(f"SPARQL 오류: {e}", True)
+        if not rows:
+            return ToolResult("(0건)", False, Evidence("graph", None, None, None, sparql.strip(), 0))
+        lines = [" | ".join(f"{k}={v}" for k, v in r.items()) for r in rows[:60]]
+        refs = [next(iter(r.values())) for r in rows[:20]]
+        return ToolResult("\n".join(lines) + f"\n총 {len(rows)}건", False, Evidence("graph", None, None, None, sparql.strip(), len(rows), refs))
+
+    def _t_search_documents(self, query: str, k: int = 4) -> ToolResult:
+        if self.docs is None or len(self.docs) == 0:
+            return ToolResult("외부 문서 없음", False)
+        hits = self.docs.search(query, k=int(k))
+        if not hits:
+            return ToolResult("관련 문서 없음", False, Evidence("docs", None, None, None, f"search_documents('{query}')", 0))
+        lines, refs = [], []
+        for c in hits:
+            lines.append(f"### {c.title} › {c.heading} (출처: {c.source or '내부 정리'}, 기준 {c.as_of or '-'})\n{c.text}")
+            refs.append(f"{c.title} › {c.heading}")
+        return ToolResult("\n\n".join(lines), False, Evidence("docs", None, None, hits[0].as_of or None, f"search_documents('{query}')", len(hits), refs))
+
+    def _t_final_answer(self, status: str = "answered", answer: str = "", evidence_refs: list | None = None) -> ToolResult:
+        return ToolResult(json.dumps({"status": status, "answer": answer, "evidence_refs": evidence_refs or []}, ensure_ascii=False))

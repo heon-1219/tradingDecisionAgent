@@ -69,7 +69,8 @@ class Ontology:
     def load(cls, d: Path) -> "Ontology":
         g = rdflib.Graph()
         for f in FILES:
-            g.parse(Path(d) / f, format="turtle")
+            # parse from text: a Windows path with non-ASCII folders is not a valid source URI for rdflib
+            g.parse(data=(Path(d) / f).read_text(encoding="utf-8"), format="turtle")
         g.bind("fp", FP)
         return cls(g)
 
@@ -185,3 +186,35 @@ class Ontology:
         s = str(v).strip()
         rng = f"{codes[0]}~{codes[-1]}" if codes else "?"
         return (s in codes, f"위험등급은 {rng}등급만 존재합니다 (1등급이 가장 높은 위험).")
+
+
+_FALLBACK_CREDIT = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-", "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-", "B+", "B0", "B-", "CCC", "CC", "C0", "D"]
+_FALLBACK_RISK = ["매우높은위험(1등급)", "높은위험(2등급)", "다소높은위험(3등급)", "보통위험(4등급)", "낮은위험(5등급)", "매우낮은위험(6등급)"]
+
+
+class FallbackValidators:
+    """Used only if the TTL files cannot be loaded; keeps the value-domain checks alive."""
+
+    graph = None
+
+    def credit_grades(self) -> list[EnumValue]:
+        return [EnumValue(c, c, i + 1) for i, c in enumerate(_FALLBACK_CREDIT)]
+
+    def risk_grades(self) -> list[EnumValue]:
+        return [EnumValue(str(i + 1), lbl, i + 1) for i, lbl in enumerate(_FALLBACK_RISK)]
+
+    validate_credit_grade = Ontology.validate_credit_grade
+    credit_grades_at_or_above = Ontology.credit_grades_at_or_above
+    validate_risk_grade = Ontology.validate_risk_grade
+
+    def schema_card(self, view: str) -> str:
+        return f"### {view} (온톨로지 미로딩 — table_info 의 컬럼 목록 참조)"
+
+    def summary(self) -> str:
+        return "(온톨로지 미로딩)"
+
+    def tables(self):
+        return []
+
+    def enum_for(self, name):
+        return self.credit_grades() if name == "hasCreditGrade" else (self.risk_grades() if name == "hasRiskGrade" else [])

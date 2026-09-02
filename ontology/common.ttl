@@ -1,0 +1,509 @@
+# ============================================================================
+# common.ttl — 금융상품 QA 에이전트 공통 온톨로지 (TBox)
+#
+# 목적
+#   2026 미래에셋증권 AI Festival "금융상품 Agent" 제출용 도메인 온톨로지의 공통 계층.
+#   상품 계층(fp:Product ⊃ 채권/ETF/ETN/펀드), 참여 기관(운용사·발행기관·기업),
+#   분류 어휘(자산군·투자지역·위험등급·분배주기), 관계(운용/발행/추종/구성종목/테마)
+#   및 원천 테이블과 무관한 공통 속성(productCode, name, isOnSale ...)을 정의한다.
+#
+# TBox / ABox 분리
+#   - 이 파일과 bond_kr.ttl, etf_kr.ttl, etf_gl.ttl, fund_pub.ttl 은 TBox(클래스·속성·
+#     열거형 개체·SHACL 제약)만 담는다.
+#   - 개별 상품 인스턴스(ABox)는 런타임에 src/finagent/kb/graph.py 가 SQLite 뷰
+#     (v_bond_kr, v_etf_kr, v_etf_gl, v_fund_pub)를 읽어 http://mafest.ai/data/ 네임스페이스로
+#     생성한다. 따라서 TTL 에는 상품 개체가 없다.
+#   - src/finagent/ontology/loader.py 는 fp:sourceTable / fp:sourceColumn / fp:unit /
+#     rdfs:label@ko / rdfs:comment@ko 및 rdfs:range 열거형 개체(fp:code, fp:gradeRank)를
+#     읽어 LLM 용 스키마 카드와 값 검증기를 만든다.
+#
+# 스냅샷 기준일
+#   v_bond_kr, v_etf_kr, v_fund_pub 는 2026-08-21, v_etf_gl 은 2026-08-22 기준 스냅샷이다.
+#   모든 가격·수익률·잔고 컬럼은 해당 기준일 시점 값이며 실시간 시세가 아니다.
+#
+# 명명 규칙
+#   - 속성명은 camelCase. IRI 로컬명에는 '+', '-' 를 쓰지 않는다 (plus/minus/0 으로 대체).
+#   - 원천 컬럼과 1:1 로 대응하는 속성은 각 테이블 파일에 두고 (bond*/etfKr*/etfGl*/fund*),
+#     테이블에 독립적인 공통 속성만 이 파일에 둔다.
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+<http://mafest.ai/product>
+    a owl:Ontology ;
+    rdfs:label "미래에셋 금융상품 온톨로지"@ko , "Mirae Asset Financial Product Ontology"@en ;
+    rdfs:comment "국내채권·국내ETF/ETN·해외ETF/ETN·공모펀드 4개 마스터 뷰를 하나의 상품 계층으로 통합한 TBox. 스냅샷 기준일: 2026-08-21 (채권·국내ETF·펀드), 2026-08-22 (해외ETF). ABox 는 런타임에 SQLite 에서 생성."@ko ;
+    owl:versionInfo "2026-09-03" .
+
+# ----------------------------------------------------------------------------
+# 1. 메타 어노테이션 / 열거형 보조 속성
+# ----------------------------------------------------------------------------
+
+fp:sourceTable a owl:AnnotationProperty ;
+    rdfs:label "원천 뷰"@ko ;
+    rdfs:comment "이 클래스/속성이 대응하는 SQLite 뷰 이름 (v_bond_kr, v_etf_kr, v_etf_gl, v_fund_pub)."@ko .
+
+fp:sourceColumn a owl:AnnotationProperty ;
+    rdfs:label "원천 컬럼"@ko ;
+    rdfs:comment "이 속성이 대응하는 뷰 컬럼명. 한 속성 IRI 는 정확히 하나의 (sourceTable, sourceColumn) 쌍에 대응한다."@ko .
+
+fp:sourceId a owl:AnnotationProperty ;
+    rdfs:label "원천 데이터셋 ID"@ko ;
+    rdfs:comment "미래에셋 원천 마스터 식별자 (예: PRBD01N001). 뷰당 정확히 하나의 대표 클래스만 보유한다."@ko .
+
+fp:unit a owl:AnnotationProperty ;
+    rdfs:label "단위"@ko ;
+    rdfs:comment "수치 속성의 단위 (%, KRW, USD, 일, 년, 주, 회 등). 단위가 공개되지 않은 원천값은 '원천값(단위 미공개)' 로 표기."@ko .
+
+fp:code a owl:DatatypeProperty ;
+    rdfs:label "코드값"@ko ;
+    rdfs:comment "열거형 개체가 원천 데이터에서 갖는 실제 문자열 값. SQL WHERE 절에 그대로 사용 가능."@ko ;
+    rdfs:range xsd:string .
+
+fp:altCode a owl:DatatypeProperty ;
+    rdfs:label "대체 코드값"@ko ;
+    rdfs:comment "동일 개념이 다른 테이블에서 쓰는 두 번째 표기 (예: 자산군 영문 Equity ↔ 한글 주식)."@ko ;
+    rdfs:range xsd:string .
+
+fp:gradeRank a owl:DatatypeProperty ;
+    rdfs:label "등급 순위"@ko ;
+    rdfs:comment "등급형 열거값의 정렬 순위. 작을수록 상위(우량/고위험) 등급. 신용등급 AAA=1, 위험등급 1등급=1."@ko ;
+    rdfs:range xsd:integer .
+
+# ----------------------------------------------------------------------------
+# 2. 상품 계층
+# ----------------------------------------------------------------------------
+
+fp:Product a owl:Class ;
+    rdfs:label "금융상품"@ko , "Financial Product"@en ;
+    rdfs:comment "미래에셋증권에서 취급하는 모든 투자상품의 최상위 클래스. 채권, ETF, ETN, 펀드가 하위 클래스."@ko .
+
+fp:Bond a owl:Class ;
+    rdfs:subClassOf fp:Product ;
+    rdfs:label "채권"@ko , "Bond"@en ;
+    rdfs:comment "발행자가 원리금 지급을 약속한 확정소득 증권. 현재 원천은 국내채권(v_bond_kr)만 존재."@ko ;
+    owl:disjointWith fp:Fund .
+
+fp:ETF a owl:Class ;
+    rdfs:subClassOf fp:Product ;
+    rdfs:label "상장지수펀드"@ko , "Exchange Traded Fund"@en ;
+    rdfs:comment "거래소 상장 집합투자기구. 국내ETF(v_etf_kr)와 해외ETF(v_etf_gl)로 나뉜다."@ko ;
+    owl:disjointWith fp:ETN .
+
+fp:ETN a owl:Class ;
+    rdfs:subClassOf fp:Product ;
+    rdfs:label "상장지수증권"@ko , "Exchange Traded Note"@en ;
+    rdfs:comment "증권사가 발행하는 파생결합증권. 신용위험이 발행사에 귀속되며 총보수 컬럼이 비어 있는 경우가 많다."@ko .
+
+fp:Fund a owl:Class ;
+    rdfs:subClassOf fp:Product ;
+    rdfs:label "펀드"@ko , "Fund"@en ;
+    rdfs:comment "비상장 집합투자기구. 공모펀드/사모펀드 및 클래스(ShareClass) 단위 행으로 구성."@ko .
+
+# ----------------------------------------------------------------------------
+# 3. 참여 기관 / 보조 개체 클래스
+# ----------------------------------------------------------------------------
+
+fp:Company a owl:Class ;
+    rdfs:label "기업"@ko , "Company"@en ;
+    rdfs:comment "ETF 구성종목·운용사·발행기관을 아우르는 법인 클래스. 상장기업은 fp:ticker, fp:country 를 가진다."@ko .
+
+fp:ManagementCompany a owl:Class ;
+    rdfs:subClassOf fp:Company ;
+    rdfs:label "자산운용사"@ko , "Management Company"@en ;
+    rdfs:comment "ETF·펀드를 운용하는 회사. manager_name 컬럼을 정규화한 이름으로 생성되며 fp:group 에 금융그룹명을 가질 수 있다."@ko .
+
+fp:Issuer a owl:Class ;
+    rdfs:subClassOf fp:Company ;
+    rdfs:label "발행기관"@ko , "Issuer"@en ;
+    rdfs:comment "채권 발행기관(issuer_name) 또는 ETN 발행 증권사."@ko .
+
+fp:Theme a owl:Class ;
+    rdfs:label "투자 테마"@ko , "Investment Theme"@en ;
+    rdfs:comment "반도체, AI, 2차전지, 배당 등 상품명·기초지수·운용전략 텍스트에서 추출한 테마. 큐레이션 렉시콘 기반."@ko .
+
+fp:Index a owl:Class ;
+    rdfs:label "지수"@ko , "Index"@en ;
+    rdfs:comment "ETF 기초지수 또는 펀드 벤치마크. 원천이 지수를 제공하지 않는 문구('Index is not provided by Management Company' 등)는 개체를 생성하지 않는다."@ko .
+
+fp:FundFamily a owl:Class ;
+    rdfs:label "펀드 패밀리"@ko , "Fund Family"@en ;
+    rdfs:comment "클래스 접미어(A, C, C-e, S 등)를 제거한 동일 모펀드 묶음. v_fund_pub.fund_family 값으로 식별."@ko .
+
+fp:ShareClass a owl:Class ;
+    rdfs:label "펀드 클래스"@ko , "Share Class"@en ;
+    rdfs:comment "한 펀드의 판매수수료·판매채널이 다른 클래스 단위. v_fund_pub 의 각 행은 클래스 하나에 해당하며 fp:memberOfFamily 로 패밀리에 묶인다."@ko .
+
+# ----------------------------------------------------------------------------
+# 4. 분류 어휘 (열거형 클래스 + 개체)
+# ----------------------------------------------------------------------------
+
+# 4.1 위험등급 (1등급 = 가장 높은 위험, 6등급 = 가장 낮은 위험)
+fp:RiskGrade a owl:Class ;
+    rdfs:label "투자위험등급"@ko , "Risk Grade"@en ;
+    rdfs:comment "금융투자상품 위험등급 1~6. 숫자가 작을수록 위험이 높다 (1등급=매우높은위험). ETF/펀드는 risk_grade 컬럼에 1~6, 채권은 pd_risk_gcd 에 11~16 으로 저장."@ko .
+
+fp:RiskGrade1 a fp:RiskGrade ; fp:code "1" ; fp:gradeRank 1 ; rdfs:label "매우높은위험(1등급)"@ko .
+fp:RiskGrade2 a fp:RiskGrade ; fp:code "2" ; fp:gradeRank 2 ; rdfs:label "높은위험(2등급)"@ko .
+fp:RiskGrade3 a fp:RiskGrade ; fp:code "3" ; fp:gradeRank 3 ; rdfs:label "다소높은위험(3등급)"@ko .
+fp:RiskGrade4 a fp:RiskGrade ; fp:code "4" ; fp:gradeRank 4 ; rdfs:label "보통위험(4등급)"@ko .
+fp:RiskGrade5 a fp:RiskGrade ; fp:code "5" ; fp:gradeRank 5 ; rdfs:label "낮은위험(5등급)"@ko .
+fp:RiskGrade6 a fp:RiskGrade ; fp:code "6" ; fp:gradeRank 6 ; rdfs:label "매우낮은위험(6등급)"@ko .
+
+# 4.2 자산군 (영문 code = v_etf_gl.wu_inv_ast_type / v_etf_kr.ref_ast_type, altCode = v_etf_kr.wu_inv_ast_type 한글)
+fp:AssetClass a owl:Class ;
+    rdfs:label "자산군"@ko , "Asset Class"@en ;
+    rdfs:comment "투자 대상 자산 분류. fp:code 는 영문 표기(해외ETF·Refinitiv), fp:altCode 는 한글 표기(국내ETF)."@ko .
+
+fp:AssetClass_Equity a fp:AssetClass ; fp:code "Equity" ; fp:altCode "주식" ; rdfs:label "주식"@ko , "Equity"@en .
+fp:AssetClass_Bond a fp:AssetClass ; fp:code "Bond" ; fp:altCode "채권" ; rdfs:label "채권"@ko , "Bond"@en .
+fp:AssetClass_Commodity a fp:AssetClass ; fp:code "Commodity" ; fp:altCode "원자재" ; rdfs:label "원자재"@ko , "Commodity"@en .
+fp:AssetClass_Alternatives a fp:AssetClass ; fp:code "Alternatives" ; fp:altCode "대체투자" ; rdfs:label "대체투자"@ko , "Alternatives"@en .
+fp:AssetClass_MixedAssets a fp:AssetClass ; fp:code "Mixed Assets" ; fp:altCode "혼합자산" ; rdfs:label "혼합자산"@ko , "Mixed Assets"@en .
+fp:AssetClass_MoneyMarket a fp:AssetClass ; fp:code "Money Market" ; fp:altCode "단기자금" ; rdfs:label "단기자금"@ko , "Money Market"@en .
+fp:AssetClass_Currency a fp:AssetClass ; fp:code "Currency" ; fp:altCode "통화" ; rdfs:label "통화"@ko , "Currency"@en .
+fp:AssetClass_RealEstate a fp:AssetClass ; fp:code "Real Estate" ; fp:altCode "부동산" ; rdfs:label "부동산"@ko , "Real Estate"@en .
+fp:AssetClass_Other a fp:AssetClass ; fp:code "Other" ; fp:altCode "기타" ; rdfs:label "기타"@ko , "Other"@en .
+
+# 4.3 투자지역 (IRI = fp:Region_<slug>, slug 는 원천값의 비영숫자를 '_' 로 치환)
+fp:Region a owl:Class ;
+    rdfs:label "투자지역"@ko , "Investment Region"@en ;
+    rdfs:comment "국내ETF·펀드는 한글, 해외ETF 는 영문 원천값을 그대로 fp:code 로 보존한다. 같은 의미의 한/영 개체는 owl:sameAs 대신 rdfs:seeAlso 로 느슨히 연결."@ko .
+
+# 국내ETF (v_etf_kr.wu_inv_rgn) + 공모펀드 (v_fund_pub.fd_ivst_rgn_desc) 한글 지역
+fp:Region_국내 a fp:Region ; fp:code "국내" ; rdfs:label "국내"@ko ; rdfs:seeAlso fp:Region_Korea .
+fp:Region_미국 a fp:Region ; fp:code "미국" ; rdfs:label "미국"@ko ; rdfs:seeAlso fp:Region_United_States_of_America .
+fp:Region_글로벌 a fp:Region ; fp:code "글로벌" ; rdfs:label "글로벌"@ko ; rdfs:seeAlso fp:Region_Global .
+fp:Region_중국 a fp:Region ; fp:code "중국" ; rdfs:label "중국"@ko ; rdfs:seeAlso fp:Region_China .
+fp:Region_아시아 a fp:Region ; fp:code "아시아" ; rdfs:label "아시아"@ko ; rdfs:seeAlso fp:Region_Asia_Pacific .
+fp:Region_일본 a fp:Region ; fp:code "일본" ; rdfs:label "일본"@ko ; rdfs:seeAlso fp:Region_Japan .
+fp:Region_인도 a fp:Region ; fp:code "인도" ; rdfs:label "인도"@ko ; rdfs:seeAlso fp:Region_India .
+fp:Region_남미_북미 a fp:Region ; fp:code "남미·북미" ; rdfs:label "남미·북미"@ko ; rdfs:comment "원천값 '남미·북미' (가운뎃점 포함). 미주 전체."@ko .
+fp:Region_유럽 a fp:Region ; fp:code "유럽" ; rdfs:label "유럽"@ko ; rdfs:seeAlso fp:Region_Europe .
+fp:Region_이머징_브릭스 a fp:Region ; fp:code "이머징·브릭스" ; rdfs:label "이머징·브릭스"@ko ; rdfs:seeAlso fp:Region_Global_Emerging_Markets .
+fp:Region_베트남 a fp:Region ; fp:code "베트남" ; rdfs:label "베트남"@ko ; rdfs:seeAlso fp:Region_Vietnam .
+fp:Region_중동_아프리카 a fp:Region ; fp:code "중동·아프리카" ; rdfs:label "중동·아프리카"@ko ; rdfs:comment "공모펀드 전용 값."@ko .
+fp:Region_기타 a fp:Region ; fp:code "기타" ; rdfs:label "기타"@ko .
+fp:Region_해당없음 a fp:Region ; fp:code "해당없음" ; rdfs:label "해당없음"@ko ; rdfs:comment "공모펀드 중 지역 분류가 무의미한 상품(MMF 등)."@ko .
+
+# 해외ETF (v_etf_gl.wu_inv_rgn) 영문 지역
+fp:Region_United_States_of_America a fp:Region ; fp:code "United States of America" ; rdfs:label "미국"@ko , "United States of America"@en .
+fp:Region_Global a fp:Region ; fp:code "Global" ; rdfs:label "글로벌"@ko , "Global"@en .
+fp:Region_Global_Ex_US a fp:Region ; fp:code "Global Ex US" ; rdfs:label "미국 제외 글로벌"@ko , "Global Ex US"@en .
+fp:Region_Global_Emerging_Markets a fp:Region ; fp:code "Global Emerging Markets" ; rdfs:label "글로벌 신흥국"@ko , "Global Emerging Markets"@en .
+fp:Region_China a fp:Region ; fp:code "China" ; rdfs:label "중국"@ko , "China"@en .
+fp:Region_Europe a fp:Region ; fp:code "Europe" ; rdfs:label "유럽"@ko , "Europe"@en .
+fp:Region_Japan a fp:Region ; fp:code "Japan" ; rdfs:label "일본"@ko , "Japan"@en .
+fp:Region_India a fp:Region ; fp:code "India" ; rdfs:label "인도"@ko , "India"@en .
+fp:Region_Korea a fp:Region ; fp:code "Korea" ; rdfs:label "한국"@ko , "Korea"@en .
+fp:Region_Asia_Pacific a fp:Region ; fp:code "Asia Pacific" ; rdfs:label "아시아태평양"@ko , "Asia Pacific"@en .
+fp:Region_Asia_Pacific_Ex_Japan a fp:Region ; fp:code "Asia Pacific Ex Japan" ; rdfs:label "일본 제외 아시아태평양"@ko , "Asia Pacific Ex Japan"@en .
+fp:Region_Emerging_Markets_Asia a fp:Region ; fp:code "Emerging Markets Asia" ; rdfs:label "아시아 신흥국"@ko , "Emerging Markets Asia"@en .
+fp:Region_Latin_America a fp:Region ; fp:code "Latin America" ; rdfs:label "중남미"@ko , "Latin America"@en .
+fp:Region_Canada a fp:Region ; fp:code "Canada" ; rdfs:label "캐나다"@ko , "Canada"@en .
+fp:Region_United_Kingdom a fp:Region ; fp:code "United Kingdom" ; rdfs:label "영국"@ko , "United Kingdom"@en .
+fp:Region_Germany a fp:Region ; fp:code "Germany" ; rdfs:label "독일"@ko , "Germany"@en .
+fp:Region_Taiwan a fp:Region ; fp:code "Taiwan" ; rdfs:label "대만"@ko , "Taiwan"@en .
+fp:Region_Hong_Kong a fp:Region ; fp:code "Hong Kong" ; rdfs:label "홍콩"@ko , "Hong Kong"@en .
+fp:Region_Brazil a fp:Region ; fp:code "Brazil" ; rdfs:label "브라질"@ko , "Brazil"@en .
+fp:Region_Mexico a fp:Region ; fp:code "Mexico" ; rdfs:label "멕시코"@ko , "Mexico"@en .
+fp:Region_Australia a fp:Region ; fp:code "Australia" ; rdfs:label "호주"@ko , "Australia"@en .
+fp:Region_Vietnam a fp:Region ; fp:code "Vietnam" ; rdfs:label "베트남"@ko , "Vietnam"@en .
+fp:Region_Europe_Ex_UK a fp:Region ; fp:code "Europe Ex UK" ; rdfs:label "영국 제외 유럽"@ko , "Europe Ex UK"@en .
+fp:Region_Other a fp:Region ; fp:code "Other" ; rdfs:label "기타(영문)"@ko , "Other"@en .
+
+# 4.4 분배주기
+fp:DistributionCycle a owl:Class ;
+    rdfs:label "분배주기"@ko , "Distribution Cycle"@en ;
+    rdfs:comment "ETF 분배금 지급 주기. v_etf_kr.pd_dvid_cycl 코드 A/Q/M/S. 공백(빈 문자열)은 미분배."@ko .
+
+fp:Cycle_A a fp:DistributionCycle ; fp:code "A" ; rdfs:label "연간"@ko , "Annual"@en ; rdfs:comment "연 1회 분배."@ko .
+fp:Cycle_Q a fp:DistributionCycle ; fp:code "Q" ; rdfs:label "분기"@ko , "Quarterly"@en ; rdfs:comment "연 4회 분배 (1·4·7·10월 등)."@ko .
+fp:Cycle_M a fp:DistributionCycle ; fp:code "M" ; rdfs:label "월간"@ko , "Monthly"@en ; rdfs:comment "매월 분배. 월배당 ETF 질의 시 pd_dvid_cycl = 'M'."@ko .
+fp:Cycle_S a fp:DistributionCycle ; fp:code "S" ; rdfs:label "반기"@ko , "Semi-annual"@en ; rdfs:comment "연 2회 분배."@ko .
+
+# ----------------------------------------------------------------------------
+# 5. 관계 (Object Properties) — 런타임 그래프 빌더가 인스턴스 간에 생성
+# ----------------------------------------------------------------------------
+
+fp:managedBy a owl:ObjectProperty ;
+    rdfs:label "운용사"@ko , "managed by"@en ;
+    rdfs:comment "상품 → 자산운용사. ETF 의 manager_name, 펀드의 manager_name(상품명 접두어 추정)에서 생성. 역관계 fp:manages."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:ManagementCompany ;
+    owl:inverseOf fp:manages .
+
+fp:manages a owl:ObjectProperty ;
+    rdfs:label "운용 상품"@ko , "manages"@en ;
+    rdfs:comment "자산운용사 → 운용 상품 목록. fp:managedBy 의 역관계."@ko ;
+    rdfs:domain fp:ManagementCompany ; rdfs:range fp:Product ;
+    owl:inverseOf fp:managedBy .
+
+fp:issuedBy a owl:ObjectProperty ;
+    rdfs:label "발행기관"@ko , "issued by"@en ;
+    rdfs:comment "채권 → 발행기관(issuer_name). ETN 발행 증권사에도 사용 가능."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:Issuer .
+
+fp:hasAssetClass a owl:ObjectProperty ;
+    rdfs:label "자산군"@ko , "has asset class"@en ;
+    rdfs:comment "상품 → fp:AssetClass 개체. 한글(주식 등)/영문(Equity 등) 원천값을 동일 개체로 정규화."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:AssetClass .
+
+fp:investsInRegion a owl:ObjectProperty ;
+    rdfs:label "투자지역"@ko , "invests in region"@en ;
+    rdfs:comment "상품 → fp:Region 개체 (fp:Region_<slug>). 원천값 표기(한/영)를 그대로 보존하므로 미국 ETF 검색 시 fp:Region_미국 과 fp:Region_United_States_of_America 를 모두 고려."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:Region .
+
+fp:hasTheme a owl:ObjectProperty ;
+    rdfs:label "투자 테마"@ko , "has theme"@en ;
+    rdfs:comment "상품 → 테마. 상품명·기초지수·운용전략 텍스트를 테마 렉시콘으로 매칭해 생성 (규칙 기반이라 누락·오탐 가능)."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:Theme .
+
+fp:relatedTheme a owl:ObjectProperty , owl:SymmetricProperty ;
+    rdfs:label "연관 테마"@ko , "related theme"@en ;
+    rdfs:comment "테마 ↔ 테마 (예: AI ↔ 반도체). 렉시콘 related 목록에서 생성."@ko ;
+    rdfs:domain fp:Theme ; rdfs:range fp:Theme .
+
+fp:tracksIndex a owl:ObjectProperty ;
+    rdfs:label "추종 지수"@ko , "tracks index"@en ;
+    rdfs:comment "ETF → 기초지수 (cu_base_index, ref_base_index). 일부 종목만 지수가 수록되어 있어 부재가 곧 '지수 없음'을 뜻하지 않는다."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:Index .
+
+fp:hasBenchmark a owl:ObjectProperty ;
+    rdfs:label "벤치마크"@ko , "has benchmark"@en ;
+    rdfs:comment "펀드 → 벤치마크 지수 (bmrk_nm)."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range fp:Index .
+
+fp:hasConstituent a owl:ObjectProperty ;
+    rdfs:label "구성종목"@ko , "has constituent"@en ;
+    rdfs:comment "ETF → 구성종목 기업. 큐레이션 CSV(constituents/*.csv)에서 적재되며 전 종목이 아닌 일부 ETF 만 커버. 비중은 fp:weightPct 또는 fp:weight_<company> 로 기록. 역관계 fp:constituentOf."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:Company ;
+    owl:inverseOf fp:constituentOf .
+
+fp:constituentOf a owl:ObjectProperty ;
+    rdfs:label "편입 ETF"@ko , "constituent of"@en ;
+    rdfs:comment "기업 → 해당 기업을 편입한 ETF. fp:hasConstituent 의 역관계."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:Product ;
+    owl:inverseOf fp:hasConstituent .
+
+fp:subsidiaryOf a owl:ObjectProperty ;
+    rdfs:label "모회사"@ko , "subsidiary of"@en ;
+    rdfs:comment "기업 → 모회사. 역관계 fp:hasSubsidiary."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:Company ;
+    owl:inverseOf fp:hasSubsidiary .
+
+fp:hasSubsidiary a owl:ObjectProperty ;
+    rdfs:label "자회사"@ko , "has subsidiary"@en ;
+    rdfs:comment "기업 → 자회사. fp:subsidiaryOf 의 역관계."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:Company ;
+    owl:inverseOf fp:subsidiaryOf .
+
+fp:memberOfFamily a owl:ObjectProperty ;
+    rdfs:label "소속 펀드 패밀리"@ko , "member of family"@en ;
+    rdfs:comment "펀드 클래스 → 패밀리 (fund_family). 같은 패밀리의 클래스끼리만 보수 비교가 유효."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range fp:FundFamily .
+
+fp:dividendCycle a owl:ObjectProperty ;
+    rdfs:label "분배주기"@ko , "dividend cycle"@en ;
+    rdfs:comment "상품 → fp:DistributionCycle (fp:Cycle_A/Q/M/S)."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:DistributionCycle .
+
+# ----------------------------------------------------------------------------
+# 6. 공통 데이터 속성 (원천 테이블 비종속; 런타임 그래프 빌더가 사용)
+# ----------------------------------------------------------------------------
+
+fp:productCode a owl:DatatypeProperty ;
+    rdfs:label "상품코드"@ko , "product code"@en ;
+    rdfs:comment "상품 고유 식별자. 채권 pd_no(ISIN), 국내ETF pd_itm_no(ISIN), 해외ETF pd_itm_no(RIC), 펀드 itm_no."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:string .
+
+fp:name a owl:DatatypeProperty ;
+    rdfs:label "이름"@ko , "name"@en ;
+    rdfs:comment "개체의 대표 표시명. 국내ETF 는 약어명(pd_abrv_nm, 예: KODEX 로봇액티브)이 대표명."@ko ;
+    rdfs:range xsd:string .
+
+fp:shortName a owl:DatatypeProperty ;
+    rdfs:label "약어명"@ko , "short name"@en ;
+    rdfs:comment "상품 약어명 또는 보조 명칭 (해외ETF 는 티커)."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:string .
+
+fp:englishName a owl:DatatypeProperty ;
+    rdfs:label "영문명"@ko , "english name"@en ;
+    rdfs:range xsd:string .
+
+fp:productType a owl:DatatypeProperty ;
+    rdfs:label "상품유형"@ko , "product type"@en ;
+    rdfs:comment "국내채권 / 국내ETF / 국내ETN / 해외ETF / 해외ETN / 공모펀드 / 사모펀드."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:string .
+
+fp:isOnSale a owl:DatatypeProperty ;
+    rdfs:label "판매중 여부"@ko , "is on sale"@en ;
+    rdfs:comment "현재 매수 가능 여부. 채권 is_sellable, ETF/펀드 is_on_sale 을 boolean 으로 정규화."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:boolean .
+
+fp:baseDate a owl:DatatypeProperty ;
+    rdfs:label "기준일"@ko , "base date"@en ;
+    rdfs:comment "스냅샷 기준일. 채권·국내ETF·펀드 2026-08-21, 해외ETF 2026-08-22."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:date .
+
+fp:currency a owl:DatatypeProperty ;
+    rdfs:label "통화"@ko , "currency"@en ;
+    rdfs:comment "ISO 4217 통화코드 (KRW, USD)."@ko ;
+    rdfs:range xsd:string .
+
+fp:ticker a owl:DatatypeProperty ;
+    rdfs:label "티커"@ko , "ticker"@en ;
+    rdfs:comment "거래소 단축코드. 국내 6자리 숫자, 해외 영문 티커. 기업 개체도 보유 가능."@ko ;
+    rdfs:range xsd:string .
+
+fp:country a owl:DatatypeProperty ;
+    rdfs:label "국가"@ko , "country"@en ;
+    rdfs:comment "기업 소재 국가 (렉시콘 값, 예: KR, US)."@ko ;
+    rdfs:domain fp:Company ; rdfs:range xsd:string .
+
+fp:isListed a owl:DatatypeProperty ;
+    rdfs:label "상장 여부"@ko , "is listed"@en ;
+    rdfs:comment "기업의 상장 여부. 비상장 기업만 false 로 명시."@ko ;
+    rdfs:domain fp:Company ; rdfs:range xsd:boolean .
+
+fp:group a owl:DatatypeProperty ;
+    rdfs:label "금융그룹"@ko , "group"@en ;
+    rdfs:comment "운용사가 속한 금융그룹명 (예: 미래에셋, 삼성, KB)."@ko ;
+    rdfs:domain fp:ManagementCompany ; rdfs:range xsd:string .
+
+fp:weightPct a owl:DatatypeProperty ;
+    rdfs:label "편입비중"@ko , "weight (%)"@en ;
+    rdfs:comment "구성종목 편입비중 %. 큐레이션 CSV 기준."@ko ;
+    rdfs:range xsd:decimal ; fp:unit "%" .
+
+fp:asOf a owl:DatatypeProperty ;
+    rdfs:label "데이터 시점"@ko , "as of"@en ;
+    rdfs:comment "구성종목 등 보조 데이터의 수집 시점."@ko ;
+    rdfs:range xsd:date .
+
+fp:listingDate a owl:DatatypeProperty ;
+    rdfs:label "상장일"@ko , "listing date"@en ;
+    rdfs:domain fp:Product ; rdfs:range xsd:date .
+
+fp:maturityDate a owl:DatatypeProperty ;
+    rdfs:label "만기일"@ko , "maturity date"@en ;
+    rdfs:comment "채권 만기일. 영구채는 1차 콜행사개시일."@ko ;
+    rdfs:domain fp:Bond ; rdfs:range xsd:date .
+
+fp:leverageFactor a owl:DatatypeProperty ;
+    rdfs:label "레버리지 배수"@ko , "leverage factor"@en ;
+    rdfs:comment "1=일반, 2=2배 레버리지, -1=인버스, -2=곱버스, 3=3배. NULL 은 비레버리지로 해석."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:decimal .
+
+fp:netAssets a owl:DatatypeProperty ;
+    rdfs:label "순자산"@ko , "net assets"@en ;
+    rdfs:comment "순자산총액(KRW). 국내ETF pd_net_tamt, 펀드 fd_nast_suma."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:decimal ; fp:unit "KRW" .
+
+fp:aum a owl:DatatypeProperty ;
+    rdfs:label "운용자산(AUM)"@ko , "assets under management"@en ;
+    rdfs:comment "해외ETF du_last_aum (USD)."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:decimal ; fp:unit "USD" .
+
+fp:expenseRatio a owl:DatatypeProperty ;
+    rdfs:label "총보수율"@ko , "expense ratio"@en ;
+    rdfs:comment "연간 총보수 %. 해외ETF expense_ratio_pct 는 전 종목 수록, 국내ETF cu_charge_rt 는 18% 만 수록."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:decimal ; fp:unit "%" .
+
+fp:strategy a owl:DatatypeProperty ;
+    rdfs:label "운용전략"@ko , "strategy"@en ;
+    rdfs:comment "국내ETF cu_strtegy 원천 문자열 (실물복제/합성복제/액티브/C)."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:string .
+
+fp:bondKind a owl:DatatypeProperty ;
+    rdfs:label "채권종류"@ko , "bond kind"@en ;
+    rdfs:comment "예탁원 채권종류명 (bd_knd)."@ko ;
+    rdfs:domain fp:Bond ; rdfs:range xsd:string .
+
+fp:bondMidClass a owl:DatatypeProperty ;
+    rdfs:label "채권 중분류"@ko , "bond mid class"@en ;
+    rdfs:comment "회사채 / 특수채 / 국공채 (std_pd_mcls_nm) 문자열."@ko ;
+    rdfs:domain fp:Bond ; rdfs:range xsd:string .
+
+fp:tradingMarket a owl:DatatypeProperty ;
+    rdfs:label "거래시장"@ko , "trading market"@en ;
+    rdfs:comment "채권 거래구분 장내/장외 (pd_exg_mkt)."@ko ;
+    rdfs:domain fp:Bond ; rdfs:range xsd:string .
+
+fp:managementAttribute a owl:DatatypeProperty ;
+    rdfs:label "운용속성"@ko , "management attribute"@en ;
+    rdfs:comment "펀드 운용속성 or_attr_desc (주식형/채권형/재간접 ...)."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range xsd:string .
+
+fp:zeroinType a owl:DatatypeProperty ;
+    rdfs:label "제로인 소유형"@ko , "Zeroin type"@en ;
+    rdfs:comment "펀드평가사 제로인 소유형 zrin_ptn_nm."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range xsd:string .
+
+fp:isHedged a owl:DatatypeProperty ;
+    rdfs:label "환헤지 여부"@ko , "is FX hedged"@en ;
+    rdfs:comment "펀드 is_hedged (1/0) 를 boolean 으로 정규화. 클래스명 접미 (H) 와 일치."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range xsd:boolean .
+
+fp:isInverseOrShort a owl:DatatypeProperty ;
+    rdfs:label "인버스/숏 여부"@ko , "is inverse or short"@en ;
+    rdfs:comment "해외ETF cu_inverse_short_yn = 'Y' 인 경우 true."@ko ;
+    rdfs:domain fp:Product ; rdfs:range xsd:boolean .
+
+# ----------------------------------------------------------------------------
+# 7. SHACL 제약
+# ----------------------------------------------------------------------------
+
+fp:ProductShape a sh:NodeShape ;
+    sh:targetClass fp:Product ;
+    rdfs:label "상품 기본 제약"@ko ;
+    sh:property [
+        sh:path fp:productCode ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:message "모든 상품은 정확히 하나의 productCode 를 가져야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:name ;
+        sh:minCount 1 ;
+        sh:message "모든 상품은 최소 하나의 name 을 가져야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:managedBy ;
+        sh:class fp:ManagementCompany
+    ] ;
+    sh:property [
+        sh:path fp:investsInRegion ;
+        sh:class fp:Region
+    ] ;
+    sh:property [
+        sh:path fp:hasAssetClass ;
+        sh:class fp:AssetClass
+    ] .
+
+fp:RiskGradeShape a sh:NodeShape ;
+    sh:targetClass fp:RiskGrade ;
+    rdfs:label "위험등급 코드 제약"@ko ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:in ( "1" "2" "3" "4" "5" "6" ) ;
+        sh:message "위험등급 코드는 1~6 만 허용됩니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:gradeRank ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:datatype xsd:integer ;
+        sh:minInclusive 1 ; sh:maxInclusive 6
+    ] .
+
+fp:ManagementCompanyShape a sh:NodeShape ;
+    sh:targetClass fp:ManagementCompany ;
+    sh:property [
+        sh:path fp:name ;
+        sh:minCount 1
+    ] .

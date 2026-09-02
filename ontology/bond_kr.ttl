@@ -1,0 +1,508 @@
+# ============================================================================
+# bond_kr.ttl — 국내채권 마스터 (v_bond_kr / PRBD01N001) TBox
+#
+# 목적
+#   국내채권 뷰의 51개 컬럼을 fp:DomesticBond 의 속성으로 문서화하고, 신용등급·중분류·
+#   금리구분·이자지급구분·모집구분·거래구분 열거형을 개체로 선언한다.
+#   loader.py 는 fp:sourceTable "v_bond_kr" + fp:sourceColumn 을 가진 속성만 스키마 카드에
+#   포함하므로 모든 컬럼이 이 파일에 1:1 로 대응한다.
+#
+# TBox / ABox
+#   채권 인스턴스는 런타임에 SQLite v_bond_kr 로부터 생성된다 (d:bond/<pd_no>).
+#   이 파일에는 클래스·속성·열거형 개체·SHACL 만 있다.
+#
+# 데이터 특성 (2026-08-21 기준)
+#   - 총 21,882 종목 중 is_sellable = 1 (현재 매수 가능) 은 634 종목.
+#   - 매수가능 종목은 모두 장외(pd_exg_mkt='장외'), 매매채널 '온오프 겸용', buy_yield 존재.
+#   - 국공채는 신용등급(crd_grd) 이 NULL 이다 (무위험 취급). 등급 필터 시 NULL 처리에 유의.
+#   - 위험등급 코드 pd_risk_gcd 는 11~16 (= 1~6등급), 0 = 해당없음.
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+# ----------------------------------------------------------------------------
+# 1. 테이블 클래스
+# ----------------------------------------------------------------------------
+
+fp:DomesticBond a owl:Class ;
+    rdfs:subClassOf fp:Bond ;
+    rdfs:label "국내채권"@ko , "Domestic Bond"@en ;
+    rdfs:comment "국내에서 발행·유통되는 원화 채권. 원천 PRBD01N001 국내채권마스터 → 뷰 v_bond_kr. 21,882 종목 중 634 종목만 현재 매수 가능(is_sellable=1). 기준일 2026-08-21."@ko ;
+    fp:sourceTable "v_bond_kr" ;
+    fp:sourceId "PRBD01N001" .
+
+# ----------------------------------------------------------------------------
+# 2. 열거형 클래스 및 개체
+# ----------------------------------------------------------------------------
+
+# 2.1 신용등급 (AAA=1 최우량 ... D=20). IRI 에 +/- 를 쓸 수 없어 plus/minus/0 으로 표기.
+fp:CreditGrade a owl:Class ;
+    rdfs:label "신용등급"@ko , "Credit Grade"@en ;
+    rdfs:comment "국내 신용평가사 회사채 등급 체계. AAA~BBB- 는 투자등급, BB+ 이하는 투기등급. fp:gradeRank 가 작을수록 우량. 국공채는 등급이 부여되지 않는다(NULL)."@ko .
+
+fp:CreditGrade_AAA      a fp:CreditGrade ; fp:code "AAA"  ; fp:gradeRank 1  ; rdfs:label "AAA"@ko  ; rdfs:comment "최우량 등급. 원리금 지급능력 최고 수준."@ko .
+fp:CreditGrade_AAplus   a fp:CreditGrade ; fp:code "AA+"  ; fp:gradeRank 2  ; rdfs:label "AA+"@ko .
+fp:CreditGrade_AA0      a fp:CreditGrade ; fp:code "AA0"  ; fp:gradeRank 3  ; rdfs:label "AA0"@ko  ; rdfs:comment "원천 표기는 'AA0' (AA 플랫). 'AA' 로 검색하면 매칭되지 않는다."@ko .
+fp:CreditGrade_AAminus  a fp:CreditGrade ; fp:code "AA-"  ; fp:gradeRank 4  ; rdfs:label "AA-"@ko .
+fp:CreditGrade_Aplus    a fp:CreditGrade ; fp:code "A+"   ; fp:gradeRank 5  ; rdfs:label "A+"@ko .
+fp:CreditGrade_A0       a fp:CreditGrade ; fp:code "A0"   ; fp:gradeRank 6  ; rdfs:label "A0"@ko .
+fp:CreditGrade_Aminus   a fp:CreditGrade ; fp:code "A-"   ; fp:gradeRank 7  ; rdfs:label "A-"@ko .
+fp:CreditGrade_BBBplus  a fp:CreditGrade ; fp:code "BBB+" ; fp:gradeRank 8  ; rdfs:label "BBB+"@ko .
+fp:CreditGrade_BBB0     a fp:CreditGrade ; fp:code "BBB0" ; fp:gradeRank 9  ; rdfs:label "BBB0"@ko .
+fp:CreditGrade_BBBminus a fp:CreditGrade ; fp:code "BBB-" ; fp:gradeRank 10 ; rdfs:label "BBB-"@ko ; rdfs:comment "투자등급 하한."@ko .
+fp:CreditGrade_BBplus   a fp:CreditGrade ; fp:code "BB+"  ; fp:gradeRank 11 ; rdfs:label "BB+"@ko  ; rdfs:comment "투기등급 상한 (하이일드)."@ko .
+fp:CreditGrade_BB0      a fp:CreditGrade ; fp:code "BB0"  ; fp:gradeRank 12 ; rdfs:label "BB0"@ko .
+fp:CreditGrade_BBminus  a fp:CreditGrade ; fp:code "BB-"  ; fp:gradeRank 13 ; rdfs:label "BB-"@ko .
+fp:CreditGrade_Bplus    a fp:CreditGrade ; fp:code "B+"   ; fp:gradeRank 14 ; rdfs:label "B+"@ko .
+fp:CreditGrade_B0       a fp:CreditGrade ; fp:code "B0"   ; fp:gradeRank 15 ; rdfs:label "B0"@ko .
+fp:CreditGrade_Bminus   a fp:CreditGrade ; fp:code "B-"   ; fp:gradeRank 16 ; rdfs:label "B-"@ko .
+fp:CreditGrade_CCC      a fp:CreditGrade ; fp:code "CCC"  ; fp:gradeRank 17 ; rdfs:label "CCC"@ko .
+fp:CreditGrade_CC       a fp:CreditGrade ; fp:code "CC"   ; fp:gradeRank 18 ; rdfs:label "CC"@ko .
+fp:CreditGrade_C0       a fp:CreditGrade ; fp:code "C0"   ; fp:gradeRank 19 ; rdfs:label "C0"@ko .
+fp:CreditGrade_D        a fp:CreditGrade ; fp:code "D"    ; fp:gradeRank 20 ; rdfs:label "D"@ko ; rdfs:comment "채무불이행."@ko .
+
+# 2.2 채권 중분류
+fp:BondMidClass a owl:Class ;
+    rdfs:label "채권 중분류"@ko , "Bond Mid Class"@en ;
+    rdfs:comment "표준상품 중분류 std_pd_mcls_nm. 회사채 / 특수채 / 국공채."@ko .
+
+fp:BondMidClass_회사채 a fp:BondMidClass ; fp:code "회사채" ; fp:gradeRank 3 ; rdfs:label "회사채"@ko ; rdfs:comment "일반 기업 발행. 신용등급 존재."@ko .
+fp:BondMidClass_특수채 a fp:BondMidClass ; fp:code "특수채" ; fp:gradeRank 2 ; rdfs:label "특수채"@ko ; rdfs:comment "공사·특수은행 등 특별법인 발행 (공사채, 특수은행채, 지역개발 등)."@ko .
+fp:BondMidClass_국공채 a fp:BondMidClass ; fp:code "국공채" ; fp:gradeRank 1 ; rdfs:label "국공채"@ko ; rdfs:comment "국고채·국민주택·지방채·통안채 등. 신용등급(crd_grd) NULL."@ko .
+
+# 2.3 채권 소분류
+fp:BondSubClass a owl:Class ;
+    rdfs:label "채권 소분류"@ko , "Bond Sub Class"@en ;
+    rdfs:comment "표준상품 소분류 std_pd_scls_nm. 13개 값."@ko .
+
+fp:BondSubClass_일반사채   a fp:BondSubClass ; fp:code "일반사채"   ; rdfs:label "일반사채"@ko .
+fp:BondSubClass_공사채     a fp:BondSubClass ; fp:code "공사채"     ; rdfs:label "공사채"@ko .
+fp:BondSubClass_지역개발   a fp:BondSubClass ; fp:code "지역개발"   ; rdfs:label "지역개발"@ko .
+fp:BondSubClass_특수은행채 a fp:BondSubClass ; fp:code "특수은행채" ; rdfs:label "특수은행채"@ko .
+fp:BondSubClass_은행채     a fp:BondSubClass ; fp:code "은행채"     ; rdfs:label "은행채"@ko .
+fp:BondSubClass_도시철도   a fp:BondSubClass ; fp:code "도시철도"   ; rdfs:label "도시철도"@ko .
+fp:BondSubClass_국고채     a fp:BondSubClass ; fp:code "국고채"     ; rdfs:label "국고채"@ko .
+fp:BondSubClass_국민주택   a fp:BondSubClass ; fp:code "국민주택"   ; rdfs:label "국민주택"@ko .
+fp:BondSubClass_공모지방채 a fp:BondSubClass ; fp:code "공모지방채" ; rdfs:label "공모지방채"@ko .
+fp:BondSubClass_중앙은행채 a fp:BondSubClass ; fp:code "중앙은행채" ; rdfs:label "중앙은행채"@ko ; rdfs:comment "통화안정증권."@ko .
+fp:BondSubClass_기타사채   a fp:BondSubClass ; fp:code "기타사채"   ; rdfs:label "기타사채"@ko .
+fp:BondSubClass_기타국채   a fp:BondSubClass ; fp:code "기타국채"   ; rdfs:label "기타국채"@ko .
+fp:BondSubClass_물가채     a fp:BondSubClass ; fp:code "물가채"     ; rdfs:label "물가채"@ko ; rdfs:comment "물가연동국고채."@ko .
+
+# 2.4 모집구분
+fp:BondOfferingType a owl:Class ;
+    rdfs:label "모집구분"@ko , "Bond Offering Type"@en ;
+    rdfs:comment "bd_ofr_tcd. 공모 / 사모."@ko .
+
+fp:BondOfferingType_공모 a fp:BondOfferingType ; fp:code "공모" ; rdfs:label "공모"@ko .
+fp:BondOfferingType_사모 a fp:BondOfferingType ; fp:code "사모" ; rdfs:label "사모"@ko .
+
+# 2.5 금리구분
+fp:BondRateType a owl:Class ;
+    rdfs:label "금리구분"@ko , "Bond Rate Type"@en ;
+    rdfs:comment "bd_inrt_tcd. 고정금리 / 변동금리 / 고정+변동금리."@ko .
+
+fp:BondRateType_고정금리     a fp:BondRateType ; fp:code "고정금리"      ; rdfs:label "고정금리"@ko .
+fp:BondRateType_변동금리     a fp:BondRateType ; fp:code "변동금리"      ; rdfs:label "변동금리"@ko .
+fp:BondRateType_고정_변동금리 a fp:BondRateType ; fp:code "고정+변동금리" ; rdfs:label "고정+변동금리"@ko ; rdfs:comment "원천 표기는 '고정+변동금리' (플러스 기호 포함)."@ko .
+
+# 2.6 이자지급구분
+fp:BondInterestPaymentType a owl:Class ;
+    rdfs:label "이자지급구분"@ko , "Bond Interest Payment Type"@en ;
+    rdfs:comment "bd_intp_tcd. 이표채 / 복리채 / 할인채 / 단리채."@ko .
+
+fp:BondInterestPaymentType_이표채 a fp:BondInterestPaymentType ; fp:code "이표채" ; rdfs:label "이표채"@ko ; rdfs:comment "정기 이자 지급 (주로 3개월)."@ko .
+fp:BondInterestPaymentType_복리채 a fp:BondInterestPaymentType ; fp:code "복리채" ; rdfs:label "복리채"@ko ; rdfs:comment "만기 일시 복리 지급."@ko .
+fp:BondInterestPaymentType_할인채 a fp:BondInterestPaymentType ; fp:code "할인채" ; rdfs:label "할인채"@ko ; rdfs:comment "선이자 할인 발행."@ko .
+fp:BondInterestPaymentType_단리채 a fp:BondInterestPaymentType ; fp:code "단리채" ; rdfs:label "단리채"@ko .
+
+# 2.7 거래구분
+fp:BondTradingMarket a owl:Class ;
+    rdfs:label "거래구분"@ko , "Bond Trading Market"@en ;
+    rdfs:comment "pd_exg_mkt. 장내 / 장외. 매수가능 종목(is_sellable=1)은 모두 장외."@ko .
+
+fp:BondTradingMarket_장내 a fp:BondTradingMarket ; fp:code "장내" ; rdfs:label "장내"@ko ; rdfs:comment "거래소 소액채권시장. exg_close_price / exg_close_yield 존재."@ko .
+fp:BondTradingMarket_장외 a fp:BondTradingMarket ; fp:code "장외" ; rdfs:label "장외"@ko ; rdfs:comment "당사 창구·온라인 장외 매매. buy_yield / trade_price 기준."@ko .
+
+# ----------------------------------------------------------------------------
+# 3. 컬럼 속성 (v_bond_kr) — 식별/명칭
+# ----------------------------------------------------------------------------
+
+fp:bondProductNo a owl:DatatypeProperty ;
+    rdfs:label "채권종목번호(ISIN)"@ko ;
+    rdfs:comment "상품번호 = 채권 ISIN (KR 로 시작). 기본키."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productCode ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_no" .
+
+fp:bondName a owl:DatatypeProperty ;
+    rdfs:label "상품명"@ko ;
+    rdfs:comment "채권 정식 명칭 (예: 국고03000-3406(24-4), 한국전력1234)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:name ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_nm" .
+
+fp:bondShortName a owl:DatatypeProperty ;
+    rdfs:label "약어명"@ko ;
+    rdfs:comment "채권 약어명."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:shortName ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_abrv_nm" .
+
+fp:bondEnglishName a owl:DatatypeProperty ;
+    rdfs:label "영문명"@ko ;
+    rdfs:comment "채권 영문 명칭. 일부 종목만 수록."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:englishName ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_eng_nm" .
+
+fp:bondProductType a owl:DatatypeProperty ;
+    rdfs:label "상품유형"@ko ;
+    rdfs:comment "항상 '국내채권'."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productType ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "product_type" .
+
+# ----------------------------------------------------------------------------
+# 4. 거래 가능성
+# ----------------------------------------------------------------------------
+
+fp:hasBondTradingMarket a owl:ObjectProperty ;
+    rdfs:label "거래구분"@ko ;
+    rdfs:comment "장내/장외. 매수가능(is_sellable=1) 종목은 전부 장외이며 장내 종목은 참고용 시세만 제공."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondTradingMarket ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_exg_mkt" .
+
+fp:bondIsSellable a owl:DatatypeProperty ;
+    rdfs:label "현재 매수가능 여부"@ko ;
+    rdfs:comment "1 = 현재 당사에서 매수 가능, 0 = 불가. 21,882 종목 중 634 종목만 1. 매수가능 종목은 장외·'온오프 겸용'·buy_yield 존재. 추천/매수 질의는 반드시 is_sellable = 1 조건을 건다."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "is_sellable" .
+
+fp:bondTradableChannel a owl:DatatypeProperty ;
+    rdfs:label "매매가능채널"@ko ;
+    rdfs:comment "매수가능 종목의 채널명. 값은 '온오프 겸용' 단일값, 매수불가 종목은 NULL."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bdbns_abl_chnl_nm" .
+
+# ----------------------------------------------------------------------------
+# 5. 발행자 / 분류
+# ----------------------------------------------------------------------------
+
+fp:bondIssuerName a owl:DatatypeProperty ;
+    rdfs:label "발행기관"@ko ;
+    rdfs:comment "발행기관명 (예: 대한민국정부, 한국전력공사, 신한은행). 런타임에 fp:issuedBy → fp:Issuer 개체로 연결."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "issuer_name" .
+
+fp:bondKindName a owl:DatatypeProperty ;
+    rdfs:label "채권종류명(예탁원)"@ko ;
+    rdfs:comment "예탁결제원 채권종류: 국고채권, 국민주택1종, 일반회사채, 할부금융채, 신용카드채, MBS, 특수은행채, 통화안정증권, 지방채 등. 중분류보다 세밀하고 값이 많아 LIKE 검색 권장."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:bondKind ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_knd" .
+
+fp:hasBondMidClass a owl:ObjectProperty ;
+    rdfs:label "채권 중분류"@ko ;
+    rdfs:comment "회사채 / 특수채 / 국공채. '국채', '공사채' 등 자연어는 이 중분류 또는 소분류(std_pd_scls_nm)로 매핑."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondMidClass ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "std_pd_mcls_nm" .
+
+fp:hasBondSubClass a owl:ObjectProperty ;
+    rdfs:label "채권 소분류"@ko ;
+    rdfs:comment "일반사채, 공사채, 지역개발, 특수은행채, 은행채, 도시철도, 국고채, 국민주택, 공모지방채, 중앙은행채, 기타사채, 기타국채, 물가채."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondSubClass ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "std_pd_scls_nm" .
+
+fp:hasBondOfferingType a owl:ObjectProperty ;
+    rdfs:label "모집구분"@ko ;
+    rdfs:comment "공모 / 사모."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondOfferingType ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_ofr_tcd" .
+
+fp:hasBondRateType a owl:ObjectProperty ;
+    rdfs:label "금리구분"@ko ;
+    rdfs:comment "고정금리 / 변동금리 / 고정+변동금리."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondRateType ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_inrt_tcd" .
+
+fp:hasBondInterestPaymentType a owl:ObjectProperty ;
+    rdfs:label "이자지급구분"@ko ;
+    rdfs:comment "이표채 / 복리채 / 할인채 / 단리채. 정기적 현금흐름을 원하면 이표채."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:BondInterestPaymentType ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_intp_tcd" .
+
+# ----------------------------------------------------------------------------
+# 6. 신용 / 위험
+# ----------------------------------------------------------------------------
+
+fp:hasCreditGrade a owl:ObjectProperty ;
+    rdfs:label "적용신용등급"@ko ;
+    rdfs:comment "적용 신용등급 (AAA ~ D). 국공채는 NULL 이므로 '안전한 채권' 질의는 crd_grd IS NULL(국공채) 와 상위등급을 함께 고려. 'AA 이상' 은 AAA, AA+, AA0, AA-."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range fp:CreditGrade ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "crd_grd" .
+
+fp:bondCreditGradeDate a owl:DatatypeProperty ;
+    rdfs:label "신용등급 적용일"@ko ;
+    rdfs:comment "적용신용등급의 평가 기준일 (ISO 날짜). 국공채는 NULL."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:date ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "crd_grd_dt" .
+
+fp:bondRiskGradeName a owl:DatatypeProperty ;
+    rdfs:label "위험등급명"@ko ;
+    rdfs:comment "상품 위험등급 표시명 (예: '낮은위험(5등급)', '매우낮은위험(6등급)'). 숫자 비교는 pd_risk_gcd 사용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_risk_nm" .
+
+fp:bondRiskGradeCode a owl:DatatypeProperty ;
+    rdfs:label "위험등급코드"@ko ;
+    rdfs:comment "11~16 = 1~6등급 (11=매우높은위험 1등급, 16=매우낮은위험 6등급), 0 = 해당없음. 등급 숫자 = pd_risk_gcd - 10. ETF/펀드의 risk_grade(1~6)와 직접 비교 금지."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_risk_gcd" .
+
+# ----------------------------------------------------------------------------
+# 7. 발행 조건
+# ----------------------------------------------------------------------------
+
+fp:bondCurrency a owl:DatatypeProperty ;
+    rdfs:label "통화"@ko ;
+    rdfs:comment "항상 KRW."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:currency ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "curr_cd" .
+
+fp:bondCouponRate a owl:DatatypeProperty ;
+    rdfs:label "표면이자율"@ko ;
+    rdfs:comment "액면 기준 연 표면금리 %. 실제 투자수익률은 buy_yield / after_tax_yield 를 사용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "srfc_irt" .
+
+fp:bondIssueDate a owl:DatatypeProperty ;
+    rdfs:label "발행일"@ko ;
+    rdfs:comment "ISO 날짜 (YYYY-MM-DD)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:date ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "isu_date" .
+
+fp:bondMaturityDate a owl:DatatypeProperty ;
+    rdfs:label "만기일"@ko ;
+    rdfs:comment "ISO 날짜. 영구채(신종자본증권)는 1차 콜행사개시일이 들어 있다. '1년 이내 만기' 질의는 remaining_days <= 365 가 더 안전."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:maturityDate ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "mat_date" .
+
+fp:bondRemainingDays a owl:DatatypeProperty ;
+    rdfs:label "잔존일수"@ko ;
+    rdfs:comment "기준일부터 만기일까지 일수."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:integer ; fp:unit "일" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "remaining_days" .
+
+fp:bondRemainingYears a owl:DatatypeProperty ;
+    rdfs:label "잔존년수"@ko ;
+    rdfs:comment "잔존만기 년 (소수). 단기(≤1), 중기(1~5), 장기(>5) 구분에 사용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "년" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "remaining_years" .
+
+fp:bondTotalIssueAmount a owl:DatatypeProperty ;
+    rdfs:label "총발행금액"@ko ;
+    rdfs:comment "발행 총액 (원)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_tisu_a" .
+
+fp:bondIssueBalance a owl:DatatypeProperty ;
+    rdfs:label "발행잔액"@ko ;
+    rdfs:comment "상환 후 미상환 잔액 (원)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "isu_bal_amt" .
+
+# ----------------------------------------------------------------------------
+# 8. 수익률
+# ----------------------------------------------------------------------------
+
+fp:bondAppliedYield a owl:DatatypeProperty ;
+    rdfs:label "민평수익률"@ko ;
+    rdfs:comment "민간 채권평가사 평균 수익률 %. 매수 불가 종목에도 대부분 존재하여 시장 비교용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "applied_yield" .
+
+fp:bondBuyYield a owl:DatatypeProperty ;
+    rdfs:label "매수수익률"@ko ;
+    rdfs:comment "당사 매수 시 세전 만기수익률 %. 매수가능 종목(is_sellable=1)만 수록, 나머지 NULL. '수익률 높은 채권 추천' 의 1차 정렬 기준."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "buy_yield" .
+
+fp:bondAfterTaxYield a owl:DatatypeProperty ;
+    rdfs:label "개인 세후 운용수익률"@ko ;
+    rdfs:comment "개인 투자자 세후(15.4%) 운용수익률 %. 매수가능 종목만."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "after_tax_yield" .
+
+fp:bondPrefTaxYield a owl:DatatypeProperty ;
+    rdfs:label "세금우대 세후수익률"@ko ;
+    rdfs:comment "세금우대 계좌 기준 세후수익률 %. 매수가능 종목만."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pref_tax_yield" .
+
+fp:bondAvgAnnualAfterTaxYield a owl:DatatypeProperty ;
+    rdfs:label "세후 연평균수익률"@ko ;
+    rdfs:comment "보유기간 세후 수익을 연평균으로 환산한 % (단리 개념)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "avg_annual_tax_yield" .
+
+fp:bondCorpPretaxYield a owl:DatatypeProperty ;
+    rdfs:label "법인 세전수익률"@ko ;
+    rdfs:comment "법인 투자자 세전 수익률 %."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "corp_pretax_yield" .
+
+fp:bondCorpAfterTaxYield a owl:DatatypeProperty ;
+    rdfs:label "법인 세후수익률"@ko ;
+    rdfs:comment "법인 투자자 세후 수익률 %."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "corp_after_tax_yield" .
+
+fp:bondDepositEquivYield154 a owl:DatatypeProperty ;
+    rdfs:label "예금환산수익률(세율 15.4%)"@ko ;
+    rdfs:comment "일반과세(15.4%) 기준 동일 세후수익을 내는 은행 예금금리 %. '예금 대비' 비교 질의에 사용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "depo_equiv_yield_154" .
+
+fp:bondDepositEquivYield495 a owl:DatatypeProperty ;
+    rdfs:label "은행환산수익률(세율 49.5%)"@ko ;
+    rdfs:comment "금융소득종합과세 최고세율(49.5%) 가정 시 환산 예금금리 %. 고액자산가 비교용."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "depo_equiv_yield_495" .
+
+# ----------------------------------------------------------------------------
+# 9. 가격 / 수량 / 리스크 지표
+# ----------------------------------------------------------------------------
+
+fp:bondTradePrice a owl:DatatypeProperty ;
+    rdfs:label "매매단가"@ko ;
+    rdfs:comment "액면 10,000원 기준 매매단가 (원). 10,000 미만이면 할인 매수."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "trade_price" .
+
+fp:bondBuyableQuantity a owl:DatatypeProperty ;
+    rdfs:label "매수가능수량"@ko ;
+    rdfs:comment "현재 매수 가능한 수량 (액면 단위). 매수가능 종목만."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "buyable_quantity" .
+
+fp:bondEvalPrice a owl:DatatypeProperty ;
+    rdfs:label "평가단가(Clean)"@ko ;
+    rdfs:comment "경과이자를 제외한 평가단가, 액면 10,000 기준 (원)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "eval_price" .
+
+fp:bondDirtyPrice a owl:DatatypeProperty ;
+    rdfs:label "이자부단가(Dirty)"@ko ;
+    rdfs:comment "경과이자를 포함한 단가, 액면 10,000 기준 (원)."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "dirty" .
+
+fp:bondDuration a owl:DatatypeProperty ;
+    rdfs:label "듀레이션"@ko ;
+    rdfs:comment "수정 듀레이션 (년). 금리 1%p 변동 시 가격 변동률 근사치. 금리 민감도 낮은 채권 = 듀레이션 작음."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "년" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "dur" .
+
+fp:bondConvexity a owl:DatatypeProperty ;
+    rdfs:label "컨벡시티"@ko ;
+    rdfs:comment "볼록성. 듀레이션의 2차 보정치, 무단위."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "cov" .
+
+fp:bondExchangeClosePrice a owl:DatatypeProperty ;
+    rdfs:label "장내 종가"@ko ;
+    rdfs:comment "거래소 채권시장 종가 (원, 액면 10,000 기준). 장내 종목만 수록."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "exg_close_price" .
+
+fp:bondExchangeCloseYield a owl:DatatypeProperty ;
+    rdfs:label "장내 종가수익률"@ko ;
+    rdfs:comment "거래소 종가 기준 수익률 %. 장내 종목만 수록."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "exg_close_yield" .
+
+fp:bondGuaranteedYield a owl:DatatypeProperty ;
+    rdfs:label "만기보장수익률"@ko ;
+    rdfs:comment "만기 시 보장되는 수익률 % (주로 전환사채·복리채). 일부 종목만 수록."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "exrt_grte_ern_r" .
+
+fp:bondRedemptionRate a owl:DatatypeProperty ;
+    rdfs:label "만기상환율"@ko ;
+    rdfs:comment "액면 대비 만기상환율 % (100 = 액면상환). 일부 종목만 수록."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "exrt_rpy_r" .
+
+fp:bondPensionEligible a owl:DatatypeProperty ;
+    rdfs:label "퇴직연금 편입 가능 여부"@ko ;
+    rdfs:comment "Y = 퇴직연금(DC/IRP) 계좌 편입 가능, N = 불가."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_pen_tr_yn" .
+
+fp:bondBaseDate a owl:DatatypeProperty ;
+    rdfs:label "기준일"@ko ;
+    rdfs:comment "스냅샷 기준일 2026-08-21. 모든 시세·수익률은 이 날짜 기준."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:baseDate ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "base_date" .
+
+# ----------------------------------------------------------------------------
+# 10. SHACL 제약
+# ----------------------------------------------------------------------------
+
+fp:DomesticBondShape a sh:NodeShape ;
+    sh:targetClass fp:DomesticBond ;
+    rdfs:label "국내채권 제약"@ko ;
+    sh:property [
+        sh:path fp:hasCreditGrade ;
+        sh:maxCount 1 ;
+        sh:class fp:CreditGrade ;
+        sh:in ( fp:CreditGrade_AAA fp:CreditGrade_AAplus fp:CreditGrade_AA0 fp:CreditGrade_AAminus
+                fp:CreditGrade_Aplus fp:CreditGrade_A0 fp:CreditGrade_Aminus
+                fp:CreditGrade_BBBplus fp:CreditGrade_BBB0 fp:CreditGrade_BBBminus
+                fp:CreditGrade_BBplus fp:CreditGrade_BB0 fp:CreditGrade_BBminus
+                fp:CreditGrade_Bplus fp:CreditGrade_B0 fp:CreditGrade_Bminus
+                fp:CreditGrade_CCC fp:CreditGrade_CC fp:CreditGrade_C0 fp:CreditGrade_D ) ;
+        sh:message "신용등급은 존재하는 경우 fp:CreditGrade 개체 중 하나여야 합니다 (국공채는 없음)."@ko
+    ] ;
+    sh:property [
+        sh:path fp:bondCouponRate ;
+        sh:datatype xsd:decimal ;
+        sh:minInclusive 0 ;
+        sh:message "표면이자율은 0 이상이어야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:bondRiskGradeCode ;
+        sh:in ( 0 11 12 13 14 15 16 ) ;
+        sh:message "채권 위험등급코드는 0 또는 11~16 이어야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:hasBondMidClass ;
+        sh:class fp:BondMidClass ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:bondMaturityDate ;
+        sh:datatype xsd:date ;
+        sh:maxCount 1
+    ] .
+
+fp:CreditGradeShape a sh:NodeShape ;
+    sh:targetClass fp:CreditGrade ;
+    sh:property [
+        sh:path fp:gradeRank ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:minInclusive 1 ; sh:maxInclusive 20
+    ] ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1
+    ] .
