@@ -30,25 +30,25 @@
 - id: cambricon
   name_ko: 캠브리콘
   name_en: Cambricon Technologies
-  aliases: [캠브리콘, 캄브리콘, 캠브리콘테크놀로지, Cambricon, Cambricon Technologies Corp Ltd, 寒武纪, "688256"]
+  aliases: [캠브리콘, 캄브리콘, 캠브리콘테크놀로지, 한무기, 한무기과기, Cambricon, Cambricon Technologies Corp Ltd, 寒武纪, "688256"]
   tickers: ["688256"]
   country: CN
 - id: smic
   name_ko: SMIC(중신궈지)
   name_en: Semiconductor Manufacturing International Corp
-  aliases: [SMIC, 중신궈지, 중심국제, 中芯国际, "0981", "688981"]
+  aliases: [SMIC, 중신궈지, 중심국제, 중신국제, 中芯国际, "0981", "688981"]
   tickers: ["0981", "688981"]
   country: CN
 - id: hua_hong
   name_ko: 화훙반도체
   name_en: Hua Hong Semiconductor
-  aliases: [화훙, 화홍반도체, Hua Hong, "1347"]
+  aliases: [화훙, 화홍반도체, 화훙반도체, 화홍, Hua Hong, "1347"]
   tickers: ["1347"]
   country: CN
 - id: naura
   name_ko: 나우라
   name_en: NAURA Technology Group
-  aliases: [나우라, NAURA, 北方华创, "002371"]
+  aliases: [나우라, 북방화창, NAURA, 北方华创, "002371"]
   tickers: ["002371"]
   country: CN
 - id: samsung_elec
@@ -337,3 +337,222 @@
   aliases: [마이크로스트래티지, 스트래티지, MicroStrategy, Strategy Inc, MSTR]
   tickers: [MSTR]
   country: US
+- id: posco_holdings
+  name_ko: POSCO홀딩스
+  name_en: POSCO Holdings
+  aliases: [POSCO홀딩스, 포스코홀딩스, 포스코, "005490"]
+  tickers: ["005490"]
+  country: KR
+- id: lg_chem
+  name_ko: LG화학
+  name_en: LG Chem
+  aliases: [LG화학, "051910"]
+  tickers: ["051910"]
+  country: KR
+- id: sk_innovation
+  name_ko: SK이노베이션
+  name_en: SK Innovation
+  aliases: [SK이노베이션, SK이노, "096770"]
+  tickers: ["096770"]
+  country: KR
+- id: sk_on
+  name_ko: SK온
+  name_en: SK On
+  aliases: [SK온, SK On]
+  tickers: []
+  parent: sk_innovation
+  country: KR
+  not_listed: true
+- id: samsung_em
+  name_ko: 삼성전기
+  name_en: Samsung Electro-Mechanics
+  aliases: [삼성전기, "009150"]
+  tickers: ["009150"]
+  country: KR
+- id: sk_square
+  name_ko: SK스퀘어
+  name_en: SK Square
+  aliases: [SK스퀘어, "402340"]
+  tickers: ["402340"]
+  country: KR
+- id: hyundai_mobis
+  name_ko: 현대모비스
+  name_en: Hyundai Mobis
+  aliases: [현대모비스, "012330"]
+  tickers: ["012330"]
+  country: KR
+- id: hana_fg
+  name_ko: 하나금융지주
+  name_en: Hana Financial Group
+  aliases: [하나금융지주, 하나금융, "086790"]
+  tickers: ["086790"]
+  country: KR
+- id: woori_fg
+  name_ko: 우리금융지주
+  name_en: Woori Financial Group
+  aliases: [우리금융지주, 우리금융, "316140"]
+  tickers: ["316140"]
+  country: KR
+- id: samsung_fire
+  name_ko: 삼성화재
+  name_en: Samsung Fire & Marine Insurance
+  aliases: [삼성화재, "000810"]
+  tickers: ["000810"]
+  country: KR
+- id: samsung_life
+  name_ko: 삼성생명
+  name_en: Samsung Life Insurance
+  aliases: [삼성생명, "032830"]
+  tickers: ["032830"]
+  country: KR
+- id: lg_elec
+  name_ko: LG전자
+  name_en: LG Electronics
+  aliases: [LG전자, "066570"]
+  tickers: ["066570"]
+  country: KR
+- id: hd_hyundai_electric
+  name_ko: HD현대일렉트릭
+  name_en: HD Hyundai Electric
+  aliases: [HD현대일렉트릭, 현대일렉트릭, "267260"]
+  tickers: ["267260"]
+  country: KR
+- id: samsung_cnt
+  name_ko: 삼성물산
+  name_en: Samsung C&T
+  aliases: [삼성물산, "028260"]
+  tickers: ["028260"]
+  country: KR
+- id: samsung_bio
+  name_ko: 삼성바이오로직스
+  name_en: Samsung Biologics
+  aliases: [삼성바이오로직스, 삼성바이오, "207940"]
+  tickers: ["207940"]
+  country: KR
+- id: ls_electric
+  name_ko: LS ELECTRIC
+  name_en: LS Electric
+  aliases: [LS ELECTRIC, LS일렉트릭, LS산전, "010120"]
+  tickers: ["010120"]
+  country: KR
+- id: sk_holdings
+  name_ko: SK(주)
+  name_en: SK Inc
+  aliases: [SK(주), SK주식회사, "034730"]
+  tickers: ["034730"]
+  country: KR
+- id: hd_ksoe
+  name_ko: HD한국조선해양
+  name_en: HD Korea Shipbuilding & Offshore Engineering
+  aliases: [HD한국조선해양, 한국조선해양, "009540"]
+  tickers: ["009540"]
+  country: KR
+- id: ktng
+  name_ko: KT&G
+  name_en: KT&G
+  aliases: [KT&G, 케이티앤지, "033780"]
+  tickers: ["033780"]
+  country: KR
+- id: hyosung_heavy
+  name_ko: 효성중공업
+  name_en: Hyosung Heavy Industries
+  aliases: [효성중공업, "298040"]
+  tickers: ["298040"]
+  country: KR
+- id: sk_telecom
+  name_ko: SK텔레콤
+  name_en: SK Telecom
+  aliases: [SK텔레콤, SKT, "017670"]
+  tickers: ["017670"]
+  country: KR
+- id: db_insurance
+  name_ko: DB손해보험
+  name_en: DB Insurance
+  aliases: [DB손해보험, DB손보, "005830"]
+  tickers: ["005830"]
+  country: KR
+- id: lg_innotek
+  name_ko: LG이노텍
+  name_en: LG Innotek
+  aliases: [LG이노텍, "011070"]
+  tickers: ["011070"]
+  country: KR
+- id: lam_research
+  name_ko: 램리서치
+  name_en: Lam Research
+  aliases: [램 리서치, 램리서치, Lam Research, LRCX]
+  tickers: [LRCX]
+  country: US
+- id: cisco
+  name_ko: 시스코
+  name_en: Cisco Systems
+  aliases: [시스코 시스템즈, 시스코, Cisco, CSCO]
+  tickers: [CSCO]
+  country: US
+- id: applied_materials
+  name_ko: 어플라이드머티어리얼즈
+  name_en: Applied Materials
+  aliases: [어플라이드 머티어리얼즈, 어플라이드머티리얼즈, Applied Materials, AMAT]
+  tickers: [AMAT]
+  country: US
+- id: eli_lilly
+  name_ko: 일라이릴리
+  name_en: Eli Lilly
+  aliases: [일라이 릴리, 일라이릴리, Eli Lilly, LLY]
+  tickers: [LLY]
+  country: US
+- id: hanwha_systems
+  name_ko: 한화시스템
+  name_en: Hanwha Systems
+  aliases: [한화시스템, "272210"]
+  tickers: ["272210"]
+  country: KR
+- id: hyundai_glovis
+  name_ko: 현대글로비스
+  name_en: Hyundai Glovis
+  aliases: [현대글로비스, "086280"]
+  tickers: ["086280"]
+  country: KR
+- id: kepco
+  name_ko: 한국전력
+  name_en: Korea Electric Power
+  aliases: [한국전력, 한국전력공사, 한전, KEPCO, "015760"]
+  tickers: ["015760"]
+  country: KR
+- id: byd
+  name_ko: BYD
+  name_en: BYD Co
+  aliases: [BYD, 비야디, 比亚迪, "1211", "002594"]
+  tickers: ["1211", "002594"]
+  country: CN
+- id: catl
+  name_ko: CATL
+  name_en: Contemporary Amperex Technology
+  aliases: [CATL, 닝더스다이, 寧德時代, "300750"]
+  tickers: ["300750"]
+  country: CN
+- id: tencent
+  name_ko: 텐센트
+  name_en: Tencent
+  aliases: [텐센트, Tencent, "0700"]
+  tickers: ["0700"]
+  country: CN
+- id: alibaba
+  name_ko: 알리바바
+  name_en: Alibaba
+  aliases: [알리바바, Alibaba, BABA, "9988"]
+  tickers: [BABA, "9988"]
+  country: CN
+- id: xiaomi
+  name_ko: 샤오미
+  name_en: Xiaomi
+  aliases: [샤오미, Xiaomi, "1810"]
+  tickers: ["1810"]
+  country: CN
+- id: unitree
+  name_ko: 유니트리
+  name_en: Unitree Robotics
+  aliases: [유니트리, Unitree]
+  tickers: []
+  country: CN
+  not_listed: true

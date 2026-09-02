@@ -74,7 +74,7 @@
   canonical: NH-Amundi자산운용
   group: NH
   country: KR
-  aliases: [NH-Amundi, NH아문디, NH-Amundi자산운용, HANARO, 하나로, NH-Amundi Asset Management]
+  aliases: [NH-Amundi, NH아문디, NH-Amundi자산운용, HANARO, 하나로, NH-Amundi Asset Management, NH-CA, NH-CA자산운용, 농협CA]
 - id: nh_sec
   canonical: NH투자증권
   group: NH
@@ -94,7 +94,7 @@
   canonical: 우리자산운용
   group: 우리
   country: KR
-  aliases: [우리, 우리자산운용, WON, Woori Asset Management]
+  aliases: [우리, 우리자산운용, WON, Woori Asset Management, 동양자산운용, 동양]
 - id: daishin_sec
   canonical: 대신증권
   group: 대신
@@ -135,7 +135,7 @@
 - id: hyundai_am
   canonical: 현대자산운용
   country: KR
-  aliases: [현대자산운용, UNICORN, 유니콘]
+  aliases: [현대자산운용, 현대, UNICORN, 유니콘]
 - id: yurie_am
   canonical: 유리자산운용
   country: KR
@@ -147,7 +147,7 @@
 - id: db_am
   canonical: DB자산운용
   country: KR
-  aliases: [DB자산운용, DB, 동부자산운용]
+  aliases: [DB자산운용, DB, 동부자산운용, 동부]
 - id: eugene_am
   canonical: 유진자산운용
   country: KR
@@ -176,11 +176,11 @@
 - id: kcgi_am
   canonical: KCGI자산운용
   country: KR
-  aliases: [KCGI, KCGI자산운용, 메리츠자산운용]
+  aliases: [KCGI, KCGI자산운용, 케이씨지아이, 메리츠자산운용]
 - id: daol_am
   canonical: 다올자산운용
   country: KR
-  aliases: [다올, 다올자산운용, KTB자산운용]
+  aliases: [다올, 다올자산운용, KTB자산운용, KTB]
 - id: fidelity
   canonical: 피델리티자산운용
   country: KR
@@ -200,7 +200,7 @@
 - id: ab_am
   canonical: AB자산운용
   country: KR
-  aliases: [AB자산운용, 얼라이언스번스틴, AllianceBernstein]
+  aliases: [AB자산운용, AB, 얼라이언스번스틴, AllianceBernstein]
 - id: blackrock
   canonical: BlackRock
   country: US
@@ -261,3 +261,78 @@
   canonical: Dimensional Fund Advisors
   country: US
   aliases: [Dimensional, Dimensional Fund Advisors LP, 디멘셔널]
+- id: im_asset
+  canonical: iM에셋자산운용
+  group: iM
+  country: KR
+  aliases: [iM에셋, iM에셋자산운용, DGB자산운용, DGB, 아이엠에셋]
+- id: multiasset_am
+  canonical: 멀티에셋자산운용
+  country: KR
+  aliases: [멀티에셋, 멀티에셋자산운용]
+- id: kardian_am
+  canonical: 카디안자산운용
+  country: KR
+  aliases: [카디안, 카디안자산운용]
+- id: landmark_am
+  canonical: 랜드마크자산운용
+  country: KR
+  aliases: [랜드마크, 랜드마크자산운용]
+- id: yookyung_psg
+  canonical: 유경PSG자산운용
+  country: KR
+  aliases: [유경PSG, 유경PSG자산운용, 유경]
+- id: hyundai_invest_am
+  canonical: 현대인베스트먼트자산운용
+  country: KR
+  aliases: [현대인베스트먼트, 현대인베스트, 현대인베스트먼트자산운용]
+- id: jpmorgan_kr
+  canonical: JP모간자산운용
+  country: KR
+  aliases: [JP모간, JP모간자산운용, JPM]
+- id: thej_am
+  canonical: 더제이자산운용
+  country: KR
+  aliases: [더제이, 더제이자산운용]
+- id: ds_am
+  canonical: DS자산운용
+  country: KR
+  aliases: [디에스, DS자산운용]
+- id: kiamco
+  canonical: KDB인프라자산운용
+  country: KR
+  aliases: [KIAMCO, KDB인프라, KDB인프라자산운용]
+- id: kdb_am
+  canonical: 산은자산운용
+  country: KR
+  aliases: [산은, 산은자산운용, KDB자산운용]
+- id: hanil_am
+  canonical: 한일투자신탁운용
+  country: KR
+  aliases: [한일, 한일투자신탁운용]
+- id: seoul_am
+  canonical: 서울투자신탁운용
+  country: KR
+  aliases: [서울투자신탁운용, 서울투신]
+- id: must_am
+  canonical: 머스트자산운용
+  country: KR
+  aliases: [머스트, 머스트자산운용]
+- id: koreit_am
+  canonical: 코레이트자산운용
+  country: KR
+  aliases: [코레이트, 코레이트자산운용]
+- id: pinetree_am
+  canonical: 파인트리자산운용
+  country: KR
+  aliases: [파인트리, 파인트리자산운용]
+- id: mirae_map
+  canonical: 미래에셋맵스자산운용
+  group: 미래에셋
+  country: KR
+  aliases: [미래에셋맵스, 맵스]
+- id: kb_star_alias
+  canonical: KB자산운용
+  group: KB
+  country: KR
+  aliases: [케이비, KB스타]

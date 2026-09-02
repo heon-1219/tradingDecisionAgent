@@ -1,0 +1,75 @@
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from finagent.kb.graph import KG
+from finagent.kb.lexicon import Lexicon
+from finagent.kb.rdb import RDB
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def small_rdb(tmp_path):
+    p = tmp_path / "s.db"
+    c = sqlite3.connect(p)
+    c.execute(
+        "create table etf_kr(pd_itm_no, pd_ticker, pd_abrv_nm, pd_nm, product_type, is_on_sale, base_date, manager_name, "
+        "cu_base_index, ref_base_index, wu_inv_ast_type, wu_inv_rgn, risk_grade, cu_strtegy, cu_lev_fector, listing_date, "
+        "pd_dvid_cycl, pd_net_tamt)"
+    )
+    c.execute(
+        "insert into etf_kr values ('KR1','305720','KODEX 2차전지산업','삼성 KODEX 2차전지산업증권상장지수투자신탁','국내ETF',1,"
+        "'2026-08-21','삼성자산운용','','KRX 2차전지 K-뉴딜지수','주식','국내',1,'실물복제',1.0,'2018-09-11','A',1.0e12)"
+    )
+    c.execute("create view v_etf_kr as select * from etf_kr")
+    c.execute(
+        "create view v_bond_kr as select null pd_no, null pd_exg_mkt, null pd_nm, null pd_abrv_nm, null product_type, null is_sellable, "
+        "null base_date, null issuer_name, null crd_grd, null std_pd_mcls_nm, null bd_knd, null pd_risk_gcd, null mat_date, null srfc_irt where 0"
+    )
+    c.execute(
+        "create view v_etf_gl as select null pd_itm_no, null ticker, null pd_nm, null product_type, null is_on_sale, null base_date, "
+        "null manager_name, null cu_base_index, null wu_inv_ast_type, null wu_inv_rgn, null expense_ratio_pct, null du_last_aum, "
+        "null cu_lev_fector, null cu_inverse_short_yn, null listing_date, null cu_strtegy where 0"
+    )
+    c.execute(
+        "create view v_fund_pub as select null itm_no, null itm_nm, null itm_abrv_nm, null product_type, null is_on_sale, null base_date, "
+        "null manager_name, null fund_family, null bmrk_nm, null or_attr_desc, null zrin_ptn_nm, null fd_ivst_rgn_desc, null risk_grade, "
+        "null is_hedged, null fd_nast_suma where 0"
+    )
+    c.execute("create table meta(table_name, source_id, korean_name, base_date, row_count, built_at)")
+    c.commit()
+    c.close()
+    return RDB(p)
+
+
+def test_build_query_neighbors(small_rdb, tmp_path):
+    cons = tmp_path / "cons"
+    cons.mkdir()
+    (cons / "kr.csv").write_text(
+        "etf_id,etf_table,ticker,etf_name,company_id,company_name,weight_pct,as_of,source\n"
+        "KR1,v_etf_kr,305720,KODEX 2차전지산업,ecopro_bm,에코프로비엠,12.3,2026-08-21,test\n"
+        "KR1,v_etf_kr,305720,KODEX 2차전지산업,,포스코퓨처엠,8.0,2026-08-21,test\n"
+        "KR1,v_etf_kr,305720,KODEX 2차전지산업,,듣보잡소재,1.0,2026-08-21,test\n",
+        encoding="utf-8",
+    )
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, cons, log=lambda *a: None)
+    rows = kg.query("SELECT ?etf WHERE { ?etf fp:hasConstituent ?c . ?c fp:subsidiaryOf ?p . ?p fp:name '에코프로' }")
+    assert rows and "etf_kr/KR1" in rows[0]["etf"]
+    nb = kg.neighbors("KODEX 2차전지산업")
+    assert "hasTheme" in nb and any("battery" in x["iri"] for x in nb["hasTheme"])
+    assert "managedBy" in nb and nb["managedBy"][0]["label"] == "삼성자산운용"
+    labels = {x["label"] for x in nb["hasConstituent"]}
+    assert {"에코프로비엠", "포스코퓨처엠", "듣보잡소재"} <= labels  # alias-mapped, and auto company
+    inv = kg.neighbors("에코프로", relation="subsidiaryOf_inverse")
+    assert {x["label"] for x in inv["subsidiaryOf_inverse"]} >= {"에코프로비엠", "에코프로에이치엔"}
+    assert kg.neighbors("305720")["managedBy"]  # ticker lookup
+    kg.export(tmp_path / "kg.ttl")
+    assert (tmp_path / "kg.ttl").stat().st_size > 1000
+
+
+def test_query_adds_prefixes_and_limit(small_rdb):
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, None, log=lambda *a: None)
+    rows = kg.query("SELECT ?p ?n WHERE { ?p a fp:DomesticETF ; fp:name ?n }")
+    assert rows[0]["n"] == "KODEX 2차전지산업"
