@@ -42,8 +42,8 @@
 - id: hua_hong
   name_ko: 화훙반도체
   name_en: Hua Hong Semiconductor
-  aliases: [화훙, 화홍반도체, 화훙반도체, 화홍, Hua Hong, "1347"]
-  tickers: ["1347"]
+  aliases: [화훙, 화홍반도체, 화훙반도체, 화홍, 화훙 그레이스 반도체, 화훙그레이스반도체, Hua Hong, "1347", "688347"]
+  tickers: ["1347", "688347"]
   country: CN
 - id: naura
   name_ko: 나우라
@@ -556,3 +556,39 @@
   tickers: []
   country: CN
   not_listed: true
+- id: cxmt
+  name_ko: CXMT(창신메모리)
+  name_en: CXMT Corporation
+  aliases: [CXMT, CXMT Corporation, 창신메모리, 창신존저, 长鑫存储]
+  tickers: []
+  country: CN
+- id: hygon
+  name_ko: 하이곤(해광신식)
+  name_en: Hygon Information Technology
+  aliases: [해광신식, 하이곤, Hygon, 海光信息, "688041"]
+  tickers: ["688041"]
+  country: CN
+- id: montage
+  name_ko: 몬타지테크놀로지
+  name_en: Montage Technology
+  aliases: [몬타지 테크놀로지, 몬타지테크놀로지, Montage Technology, 澜起科技, "688008"]
+  tickers: ["688008"]
+  country: CN
+- id: innolight
+  name_ko: 이노라이트(중제욱창)
+  name_en: Zhongji Innolight
+  aliases: [중제욱창, 이노라이트, Innolight, Zhongji Innolight, 中际旭创, "300308"]
+  tickers: ["300308"]
+  country: CN
+- id: piotech
+  name_ko: 피오테크(척형과기)
+  name_en: Piotech
+  aliases: [척형과기, 피오테크, Piotech, 拓荆科技, "688072"]
+  tickers: ["688072"]
+  country: CN
+- id: amec
+  name_ko: AMEC(중미반도체)
+  name_en: Advanced Micro-Fabrication Equipment
+  aliases: [중미반도체, AMEC, Advanced Micro-Fabrication Equipment, 中微公司, "688012"]
+  tickers: ["688012"]
+  country: CN

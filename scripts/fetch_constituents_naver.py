@@ -517,14 +517,18 @@ answer "which ETFs hold company X" / "what does ETF Y hold" questions.
   - `etf_id` = ISIN (`pd_itm_no` in `data/raw/pref01n001_data.xlsx`), `etf_table` = `v_etf_kr`, `ticker` = 6-char short code.
   - `company_id` = id from `data/enrichment/companies.yaml` when a ticker/alias matches, else `auto_<slug>`.
   - `weight_pct` = % of NAV (empty when the source has no weight). Top 30 holdings per ETF.
-  - `as_of` = date given in the response when present, else the fetch date. `source` = URL used.
+  - `as_of` = date given in the response when present, else the fetch date. The primary endpoint carries no
+    portfolio date, so `as_of` is normally the fetch date (Naver's PDF is typically the previous trading day).
+  - `source` = URL used. Foreign holdings are given in Naver's Korean transliteration (e.g. 한무기 = Cambricon);
+    they are mapped through the `reutersCode` ticker (e.g. `688256.SS`) when the ticker is in companies.yaml.
 - **Source**: Naver Finance (`m.stock.naver.com` JSON API; fallback `finance.naver.com` / wisereport iframe).
   Primary endpoint actually used: `https://m.stock.naver.com/api/etf/{{ticker}}/constituent` (paginated, `?cursor=`).
 - **Fetched on**: {stats['fetched_on']}
 - **Coverage**: ETFs attempted {stats['attempted']}, with >=1 constituent {stats['succeeded']},
   failed/empty {stats['failed']} (mostly delisted or not-on-sale funds), rows {stats['rows']}.
-  Rows by source: constituent={bs.get('constituent', 0)}, etfAnalysis={bs.get('etfAnalysis', 0)},
-  wisereport={bs.get('wisereport', 0)}, none={bs.get('none', 0)}.
+  ETFs by source: constituent={bs.get('constituent', 0)}, etfAnalysis={bs.get('etfAnalysis', 0)},
+  wisereport={bs.get('wisereport', 0)}, none={bs.get('none', 0)}. Empty ones are delisted/not-trading funds
+  (`pd_sale_yn=0` or `pd_tr_yn=0`) for which Naver returns no portfolio.
 - **Re-run** (Git Bash, repo root):
   `"$PWD/.venv/Scripts/python.exe" scripts/fetch_constituents_naver.py`
   Raw responses are cached in `data/external/cache/naver_etf/` (gitignored) and replayed on re-run;
