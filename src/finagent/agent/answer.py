@@ -51,8 +51,9 @@ def format_evidence(evs: list[Evidence], extra_refs: list[str] | None = None) ->
             head += f" · {e.row_count}건"
         lines = [head, f"  {e.kind}: {e.detail}"]
         if e.refs:
-            shown = e.refs[:20]
-            lines.append("  참조: " + " | ".join(shown) + (f" | ... 외 {len(e.refs) - 20}건" if len(e.refs) > 20 else ""))
+            uniq = list(dict.fromkeys(r for r in e.refs if r))
+            shown = uniq[:20]
+            lines.append("  참조: " + " | ".join(shown) + (f" | ... 외 {len(uniq) - 20}건" if len(uniq) > 20 else ""))
         blocks.append("\n".join(lines))
     if extra_refs:
         blocks.append("[답변 근거 요약] " + " | ".join(extra_refs))

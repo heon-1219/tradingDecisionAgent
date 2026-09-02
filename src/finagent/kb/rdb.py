@@ -75,7 +75,15 @@ class RDB:
                 self._con.set_progress_handler(None, 0)
         truncated = len(rows) > self.row_limit
         rows = rows[: self.row_limit]
-        shown = re.sub(r"\bLIMIT\s+\d+\s*$", f"LIMIT {self.row_limit}", s, flags=re.I) if truncated else s
+        # show the caller's SQL (our +1 probe limit is an implementation detail)
+        original = (sql or "").strip().rstrip(";").strip()
+        original = re.sub(r"^```(?:sql)?\s*|\s*```$", "", original, flags=re.I).strip()
+        shown = original
+        if truncated:
+            if re.search(r"\blimit\s+\d+\s*$", original, re.I):
+                shown = re.sub(r"\blimit\s+\d+\s*$", f"LIMIT {self.row_limit}", original, flags=re.I)
+            else:
+                shown = f"{original} LIMIT {self.row_limit}"
         return QueryResult(shown, cols, rows, len(rows), truncated)
 
     def fetch_all(self, sql: str, params=()) -> list[tuple]:

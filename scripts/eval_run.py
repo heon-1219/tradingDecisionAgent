@@ -27,6 +27,10 @@ def classify(answer: str) -> str:
 
 
 def main() -> int:
+    try:  # Windows consoles default to cp949; keep Korean and symbols printable
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--questions", default=str(ROOT / "data/eval/questions.jsonl"))

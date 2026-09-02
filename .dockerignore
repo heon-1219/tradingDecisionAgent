@@ -1,0 +1,10 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/store/
+data/external/cache/
+data/eval/results.jsonl
+docs/superpowers/
+.env

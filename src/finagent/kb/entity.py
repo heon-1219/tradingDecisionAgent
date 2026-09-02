@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 
 from .lexicon import Company, Lexicon, Manager, Theme
-from .search import Hit, SearchIndex, norm_title
+from .search import Hit, SearchIndex, norm_title, tokenize
 
 
 @dataclass
@@ -94,10 +94,14 @@ class EntityResolver:
             managers=self.lexicon.match_managers(mention),
             themes=self.lexicon.match_themes(mention),
         )
-        hits = self.index.search(mention, k=k, table=table)
-        r.products = hits
+        hits = self.index.search(mention, k=k * 2, table=table)
+        # keep only candidates that genuinely share name material with the mention (>= 2 shared tokens),
+        # so a company mention like '캠브리콘' does not surface unrelated products via a single bigram
+        qtoks = {t for t in tokenize(_STOP.sub(" ", mention)) if len(t) >= 2}
+        kept = [h for h in hits if h.score >= 100.0 or len(qtoks & set(tokenize(h.title))) >= 2]
+        r.products = kept[:k]
         core = norm_title(_STOP.sub("", mention))
-        if hits:
-            top = hits[0]
+        if r.products:
+            top = r.products[0]
             r.exact = top.score >= 100.0 or (len(core) >= 3 and norm_title(top.title) == core)
         return r
