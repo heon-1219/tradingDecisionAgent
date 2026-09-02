@@ -1,0 +1,18 @@
+[project]
+name = "finagent"
+version = "0.1.0"
+description = "금융상품 Agent - Financial Product Analyst API (2026 미래에셋증권 AI Festival)"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["slow: needs the full data store or network"]
