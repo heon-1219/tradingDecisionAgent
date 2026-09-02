@@ -1,0 +1,538 @@
+# ============================================================================
+# fund_pub.ttl — 공모펀드 마스터 (v_fund_pub / PRFD01N001) TBox
+#
+# 목적
+#   공모펀드마스터 뷰의 57개 컬럼을 fp:PublicFund / fp:PrivateFund 의 속성으로 문서화하고
+#   운용속성(fp:ManagementAttribute), 판매수수료유형(fp:FeeType), 판매채널(fp:SalesChannel),
+#   위험등급(fp:fundRiskGrade → fp:RiskGrade) 열거형을 연결한다.
+#
+# TBox / ABox
+#   펀드 인스턴스는 런타임에 SQLite v_fund_pub 로부터 생성된다 (d:fund/<itm_no>).
+#   각 행은 fp:ShareClass 이기도 하며 (한 펀드의 여러 클래스가 각각 행), fund_family 로
+#   fp:FundFamily 개체에 묶인다. product_type '사모펀드' 는 fp:PrivateFund.
+#   fp:sourceId 는 fp:PublicFund 만 보유.
+#
+# 데이터 특성 (2026-08-21 기준)
+#   - 보수 컬럼(or_co_rwrd_r, sale_co_rwrd_r, trusc_rwrd_r, ofwk_trus_rwrd_r)은 원천 단위가
+#     공개되지 않았다. 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만 허용.
+#   - 기간 수익률(fd_mm1_ern_r ~ fd_yr5_ern_r)은 약 30% 만 수록, fd_wk1_ern_r 은 전부 NULL.
+#   - base_date 는 약 60% NULL.
+#   - manager_name 은 상품명 접두어로 추정한 운용사 (오추정 가능).
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+# ----------------------------------------------------------------------------
+# 1. 테이블 클래스
+# ----------------------------------------------------------------------------
+
+fp:PublicFund a owl:Class ;
+    rdfs:subClassOf fp:Fund ;
+    rdfs:label "공모펀드"@ko , "Public Offering Fund"@en ;
+    rdfs:comment "불특정 다수에게 공모하는 집합투자기구. 원천 PRFD01N001 공모펀드마스터 → 뷰 v_fund_pub (product_type='공모펀드'). 행 단위는 클래스(ShareClass). 기준일 2026-08-21."@ko ;
+    fp:sourceTable "v_fund_pub" ;
+    fp:sourceId "PRFD01N001" .
+
+fp:PrivateFund a owl:Class ;
+    rdfs:subClassOf fp:Fund ;
+    rdfs:label "사모펀드"@ko , "Private Placement Fund"@en ;
+    rdfs:comment "49인 이하 사모 집합투자기구. v_fund_pub 에서 product_type='사모펀드' (prvo_pbff_desc='사모') 인 행. 일반 투자자 추천 대상이 아님."@ko ;
+    fp:sourceTable "v_fund_pub" .
+
+# fp:ShareClass 는 common.ttl 에 선언. 여기서는 펀드 뷰와의 관계를 보강한다.
+fp:ShareClass rdfs:comment "v_fund_pub 의 한 행 = 한 클래스. 한 펀드의 여러 클래스(A, C, C-e, S, P 등)가 각각 행으로 존재하며 itm_nm 에 클래스 접미가 붙는다. fund_family 컬럼이 접미를 제거한 묶음 키이므로 '같은 펀드' 판단과 클래스 간 보수 비교는 fund_family 로 GROUP BY."@ko ;
+    fp:sourceTable "v_fund_pub" .
+
+# ----------------------------------------------------------------------------
+# 2. 열거형: 운용속성
+# ----------------------------------------------------------------------------
+
+fp:ManagementAttribute a owl:Class ;
+    rdfs:label "펀드 운용속성"@ko , "Fund Management Attribute"@en ;
+    rdfs:comment "v_fund_pub.or_attr_desc. 자본시장법 상 집합투자기구 유형에 준한 14개 값."@ko .
+
+fp:ManagementAttribute_주식형     a fp:ManagementAttribute ; fp:code "주식형"     ; rdfs:label "주식형"@ko ; rdfs:comment "주식 60% 이상."@ko .
+fp:ManagementAttribute_채권형     a fp:ManagementAttribute ; fp:code "채권형"     ; rdfs:label "채권형"@ko ; rdfs:comment "채권 60% 이상, 주식 미편입."@ko .
+fp:ManagementAttribute_재간접     a fp:ManagementAttribute ; fp:code "재간접"     ; rdfs:label "재간접"@ko ; rdfs:comment "다른 펀드에 투자하는 펀드오브펀드."@ko .
+fp:ManagementAttribute_채권혼합   a fp:ManagementAttribute ; fp:code "채권혼합"   ; rdfs:label "채권혼합"@ko ; rdfs:comment "주식 50% 미만 혼합. 안정형."@ko .
+fp:ManagementAttribute_파생상품   a fp:ManagementAttribute ; fp:code "파생상품"   ; rdfs:label "파생상품"@ko .
+fp:ManagementAttribute_혼합자산   a fp:ManagementAttribute ; fp:code "혼합자산"   ; rdfs:label "혼합자산"@ko .
+fp:ManagementAttribute_주식혼합   a fp:ManagementAttribute ; fp:code "주식혼합"   ; rdfs:label "주식혼합"@ko ; rdfs:comment "주식 50% 이상 60% 미만 혼합."@ko .
+fp:ManagementAttribute_특별자산   a fp:ManagementAttribute ; fp:code "특별자산"   ; rdfs:label "특별자산"@ko .
+fp:ManagementAttribute_MMF        a fp:ManagementAttribute ; fp:code "MMF"        ; rdfs:label "MMF"@ko ; rdfs:comment "단기금융집합투자기구. 초단기 자금 운용."@ko .
+fp:ManagementAttribute_임대형     a fp:ManagementAttribute ; fp:code "임대형"     ; rdfs:label "임대형"@ko ; rdfs:comment "부동산 임대형."@ko .
+fp:ManagementAttribute_기타       a fp:ManagementAttribute ; fp:code "기타"       ; rdfs:label "기타"@ko .
+fp:ManagementAttribute_대출형     a fp:ManagementAttribute ; fp:code "대출형"     ; rdfs:label "대출형"@ko .
+fp:ManagementAttribute_개발형     a fp:ManagementAttribute ; fp:code "개발형"     ; rdfs:label "개발형"@ko ; rdfs:comment "부동산 개발형."@ko .
+fp:ManagementAttribute_해당없음   a fp:ManagementAttribute ; fp:code "해당없음"   ; rdfs:label "해당없음"@ko .
+
+# ----------------------------------------------------------------------------
+# 3. 열거형: 판매수수료 유형 / 판매채널
+# ----------------------------------------------------------------------------
+
+fp:FeeType a owl:Class ;
+    rdfs:label "판매수수료 유형"@ko , "Sales Fee Type"@en ;
+    rdfs:comment "v_fund_pub.han_clas_fee_type. 수수료미징구 / 선취 / 후취."@ko .
+
+fp:FeeType_수수료미징구 a fp:FeeType ; fp:code "수수료미징구" ; rdfs:label "수수료미징구"@ko ; rdfs:comment "판매수수료 없음 (주로 C 클래스, 온라인 S 클래스). 대신 판매보수가 높을 수 있음."@ko .
+fp:FeeType_선취         a fp:FeeType ; fp:code "선취"         ; rdfs:label "선취"@ko ; rdfs:comment "가입 시 선취판매수수료 (주로 A 클래스). 장기 보유에 유리."@ko .
+fp:FeeType_후취         a fp:FeeType ; fp:code "후취"         ; rdfs:label "후취"@ko ; rdfs:comment "환매 시 후취판매수수료 (B 클래스 등)."@ko .
+
+fp:SalesChannel a owl:Class ;
+    rdfs:label "판매채널"@ko , "Sales Channel"@en ;
+    rdfs:comment "v_fund_pub.han_clas_sales_channel. 온라인 / 오프라인 / 직판."@ko .
+
+fp:SalesChannel_온라인   a fp:SalesChannel ; fp:code "온라인"   ; rdfs:label "온라인"@ko ; rdfs:comment "온라인 전용 클래스 (접미 -e). 판매보수가 낮다."@ko .
+fp:SalesChannel_오프라인 a fp:SalesChannel ; fp:code "오프라인" ; rdfs:label "오프라인"@ko ; rdfs:comment "지점 창구 판매."@ko .
+fp:SalesChannel_직판     a fp:SalesChannel ; fp:code "직판"     ; rdfs:label "직판"@ko ; rdfs:comment "운용사 직접 판매 (S 클래스 등)."@ko .
+
+# ----------------------------------------------------------------------------
+# 4. 컬럼 속성 — 식별 / 명칭 / 패밀리
+# ----------------------------------------------------------------------------
+
+fp:fundCode a owl:DatatypeProperty ;
+    rdfs:label "펀드코드"@ko ;
+    rdfs:comment "클래스 단위 상품코드. 기본키."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productCode ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "itm_no" .
+
+fp:fundName a owl:DatatypeProperty ;
+    rdfs:label "펀드명(클래스 포함)"@ko ;
+    rdfs:comment "클래스 접미 포함 정식명 (예: '미래에셋TIGER글로벌AI증권자투자신탁(주식)C-e'). 상품명 검색은 이 컬럼에 LIKE, 중복 클래스 제거는 fund_family 로 GROUP BY."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:name ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "itm_nm" .
+
+fp:fundShortName a owl:DatatypeProperty ;
+    rdfs:label "약어명"@ko ;
+    rdfs:comment "펀드 약어명."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:shortName ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "itm_abrv_nm" .
+
+fp:fundEnglishName a owl:DatatypeProperty ;
+    rdfs:label "영문명"@ko ;
+    rdfs:comment "펀드 영문명. 일부만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:englishName ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "itm_eng_nm" .
+
+fp:fundFamilyKey a owl:DatatypeProperty ;
+    rdfs:label "펀드 패밀리 키"@ko ;
+    rdfs:comment "클래스 접미를 제거한 모펀드 식별 문자열. 같은 펀드의 모든 클래스는 같은 값을 가진다. '펀드 개수' 는 COUNT(DISTINCT fund_family), 클래스별 보수 비교는 WHERE fund_family = ... . 런타임에 fp:memberOfFamily → fp:FundFamily."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fund_family" .
+
+# ----------------------------------------------------------------------------
+# 5. 유형 / 판매 상태
+# ----------------------------------------------------------------------------
+
+fp:fundProductType a owl:DatatypeProperty ;
+    rdfs:label "상품유형"@ko ;
+    rdfs:comment "'공모펀드' 또는 '사모펀드'. 일반 고객 추천은 product_type = '공모펀드'."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productType ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "product_type" .
+
+fp:fundOfferingType a owl:DatatypeProperty ;
+    rdfs:label "공모/사모 구분"@ko ;
+    rdfs:comment "공모 / 사모. product_type 과 동일 정보."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "prvo_pbff_desc" .
+
+fp:fundIsOnSale a owl:DatatypeProperty ;
+    rdfs:label "판매중 여부"@ko ;
+    rdfs:comment "1 = 판매중, 0 = 판매완료/중단. 추천 질의는 is_on_sale = 1 필수."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "is_on_sale" .
+
+fp:fundSaleStatus a owl:DatatypeProperty ;
+    rdfs:label "판매상태"@ko ;
+    rdfs:comment "'판매중' / '판매완료'. is_on_sale 의 원천 문자열."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "sale_yn" .
+
+fp:fundSoldByUs a owl:DatatypeProperty ;
+    rdfs:label "당사 판매 여부"@ko ;
+    rdfs:comment "'Y' = 미래에셋증권 판매 상품."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "thco_sale_yn" .
+
+fp:fundManagerName a owl:DatatypeProperty ;
+    rdfs:label "운용사(추정)"@ko ;
+    rdfs:comment "상품명 접두어에서 추정한 운용사명 (예: 미래에셋, 삼성, KB). 원천에 운용사 컬럼이 없어 추정값이므로 오류 가능. 런타임에 fp:managedBy 로 연결."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "manager_name" .
+
+# ----------------------------------------------------------------------------
+# 6. 분류 (운용속성 / 제로인 / 지역)
+# ----------------------------------------------------------------------------
+
+fp:hasManagementAttribute a owl:ObjectProperty ;
+    rdfs:label "운용속성"@ko ;
+    rdfs:comment "주식형 / 채권형 / 재간접 / 채권혼합 / 파생상품 / 혼합자산 / 주식혼합 / 특별자산 / MMF / 임대형 / 기타 / 대출형 / 개발형 / 해당없음."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range fp:ManagementAttribute ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "or_attr_desc" .
+
+fp:fundZeroinMajorType a owl:DatatypeProperty ;
+    rdfs:label "제로인 대유형"@ko ;
+    rdfs:comment "펀드평가사 제로인 대분류 (예: 주식형, 채권형, 해외주식형, 부동산)."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_btyp_nm" .
+
+fp:fundZeroinMinorType a owl:DatatypeProperty ;
+    rdfs:label "제로인 소유형"@ko ;
+    rdfs:comment "제로인 소분류 (예: 일반주식, 배당주식, 글로벌주식, 국공채권, 회사채권, 섹터주식). 테마·스타일 검색에 유용. 런타임 fp:zeroinType."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:zeroinType ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_ptn_nm" .
+
+fp:fundZeroinAttributes a owl:DatatypeProperty ;
+    rdfs:label "제로인 속성 목록"@ko ;
+    rdfs:comment "제로인 속성 태그를 구분자로 연결한 문자열 (예: '연금저축, 퇴직연금, 온라인'). LIKE 검색."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_attr_nms" .
+
+fp:fundInvestRegion a owl:DatatypeProperty ;
+    rdfs:label "투자지역"@ko ;
+    rdfs:comment "국내 / 글로벌 / 아시아 / 남미·북미 / 유럽 / 이머징·브릭스 / 중동·아프리카 / 기타 / 해당없음. '미국' 단독 값은 없고 '남미·북미' 에 포함. 런타임에 fp:investsInRegion → fp:Region_<값>."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_ivst_rgn_desc" .
+
+fp:fundDomesticOverseas a owl:DatatypeProperty ;
+    rdfs:label "국내/해외 구분"@ko ;
+    rdfs:comment "국내 / 해외 / 국내외혼합. '해외펀드' 질의의 1차 필터."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "ovrs_fd_desc" .
+
+# ----------------------------------------------------------------------------
+# 7. 벤치마크 / 통화 / 헤지 / 구조
+# ----------------------------------------------------------------------------
+
+fp:fundBenchmarkName a owl:DatatypeProperty ;
+    rdfs:label "벤치마크"@ko ;
+    rdfs:comment "비교지수명 (예: 'KOSPI', 'MSCI ACWI 90% + 콜금리 10%'). 런타임에 fp:hasBenchmark → fp:Index."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "bmrk_nm" .
+
+fp:fundBenchmarkEnglishName a owl:DatatypeProperty ;
+    rdfs:label "벤치마크 영문명"@ko ;
+    rdfs:comment "벤치마크 영문 표기. 일부만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "bmrk_eng_nm" .
+
+fp:fundCurrency a owl:DatatypeProperty ;
+    rdfs:label "통화"@ko ;
+    rdfs:comment "기준가 통화 (대부분 KRW, 역외펀드는 USD 등)."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:currency ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "curr_cd" .
+
+fp:fundFxHedgeFlag a owl:DatatypeProperty ;
+    rdfs:label "환헤지 여부(Y/N)"@ko ;
+    rdfs:comment "'Y' = 환헤지 클래스 (명칭 접미 (H)), 'N' = 환노출 (UH). is_hedged 와 동일 정보."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "exchdg_yn" .
+
+fp:fundIsHedged a owl:DatatypeProperty ;
+    rdfs:label "환헤지 여부(1/0)"@ko ;
+    rdfs:comment "1 = 환헤지, 0 = 환노출. 런타임 fp:isHedged boolean."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:integer ;
+    rdfs:subPropertyOf fp:isHedged ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "is_hedged" .
+
+fp:fundIsHedgeFund a owl:DatatypeProperty ;
+    rdfs:label "헤지펀드 여부"@ko ;
+    rdfs:comment "1 = 전문투자형 사모(헤지펀드), 0 = 일반. 환헤지(is_hedged)와 다른 개념."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "hdge_fd_yn" .
+
+fp:fundIsOffshore a owl:DatatypeProperty ;
+    rdfs:label "역외펀드 여부"@ko ;
+    rdfs:comment "1 = 해외 설정 역외펀드, 0 = 국내 설정."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "ofsfd_yn" .
+
+fp:fundIncomeType a owl:DatatypeProperty ;
+    rdfs:label "이자/배당 구분"@ko ;
+    rdfs:comment "이자 / 배당. 소득 과세 유형."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "int_dvd_desc" .
+
+fp:fundInvestorType a owl:DatatypeProperty ;
+    rdfs:label "개인/법인 구분"@ko ;
+    rdfs:comment "개인 / 법인 / 해당없음. 가입 가능 투자자 유형."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "pers_corp_desc" .
+
+# ----------------------------------------------------------------------------
+# 8. 위험등급
+# ----------------------------------------------------------------------------
+
+fp:fundRiskGradeName a owl:DatatypeProperty ;
+    rdfs:label "위험등급명"@ko ;
+    rdfs:comment "제로인 기준 위험등급 표시명 (예: '다소높은위험(3등급)'). 숫자 비교는 risk_grade."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_fd_ivst_risk_grd_nm" .
+
+fp:fundRiskGrade a owl:ObjectProperty ;
+    rdfs:label "투자위험등급"@ko ;
+    rdfs:comment "1~6 등급 (1 = 매우높은위험, 6 = 매우낮은위험). ETF 의 risk_grade 와 같은 체계."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range fp:RiskGrade ;
+    rdfs:subPropertyOf fp:hasRiskGrade ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "risk_grade" .
+
+# ----------------------------------------------------------------------------
+# 9. 클래스 정보
+# ----------------------------------------------------------------------------
+
+fp:fundShareClassName a owl:DatatypeProperty ;
+    rdfs:label "클래스 표기"@ko ;
+    rdfs:comment "클래스 기호 (A, C, C-e, S, P, I 등). A=선취, C=후취/미징구, e=온라인, S=직판, P=연금."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "han_clas_nm" .
+
+fp:hasFeeType a owl:ObjectProperty ;
+    rdfs:label "판매수수료 유형"@ko ;
+    rdfs:comment "수수료미징구 / 선취 / 후취."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range fp:FeeType ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "han_clas_fee_type" .
+
+fp:hasSalesChannel a owl:ObjectProperty ;
+    rdfs:label "판매채널"@ko ;
+    rdfs:comment "온라인 / 오프라인 / 직판. 온라인 클래스가 보수가 낮다."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range fp:SalesChannel ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "han_clas_sales_channel" .
+
+fp:fundShareClassPolicies a owl:DatatypeProperty ;
+    rdfs:label "클래스 정책"@ko ;
+    rdfs:comment "클래스 관련 정책 설명 문자열 (연금전용, 고액, 기관 등)."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "han_clas_policies" .
+
+# ----------------------------------------------------------------------------
+# 10. 보수 — 원천 단위 미공개: 절대 수치 해석 금지
+# ----------------------------------------------------------------------------
+
+fp:fundManagerFee a owl:DatatypeProperty ;
+    rdfs:label "집합투자업자보수"@ko ;
+    rdfs:comment "운용사 보수 원천값. 원천값 단위 미공개 — 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "원천값(단위 미공개)" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "or_co_rwrd_r" .
+
+fp:fundSalesFee a owl:DatatypeProperty ;
+    rdfs:label "판매회사보수"@ko ;
+    rdfs:comment "판매사 보수 원천값. 클래스 간 차이가 가장 큰 항목. 원천값 단위 미공개 — 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "원천값(단위 미공개)" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "sale_co_rwrd_r" .
+
+fp:fundTrusteeFee a owl:DatatypeProperty ;
+    rdfs:label "신탁업자보수"@ko ;
+    rdfs:comment "수탁사 보수 원천값. 원천값 단위 미공개 — 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "원천값(단위 미공개)" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "trusc_rwrd_r" .
+
+fp:fundAdminFee a owl:DatatypeProperty ;
+    rdfs:label "사무관리보수"@ko ;
+    rdfs:comment "일반사무관리회사 보수 원천값. 원천값 단위 미공개 — 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "원천값(단위 미공개)" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "ofwk_trus_rwrd_r" .
+
+# ----------------------------------------------------------------------------
+# 11. 규모 / 기준가 / 수익률
+# ----------------------------------------------------------------------------
+
+fp:fundNetAssets a owl:DatatypeProperty ;
+    rdfs:label "순자산"@ko ;
+    rdfs:comment "클래스 순자산 (원). 펀드 전체 규모는 fund_family 로 SUM."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    rdfs:subPropertyOf fp:netAssets ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_nast_suma" .
+
+fp:fundNav a owl:DatatypeProperty ;
+    rdfs:label "매매기준가"@ko ;
+    rdfs:comment "1,000좌당 기준가격 (원)."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "bns_bpr" .
+
+fp:fundReturn1W a owl:DatatypeProperty ;
+    rdfs:label "1주 수익률"@ko ;
+    rdfs:comment "1주 수익률 %. 현재 전부 NULL — 사용 불가."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_wk1_ern_r" .
+
+fp:fundReturn1M a owl:DatatypeProperty ;
+    rdfs:label "1개월 수익률"@ko ;
+    rdfs:comment "1개월 수익률 %. 약 30% 만 수록 — 정렬 시 IS NOT NULL 필수, 누락을 답변에 명시."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_mm1_ern_r" .
+
+fp:fundReturn3M a owl:DatatypeProperty ;
+    rdfs:label "3개월 수익률"@ko ;
+    rdfs:comment "3개월 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_mm3_ern_r" .
+
+fp:fundReturn6M a owl:DatatypeProperty ;
+    rdfs:label "6개월 수익률"@ko ;
+    rdfs:comment "6개월 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_mm6_ern_r" .
+
+fp:fundReturn1Y a owl:DatatypeProperty ;
+    rdfs:label "1년 수익률"@ko ;
+    rdfs:comment "1년 수익률 %. 약 30% 만 수록. '수익률 좋은 펀드' 의 기본 정렬 기준."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_yr1_ern_r" .
+
+fp:fundReturn18M a owl:DatatypeProperty ;
+    rdfs:label "18개월 수익률"@ko ;
+    rdfs:comment "18개월 누적 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_mm18_ern_r" .
+
+fp:fundReturn2Y a owl:DatatypeProperty ;
+    rdfs:label "2년 수익률"@ko ;
+    rdfs:comment "2년 누적 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_yr2_ern_r" .
+
+fp:fundReturn3Y a owl:DatatypeProperty ;
+    rdfs:label "3년 수익률"@ko ;
+    rdfs:comment "3년 누적 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_yr3_ern_r" .
+
+fp:fundReturn5Y a owl:DatatypeProperty ;
+    rdfs:label "5년 수익률"@ko ;
+    rdfs:comment "5년 누적 수익률 %. 약 30% 만 수록."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_yr5_ern_r" .
+
+fp:fundLastDistributionRate a owl:DatatypeProperty ;
+    rdfs:label "최근 분배율"@ko ;
+    rdfs:comment "최근 결산 분배율 %. 미분배 펀드는 NULL/0."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_last_dstb_r" .
+
+# ----------------------------------------------------------------------------
+# 12. 자산구성비율 (제로인)
+# ----------------------------------------------------------------------------
+
+fp:fundDomesticStockPct a owl:DatatypeProperty ;
+    rdfs:label "국내주식 비중"@ko ;
+    rdfs:comment "포트폴리오 내 국내주식 비중 %."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_dmst_stk_cmst_rt" .
+
+fp:fundOverseasStockPct a owl:DatatypeProperty ;
+    rdfs:label "해외주식 비중"@ko ;
+    rdfs:comment "포트폴리오 내 해외주식 비중 %."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_ovrs_stk_cmst_rt" .
+
+fp:fundDomesticBondPct a owl:DatatypeProperty ;
+    rdfs:label "국내채권 비중"@ko ;
+    rdfs:comment "포트폴리오 내 국내채권 비중 %."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_dmst_bd_cmst_rt" .
+
+fp:fundOverseasBondPct a owl:DatatypeProperty ;
+    rdfs:label "해외채권 비중"@ko ;
+    rdfs:comment "포트폴리오 내 해외채권 비중 %."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_ovrs_bd_cmst_rt" .
+
+fp:fundLiquidityPct a owl:DatatypeProperty ;
+    rdfs:label "유동성 비중"@ko ;
+    rdfs:comment "현금·단기자산 비중 %."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_liqt_cmst_rt" .
+
+fp:fundFundPct a owl:DatatypeProperty ;
+    rdfs:label "펀드(재간접) 비중"@ko ;
+    rdfs:comment "다른 펀드에 투자한 비중 %. 재간접 펀드는 이 값이 높다."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_fd_cmst_rt" .
+
+fp:fundOtherAssetPct a owl:DatatypeProperty ;
+    rdfs:label "기타자산 비중"@ko ;
+    rdfs:comment "파생·실물 등 기타자산 비중 %. 7개 비중의 합이 100 이 아닐 수 있다."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_etc_ast_cmst_rt" .
+
+# ----------------------------------------------------------------------------
+# 13. 검색 텍스트 / 기준일
+# ----------------------------------------------------------------------------
+
+fp:fundAttributeSearchText a owl:DatatypeProperty ;
+    rdfs:label "속성 검색 텍스트"@ko ;
+    rdfs:comment "유형·지역·속성·벤치마크를 이어 붙인 검색용 문자열. 자유 키워드 질의는 이 컬럼에 LIKE."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "prfd_attr_search_text" .
+
+fp:fundBaseDate a owl:DatatypeProperty ;
+    rdfs:label "기준일"@ko ;
+    rdfs:comment "스냅샷 기준일 2026-08-21. 약 60% 행이 NULL 이므로 기준일 필터를 걸지 않는다."@ko ;
+    rdfs:domain fp:PublicFund ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:baseDate ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "base_date" .
+
+# ----------------------------------------------------------------------------
+# 14. SHACL 제약
+# ----------------------------------------------------------------------------
+
+fp:PublicFundShape a sh:NodeShape ;
+    sh:targetClass fp:PublicFund ;
+    rdfs:label "공모펀드 제약"@ko ;
+    sh:property [
+        sh:path fp:fundRiskGrade ;
+        sh:class fp:RiskGrade ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasManagementAttribute ;
+        sh:class fp:ManagementAttribute ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasFeeType ;
+        sh:class fp:FeeType ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasSalesChannel ;
+        sh:class fp:SalesChannel ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:memberOfFamily ;
+        sh:class fp:FundFamily ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:fundNetAssets ;
+        sh:minInclusive 0
+    ] .
+
+fp:FeeTypeShape a sh:NodeShape ;
+    sh:targetClass fp:FeeType ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:in ( "수수료미징구" "선취" "후취" )
+    ] .
+
+fp:SalesChannelShape a sh:NodeShape ;
+    sh:targetClass fp:SalesChannel ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:in ( "온라인" "오프라인" "직판" )
+    ] .

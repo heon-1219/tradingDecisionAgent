@@ -1,0 +1,494 @@
+# ============================================================================
+# etf_kr.ttl — 국내 ETF/ETN 마스터 (v_etf_kr / PREF01N001) TBox
+#
+# 목적
+#   국내ETF마스터 뷰의 58개 컬럼을 fp:DomesticETF / fp:DomesticETN 의 속성으로 문서화하고
+#   운용전략(fp:Strategy), 위험등급(fp:hasRiskGrade → fp:RiskGrade), 분배주기
+#   (fp:etfKrDividendCycle → fp:DistributionCycle) 열거형을 연결한다.
+#
+# TBox / ABox
+#   ETF/ETN 인스턴스는 런타임에 SQLite v_etf_kr 로부터 생성된다 (d:etf_kr/<pd_itm_no>).
+#   product_type 이 '국내ETN' 이면 fp:DomesticETN, 아니면 fp:DomesticETF 로 타입이 부여된다.
+#   fp:sourceId 는 fp:DomesticETF 하나만 보유하며 fp:DomesticETN 은 fp:sourceTable 만 가진다.
+#
+# 데이터 희소성 (2026-08-21 기준)
+#   - cu_charge_rt(총보수) 는 ETF 의 약 18% 에만 수록, ETN 은 미수록. 보수 비교 시 NULL 제외 명시.
+#   - cu_base_index(기초지수) 일부 종목만, ref_base_index(Refinitiv) 약 68% 수록.
+#   - pd_dvid_cycl 공백 = 미분배. delisting_date '9999-12-31' = 상장 중.
+#   - 대표 표시명은 pd_abrv_nm (예: 'KODEX 로봇액티브'), pd_nm 은 집합투자기구 정식명.
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+# ----------------------------------------------------------------------------
+# 1. 테이블 클래스
+# ----------------------------------------------------------------------------
+
+fp:DomesticETF a owl:Class ;
+    rdfs:subClassOf fp:ETF ;
+    rdfs:label "국내ETF"@ko , "Domestic ETF"@en ;
+    rdfs:comment "한국거래소 상장 ETF. 원천 PREF01N001 국내ETF마스터 → 뷰 v_etf_kr (product_type='국내ETF'). 기준일 2026-08-21."@ko ;
+    fp:sourceTable "v_etf_kr" ;
+    fp:sourceId "PREF01N001" .
+
+fp:DomesticETN a owl:Class ;
+    rdfs:subClassOf fp:ETN ;
+    rdfs:label "국내ETN"@ko , "Domestic ETN"@en ;
+    rdfs:comment "한국거래소 상장 ETN. v_etf_kr 에서 product_type='국내ETN' 인 행. 발행 증권사가 manager_name 에 들어가며 총보수(cu_charge_rt)는 미수록."@ko ;
+    fp:sourceTable "v_etf_kr" .
+
+# ----------------------------------------------------------------------------
+# 2. 열거형: 운용전략
+# ----------------------------------------------------------------------------
+
+fp:Strategy a owl:Class ;
+    rdfs:label "ETF 운용전략"@ko , "ETF Strategy"@en ;
+    rdfs:comment "v_etf_kr.cu_strtegy. 실물복제 / 합성복제 / 액티브 / C."@ko .
+
+fp:Strategy_실물복제 a fp:Strategy ; fp:code "실물복제" ; rdfs:label "실물복제"@ko , "Physical replication"@en ; rdfs:comment "기초지수 구성종목을 직접 보유."@ko .
+fp:Strategy_합성복제 a fp:Strategy ; fp:code "합성복제" ; rdfs:label "합성복제"@ko , "Synthetic replication"@en ; rdfs:comment "스왑 등 파생계약으로 지수 수익률 복제. 거래상대방 위험 존재."@ko .
+fp:Strategy_액티브   a fp:Strategy ; fp:code "액티브"   ; rdfs:label "액티브"@ko , "Active"@en ; rdfs:comment "비교지수 대비 초과수익을 추구하는 액티브 ETF. 상품명에 '액티브' 포함."@ko .
+fp:Strategy_C        a fp:Strategy ; fp:code "C"        ; rdfs:label "C(분류 미상)"@ko ; rdfs:comment "C = 원천 분류 미상 코드. 실물/합성 판단 불가이므로 답변 시 '분류 정보 없음' 으로 처리."@ko .
+
+# ----------------------------------------------------------------------------
+# 3. 컬럼 속성 — 식별 / 명칭 / 판매상태
+# ----------------------------------------------------------------------------
+
+fp:etfKrIsin a owl:DatatypeProperty ;
+    rdfs:label "종목번호(ISIN)"@ko ;
+    rdfs:comment "ISIN 코드 (KR7 로 시작). 기본키."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productCode ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_itm_no" .
+
+fp:etfKrTicker a owl:DatatypeProperty ;
+    rdfs:label "단축코드"@ko ;
+    rdfs:comment "거래소 6자리 단축코드 (예: 069500). 사용자가 숫자 코드를 말하면 이 컬럼."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:ticker ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_ticker" .
+
+fp:etfKrShortName a owl:DatatypeProperty ;
+    rdfs:label "상품약어명(대표 표시명)"@ko ;
+    rdfs:comment "브랜드+테마 형태의 약어명 (예: 'KODEX 로봇액티브', 'TIGER 미국S&P500'). 사용자에게 보여주는 대표명이며 상품명 검색은 이 컬럼에 LIKE."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:name ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_abrv_nm" .
+
+fp:etfKrName a owl:DatatypeProperty ;
+    rdfs:label "정식명"@ko ;
+    rdfs:comment "집합투자기구 정식 명칭 (예: '삼성 KODEX 로봇액티브 증권상장지수투자신탁[주식]')."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_nm" .
+
+fp:etfKrProductType a owl:DatatypeProperty ;
+    rdfs:label "상품유형"@ko ;
+    rdfs:comment "'국내ETF' 또는 '국내ETN'. ETN 을 제외하려면 product_type = '국내ETF'."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productType ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "product_type" .
+
+fp:etfKrGroup a owl:DatatypeProperty ;
+    rdfs:label "상품그룹"@ko ;
+    rdfs:comment "ETF / ETN 그룹 코드. product_type 과 중복 정보."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_grp_no" .
+
+fp:etfKrIsOnSale a owl:DatatypeProperty ;
+    rdfs:label "판매중 여부"@ko ;
+    rdfs:comment "1 = 판매중이고 거래정지가 아님 (pd_sale_yn=1 AND pd_tr_yn=0), 0 = 그 외. 추천 질의는 is_on_sale = 1 조건 필수."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "is_on_sale" .
+
+fp:etfKrSaleFlag a owl:DatatypeProperty ;
+    rdfs:label "판매여부"@ko ;
+    rdfs:comment "1 = 당사 판매, 0 = 미판매. is_on_sale 의 구성요소."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_sale_yn" .
+
+fp:etfKrTradingHalt a owl:DatatypeProperty ;
+    rdfs:label "거래정지 여부"@ko ;
+    rdfs:comment "1 = 거래정지, 0 = 정상 거래."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_tr_yn" .
+
+# ----------------------------------------------------------------------------
+# 4. 운용사 / 전략 / 지수
+# ----------------------------------------------------------------------------
+
+fp:etfKrManagerName a owl:DatatypeProperty ;
+    rdfs:label "운용사(정규화)"@ko ;
+    rdfs:comment "정규화된 운용사명 (ETF) 또는 발행사명 (ETN). 예: 삼성자산운용, 미래에셋자산운용, KB자산운용. 런타임에 fp:managedBy 로 연결."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "manager_name" .
+
+fp:etfKrManagerRaw a owl:DatatypeProperty ;
+    rdfs:label "운용사(원천 표기)"@ko ;
+    rdfs:comment "원천 그대로의 운용사 표기 (약칭·법인명 혼재). 검색은 manager_name 우선."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_fund_mgmt_co" .
+
+fp:hasEtfKrStrategy a owl:ObjectProperty ;
+    rdfs:label "운용전략"@ko ;
+    rdfs:comment "실물복제 / 합성복제 / 액티브 / C(분류 미상)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range fp:Strategy ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_strtegy" .
+
+fp:etfKrLeverageFactor a owl:DatatypeProperty ;
+    rdfs:label "레버리지 배수"@ko ;
+    rdfs:comment "1 = 일반, 2 = 2배 레버리지, -1 = 인버스, -2 = 인버스2X(곱버스), 3 = 3배 등. 레버리지·인버스 제외 시 cu_lev_fector = 1 OR cu_lev_fector IS NULL."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "배" ;
+    rdfs:subPropertyOf fp:leverageFactor ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_lev_fector" .
+
+fp:etfKrBaseIndex a owl:DatatypeProperty ;
+    rdfs:label "기초지수"@ko ;
+    rdfs:comment "추종 기초지수명. 일부 종목만 수록 — NULL 이 '지수 없음' 을 뜻하지 않는다. ref_base_index 와 함께 COALESCE 권장."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_base_index" .
+
+fp:etfKrRefBaseIndex a owl:DatatypeProperty ;
+    rdfs:label "Refinitiv 벤치마크"@ko ;
+    rdfs:comment "Refinitiv(LSEG) 제공 벤치마크 지수명, 약 68% 수록. 영문 표기."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "ref_base_index" .
+
+# ----------------------------------------------------------------------------
+# 5. 보수
+# ----------------------------------------------------------------------------
+
+fp:etfKrTotalExpenseRatio a owl:DatatypeProperty ;
+    rdfs:label "총보수"@ko ;
+    rdfs:comment "연 총보수 %. ETF 의 약 18% 에만 수록되고 ETN 은 미수록. 보수 비교·정렬 시 반드시 cu_charge_rt IS NOT NULL 을 걸고, 누락 종목이 많음을 답변에 명시."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    rdfs:subPropertyOf fp:expenseRatio ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_charge_rt" .
+
+fp:etfKrOtherExpenseRatio a owl:DatatypeProperty ;
+    rdfs:label "기타비용"@ko ;
+    rdfs:comment "총보수 외 기타비용 %. 총보수와 같이 일부만 수록."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_charge_etc_rt" .
+
+# ----------------------------------------------------------------------------
+# 6. 자산군 / 지역 / 분류
+# ----------------------------------------------------------------------------
+
+fp:etfKrAssetType a owl:DatatypeProperty ;
+    rdfs:label "투자자산유형(한글)"@ko ;
+    rdfs:comment "주식 / 채권 / 원자재 / 대체투자 / 혼합자산 / 단기자금 / 기타 / 통화 / 부동산. 영문 자산군(fp:AssetClass fp:code)과 fp:altCode 로 대응. 런타임에 fp:hasAssetClass 로 정규화."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "wu_inv_ast_type" .
+
+fp:etfKrInvestRegion a owl:DatatypeProperty ;
+    rdfs:label "투자지역(한글)"@ko ;
+    rdfs:comment "국내 / 미국 / 글로벌 / 중국 / 아시아 / 일본 / 인도 / 남미·북미 / 유럽 / 이머징·브릭스 / 베트남. 가운뎃점(·) 포함 값에 유의. 런타임에 fp:investsInRegion → fp:Region_<값> 으로 연결."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "wu_inv_rgn" .
+
+fp:hasEtfKrRefAssetClass a owl:ObjectProperty ;
+    rdfs:label "Refinitiv 자산군"@ko ;
+    rdfs:comment "Refinitiv 자산군 (Equity / Bond / Alternatives / Mixed Assets / Money Market / Commodity / Other). ref_base_index 와 같은 범위(약 68%)만 수록."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range fp:AssetClass ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "ref_ast_type" .
+
+fp:etfKrRefGeoFocus a owl:DatatypeProperty ;
+    rdfs:label "Refinitiv 지역(영문)"@ko ;
+    rdfs:comment "Refinitiv 기준 영문 투자지역 (예: Korea, United States of America, Global). 일부만 수록."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "ref_geo_focus" .
+
+fp:etfKrIsCore a owl:DatatypeProperty ;
+    rdfs:label "핵심ETF 여부"@ko ;
+    rdfs:comment "Y = 당사 선정 핵심 ETF, N = 일반. 대표 상품 추천 시 우선 고려."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "wu_core_yn" .
+
+# ----------------------------------------------------------------------------
+# 7. 위험 / 연금
+# ----------------------------------------------------------------------------
+
+fp:etfKrRiskGradeName a owl:DatatypeProperty ;
+    rdfs:label "위험등급명"@ko ;
+    rdfs:comment "예: '높은위험(2등급)'. 숫자 비교는 risk_grade 사용."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_risk_nm" .
+
+fp:hasRiskGrade a owl:ObjectProperty ;
+    rdfs:label "투자위험등급"@ko ;
+    rdfs:comment "1~6 등급. 1 = 매우높은위험, 6 = 매우낮은위험 (숫자가 작을수록 위험). '안전한' 은 risk_grade >= 5, '공격적' 은 risk_grade <= 2 정도로 해석."@ko ;
+    rdfs:domain fp:Product ; rdfs:range fp:RiskGrade ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "risk_grade" .
+
+fp:etfKrPensionTradable a owl:DatatypeProperty ;
+    rdfs:label "연금거래 가능 여부"@ko ;
+    rdfs:comment "Y = 연금저축·IRP 계좌에서 거래 가능. 레버리지·인버스는 대부분 N."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_pen_tr_yn" .
+
+fp:etfKrPensionRiskType a owl:DatatypeProperty ;
+    rdfs:label "연금 위험자산 구분"@ko ;
+    rdfs:comment "위험자산 / 안전자산 / N. 퇴직연금 위험자산 70% 한도 계산 시 사용. 안전자산은 100% 편입 가능."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_pen_risk_nm" .
+
+# ----------------------------------------------------------------------------
+# 8. 규모 / 가격
+# ----------------------------------------------------------------------------
+
+fp:etfKrNetAssets a owl:DatatypeProperty ;
+    rdfs:label "순자산총액"@ko ;
+    rdfs:comment "순자산총액 (원). 규모 순위·'큰 ETF' 질의의 기본 기준."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    rdfs:subPropertyOf fp:netAssets ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_net_tamt" .
+
+fp:etfKrAum a owl:DatatypeProperty ;
+    rdfs:label "AUM"@ko ;
+    rdfs:comment "최근 운용자산 (원). pd_net_tamt 과 거의 동일하나 산출 원천이 다름."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_last_aum" .
+
+fp:etfKrNav a owl:DatatypeProperty ;
+    rdfs:label "NAV"@ko ;
+    rdfs:comment "최근 순자산가치 (원/주)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_last_nav" .
+
+fp:etfKrClosePrice a owl:DatatypeProperty ;
+    rdfs:label "종가"@ko ;
+    rdfs:comment "기준일 종가 (원)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_clpr" .
+
+fp:etfKrMarketPrice a owl:DatatypeProperty ;
+    rdfs:label "현재가"@ko ;
+    rdfs:comment "적재 시점 현재가 (원). 스냅샷이므로 실시간 아님."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "ru_mkt_price" .
+
+fp:etfKrBasePrice a owl:DatatypeProperty ;
+    rdfs:label "기준가"@ko ;
+    rdfs:comment "기준가격 (원)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_bpr" .
+
+fp:etfKrPremiumDiscountRate a owl:DatatypeProperty ;
+    rdfs:label "괴리율"@ko ;
+    rdfs:comment "(시장가 - NAV) / NAV × 100 (%). 절댓값이 크면 비효율적 가격 형성."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_diff_rt" .
+
+fp:etfKrTrackingError a owl:DatatypeProperty ;
+    rdfs:label "추적오차율"@ko ;
+    rdfs:comment "NAV 와 기초지수 수익률 차이의 표준편차 (%). 낮을수록 지수를 잘 추종."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_chas_errt" .
+
+# ----------------------------------------------------------------------------
+# 9. 수익률 / 변동성
+# ----------------------------------------------------------------------------
+
+fp:etfKrReturn1D a owl:DatatypeProperty ;
+    rdfs:label "1일 수익률"@ko ;
+    rdfs:comment "기준일 1일 수익률 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_1d" .
+
+fp:etfKrReturn1M a owl:DatatypeProperty ;
+    rdfs:label "1개월 수익률"@ko ;
+    rdfs:comment "최근 1개월 수익률 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_1m" .
+
+fp:etfKrReturn3M a owl:DatatypeProperty ;
+    rdfs:label "3개월 수익률"@ko ;
+    rdfs:comment "최근 3개월 수익률 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_3m" .
+
+fp:etfKrReturn6M a owl:DatatypeProperty ;
+    rdfs:label "6개월 수익률"@ko ;
+    rdfs:comment "최근 6개월 수익률 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_6m" .
+
+fp:etfKrReturnYtd a owl:DatatypeProperty ;
+    rdfs:label "연초대비 수익률"@ko ;
+    rdfs:comment "2026-01-01 이후 누적 수익률 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_ytd" .
+
+fp:etfKrReturn1Y a owl:DatatypeProperty ;
+    rdfs:label "1년 수익률"@ko ;
+    rdfs:comment "최근 1년 수익률 %. 상장 1년 미만 종목은 NULL. '수익률 좋은 ETF' 의 기본 정렬 기준."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_er_1y" .
+
+fp:etfKrVolatility1M a owl:DatatypeProperty ;
+    rdfs:label "1개월 변동성"@ko ;
+    rdfs:comment "최근 1개월 일수익률 표준편차의 연환산 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vlty_1m" .
+
+fp:etfKrVolatility3M a owl:DatatypeProperty ;
+    rdfs:label "3개월 변동성"@ko ;
+    rdfs:comment "최근 3개월 연환산 변동성 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vlty_3m" .
+
+fp:etfKrVolatility6M a owl:DatatypeProperty ;
+    rdfs:label "6개월 변동성"@ko ;
+    rdfs:comment "최근 6개월 연환산 변동성 %."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vlty_6m" .
+
+fp:etfKrVolatility1Y a owl:DatatypeProperty ;
+    rdfs:label "1년 변동성"@ko ;
+    rdfs:comment "최근 1년 연환산 변동성 %. '변동성 낮은 ETF' 질의의 기준."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vlty_1y" .
+
+# ----------------------------------------------------------------------------
+# 10. 유동성
+# ----------------------------------------------------------------------------
+
+fp:etfKrVolume1D a owl:DatatypeProperty ;
+    rdfs:label "일거래량"@ko ;
+    rdfs:comment "기준일 거래량 (주)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ; fp:unit "주" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vol_1d" .
+
+fp:etfKrTradingValue1D a owl:DatatypeProperty ;
+    rdfs:label "일거래대금"@ko ;
+    rdfs:comment "기준일 거래대금 (원)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_val_1d" .
+
+fp:etfKrAvgTradingValue1M a owl:DatatypeProperty ;
+    rdfs:label "1개월 평균 일거래대금"@ko ;
+    rdfs:comment "최근 1개월 일평균 거래대금 (원). 유동성 판단은 하루치보다 이 값을 우선."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_val_1m" .
+
+# ----------------------------------------------------------------------------
+# 11. 분배금
+# ----------------------------------------------------------------------------
+
+fp:etfKrDividendCycle a owl:ObjectProperty ;
+    rdfs:label "분배주기"@ko ;
+    rdfs:comment "A=연간, Q=분기, M=월간, S=반기. 공백/NULL = 미분배. 월배당 ETF 질의는 pd_dvid_cycl = 'M'."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range fp:DistributionCycle ;
+    rdfs:subPropertyOf fp:dividendCycle ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_dvid_cycl" .
+
+fp:etfKrDividendYield a owl:DatatypeProperty ;
+    rdfs:label "분배수익률"@ko ;
+    rdfs:comment "최근 12개월 분배금 / 가격 × 100 (%). 미분배 종목은 NULL 또는 0."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_dvid_yield" .
+
+fp:etfKrDividendPerShare a owl:DatatypeProperty ;
+    rdfs:label "주당 분배금"@ko ;
+    rdfs:comment "최근 지급된 주당 분배금 (원)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "KRW" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_divd_amt_pshr" .
+
+fp:etfKrDividendPayCount a owl:DatatypeProperty ;
+    rdfs:label "연간 분배 지급횟수"@ko ;
+    rdfs:comment "연간 지급 횟수 (회). 12 = 월배당."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ; fp:unit "회" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_dvid_pay_cnt" .
+
+fp:etfKrDividendPayMonths a owl:DatatypeProperty ;
+    rdfs:label "분배 지급월"@ko ;
+    rdfs:comment "지급월 목록 문자열 (예: '1,4,7,10')."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_dvid_pay_months" .
+
+# ----------------------------------------------------------------------------
+# 12. 상장 정보 / 채권형 지표 / 기준일
+# ----------------------------------------------------------------------------
+
+fp:etfKrListingDate a owl:DatatypeProperty ;
+    rdfs:label "상장일"@ko ;
+    rdfs:comment "ISO 날짜. '신규 상장' 질의는 listing_date 최근순."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:listingDate ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "listing_date" .
+
+fp:etfKrDelistingDate a owl:DatatypeProperty ;
+    rdfs:label "상장폐지일"@ko ;
+    rdfs:comment "'9999-12-31' = 상장 중. 그 외 값은 상장폐지(예정)일."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:date ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "delisting_date" .
+
+fp:etfKrListedShares a owl:DatatypeProperty ;
+    rdfs:label "상장주식수"@ko ;
+    rdfs:comment "상장 주식수 (주)."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:integer ; fp:unit "주" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_lst_stk_cnt" .
+
+fp:etfKrAverageCoupon a owl:DatatypeProperty ;
+    rdfs:label "평균쿠폰"@ko ;
+    rdfs:comment "채권형 ETF 보유채권 평균 표면금리 %. 채권형 외에는 NULL."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "fn_average_coupon" .
+
+fp:etfKrEffectiveMaturity a owl:DatatypeProperty ;
+    rdfs:label "실질만기"@ko ;
+    rdfs:comment "채권형 ETF 보유채권 실질만기 (년). 채권형 외에는 NULL."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:decimal ; fp:unit "년" ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "fn_effective_maturity" .
+
+fp:etfKrBaseDate a owl:DatatypeProperty ;
+    rdfs:label "기준일"@ko ;
+    rdfs:comment "스냅샷 기준일 2026-08-21."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:baseDate ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "base_date" .
+
+# ----------------------------------------------------------------------------
+# 13. SHACL 제약
+# ----------------------------------------------------------------------------
+
+fp:DomesticETFShape a sh:NodeShape ;
+    sh:targetClass fp:DomesticETF ;
+    rdfs:label "국내ETF 제약"@ko ;
+    sh:property [
+        sh:path fp:hasRiskGrade ;
+        sh:class fp:RiskGrade ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasEtfKrStrategy ;
+        sh:class fp:Strategy ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:etfKrDividendCycle ;
+        sh:class fp:DistributionCycle ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:etfKrTotalExpenseRatio ;
+        sh:minInclusive 0 ;
+        sh:message "총보수는 0 이상이어야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:etfKrNetAssets ;
+        sh:minInclusive 0
+    ] .
+
+fp:StrategyShape a sh:NodeShape ;
+    sh:targetClass fp:Strategy ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:in ( "실물복제" "합성복제" "액티브" "C" )
+    ] .

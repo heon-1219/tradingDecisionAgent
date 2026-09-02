@@ -19,6 +19,43 @@ def norm(s: str | None) -> str:
     return re.sub(r"\s+", "", s)
 
 
+def _is_ascii(s: str) -> bool:
+    return all(ord(ch) < 128 for ch in s)
+
+
+class _Matcher:
+    """Korean/CJK aliases match as substrings of the space-stripped text; ASCII aliases match on
+    word boundaries of the lower-cased original text (so 'AI' does not hit 'Daily', 'EV' not 'Everything')."""
+
+    def __init__(self, pairs):
+        self.sub = []  # (norm alias, obj)
+        self.rx = []  # (compiled regex, obj)
+        for alias, obj in pairs:
+            a = unicodedata.normalize("NFKC", str(alias or "")).strip().lower()
+            if not a:
+                continue
+            if _is_ascii(a):
+                pat = r"(?<![a-z0-9])" + r"\s*".join(re.escape(w) for w in a.split()) + r"(?![a-z0-9])"
+                self.rx.append((re.compile(pat), obj, a))
+            else:
+                self.sub.append((norm(a), obj))
+        self.sub.sort(key=lambda x: -len(x[0]))
+
+    def match(self, text: str, min_len: int = 2):
+        n = norm(text)
+        low = unicodedata.normalize("NFKC", str(text or "")).lower()
+        seen, out = set(), []
+        for a, obj in self.sub:
+            if len(a) >= min_len and a in n and obj.id not in seen:
+                seen.add(obj.id)
+                out.append(obj)
+        for rx, obj, a in self.rx:
+            if len(a) >= min_len and obj.id not in seen and rx.search(low):
+                seen.add(obj.id)
+                out.append(obj)
+        return out
+
+
 @dataclass
 class Manager:
     id: str
@@ -57,10 +94,9 @@ class Lexicon:
             ((norm(a), m) for m in managers for a in [m.canonical, *m.aliases] if norm(a)),
             key=lambda x: -len(x[0]),
         )
-        self._theme_syn = sorted(
-            ((norm(s), t) for t in themes for s in [t.label_ko, t.label_en, *t.synonyms] if norm(s)),
-            key=lambda x: -len(x[0]),
-        )
+        self._theme_m = _Matcher((s, t) for t in themes for s in [t.label_ko, t.label_en, *t.synonyms])
+        self._comp_m = _Matcher((a, c) for c in companies for a in [c.name_ko, c.name_en, *c.aliases])
+        self._mgr_m = _Matcher((a, m) for m in managers for a in [m.canonical, *m.aliases])
         self._comp_alias = sorted(
             ((norm(a), c) for c in companies for a in [c.name_ko, c.name_en, *c.aliases] if norm(a)),
             key=lambda x: -len(x[0]),
@@ -82,34 +118,13 @@ class Lexicon:
 
     # --- matching -------------------------------------------------------
     def match_themes(self, text: str, min_len: int = 2) -> list[Theme]:
-        n = norm(text)
-        seen: set[str] = set()
-        out: list[Theme] = []
-        for syn, t in self._theme_syn:
-            if len(syn) >= min_len and syn in n and t.id not in seen:
-                seen.add(t.id)
-                out.append(t)
-        return out
+        return self._theme_m.match(text, min_len)
 
     def match_companies(self, text: str, min_len: int = 2) -> list[Company]:
-        n = norm(text)
-        seen: set[str] = set()
-        out: list[Company] = []
-        for a, c in self._comp_alias:
-            if len(a) >= min_len and a in n and c.id not in seen:
-                seen.add(c.id)
-                out.append(c)
-        return out
+        return self._comp_m.match(text, min_len)
 
     def match_managers(self, text: str, min_len: int = 2) -> list[Manager]:
-        n = norm(text)
-        seen: set[str] = set()
-        out: list[Manager] = []
-        for a, m in self._mgr_alias:
-            if len(a) >= min_len and a in n and m.id not in seen:
-                seen.add(m.id)
-                out.append(m)
-        return out
+        return self._mgr_m.match(text, min_len)
 
     def manager_for_product_name(self, name: str | None) -> str | None:
         """Longest-alias prefix match: '미래에셋국민참여형...' -> 미래에셋자산운용, 'KODEX 로봇' -> 삼성자산운용."""

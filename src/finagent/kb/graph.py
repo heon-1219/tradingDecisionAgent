@@ -383,6 +383,9 @@ class KG:
 
     def query(self, sparql: str, limit: int = 100) -> list[dict]:
         q = sparql.strip()
+        q = re.sub(r"^```(?:sparql)?\s*|\s*```$", "", q, flags=re.I).strip()
+        # SPARQL forbids '/' in prefixed local names: rewrite d:etf_kr/KR7... -> <http://mafest.ai/data/etf_kr/KR7...>
+        q = re.sub(r"\bd:([A-Za-z0-9_]+/[A-Za-z0-9_.\-가-힣一-鿿]+)", lambda m: f"<{D}{m.group(1)}>", q)
         if "PREFIX" not in q.upper():
             q = PREFIXES + q
         if not re.search(r"\blimit\s+\d+", q, re.I):

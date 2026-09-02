@@ -47,7 +47,7 @@
 - id: bank_finance
   label_ko: 금융
   label_en: Financials
-  synonyms: [은행, 금융, 금융지주, 증권, 보험, bank, banks, financial, financials, insurance]
+  synonyms: [은행, 금융, 금융지주, 보험, 은행주, 금융주, bank, banks, financial, financials, insurance]
 - id: nuclear
   label_ko: 원자력
   label_en: Nuclear Energy

@@ -1,0 +1,363 @@
+# ============================================================================
+# etf_gl.ttl — 해외 ETF/ETN 마스터 (v_etf_gl / PREF02N001) TBox
+#
+# 목적
+#   해외ETF마스터 뷰의 36개 컬럼을 fp:ForeignETF / fp:ForeignETN 의 속성으로 문서화하고
+#   거래소(fp:Exchange), 지수복제방식(fp:ReplicationMethod), 자산군(fp:AssetClass) 열거형을 연결한다.
+#
+# TBox / ABox
+#   인스턴스는 런타임에 SQLite v_etf_gl 로부터 생성된다 (d:etf_gl/<pd_itm_no>).
+#   product_type 이 '해외ETN' 이면 fp:ForeignETN, 아니면 fp:ForeignETF.
+#   fp:sourceId 는 fp:ForeignETF 만 보유.
+#
+# 데이터 특성 (2026-08-22 기준 — 다른 뷰보다 하루 늦음)
+#   - 모든 텍스트 컬럼(상품명, 운용사, 기초지수, 운용전략, 지역, 자산군)은 영문. 한글 질의는
+#     영문 키워드로 번역 후 LIKE 검색 (예: '반도체' → 'Semiconductor').
+#   - 기초지수 결측 센티널: 'Index is not provided by Management Company',
+#     'Index is not available on Lipper database' 등은 지수 미제공을 뜻하므로 지수로 취급하지 않는다.
+#   - expense_ratio_pct 는 전 종목 수록 (국내ETF 와 달리 보수 비교가 완전함).
+#   - cu_lev_fector NULL = 비레버리지.
+#   - 통화는 USD, 시장은 US (NYSE Arca / NASDAQ / NYSE).
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+
+# ----------------------------------------------------------------------------
+# 1. 테이블 클래스
+# ----------------------------------------------------------------------------
+
+fp:ForeignETF a owl:Class ;
+    rdfs:subClassOf fp:ETF ;
+    rdfs:label "해외ETF"@ko , "Foreign ETF"@en ;
+    rdfs:comment "미국 거래소 상장 ETF. 원천 PREF02N001 해외ETF마스터 → 뷰 v_etf_gl (product_type='해외ETF'). 모든 텍스트가 영문. 기준일 2026-08-22."@ko ;
+    fp:sourceTable "v_etf_gl" ;
+    fp:sourceId "PREF02N001" .
+
+fp:ForeignETN a owl:Class ;
+    rdfs:subClassOf fp:ETN ;
+    rdfs:label "해외ETN"@ko , "Foreign ETN"@en ;
+    rdfs:comment "미국 거래소 상장 ETN. v_etf_gl 에서 product_type='해외ETN' (cu_etn_yn='Y') 인 행."@ko ;
+    fp:sourceTable "v_etf_gl" .
+
+# ----------------------------------------------------------------------------
+# 2. 열거형: 거래소
+# ----------------------------------------------------------------------------
+
+fp:Exchange a owl:Class ;
+    rdfs:label "거래소"@ko , "Exchange"@en ;
+    rdfs:comment "v_etf_gl.pd_exg_mkt_cd 코드. AMX / NAS / NYS / 101 / 102."@ko .
+
+fp:Exchange_AMX a fp:Exchange ; fp:code "AMX" ; fp:gradeRank 1 ; rdfs:label "NYSE Arca"@ko , "NYSE Arca"@en ; rdfs:comment "미국 ETF 의 대부분이 상장된 NYSE Arca (구 AMEX 코드)."@ko .
+fp:Exchange_NAS a fp:Exchange ; fp:code "NAS" ; fp:gradeRank 2 ; rdfs:label "NASDAQ"@ko , "NASDAQ"@en .
+fp:Exchange_NYS a fp:Exchange ; fp:code "NYS" ; fp:gradeRank 3 ; rdfs:label "NYSE"@ko , "New York Stock Exchange"@en .
+fp:Exchange_101 a fp:Exchange ; fp:code "101" ; fp:gradeRank 4 ; rdfs:label "기타(101)"@ko ; rdfs:comment "기타 시장 코드. 거래소명 미확정."@ko .
+fp:Exchange_102 a fp:Exchange ; fp:code "102" ; fp:gradeRank 5 ; rdfs:label "기타(102)"@ko ; rdfs:comment "기타 시장 코드. 거래소명 미확정."@ko .
+
+# ----------------------------------------------------------------------------
+# 3. 열거형: 지수 복제방식
+# ----------------------------------------------------------------------------
+
+fp:ReplicationMethod a owl:Class ;
+    rdfs:label "지수 복제방식"@ko , "Index Replication Method"@en ;
+    rdfs:comment "v_etf_gl.cu_index_repl_mthd. Optimized / Swap / Full / Other."@ko .
+
+fp:ReplicationMethod_Full      a fp:ReplicationMethod ; fp:code "Full"      ; rdfs:label "완전복제"@ko , "Full replication"@en ; rdfs:comment "지수 구성종목 전부를 비중대로 보유."@ko .
+fp:ReplicationMethod_Optimized a fp:ReplicationMethod ; fp:code "Optimized" ; rdfs:label "최적화(표본)복제"@ko , "Optimized sampling"@en ; rdfs:comment "대표 종목 표본으로 지수를 근사."@ko .
+fp:ReplicationMethod_Swap      a fp:ReplicationMethod ; fp:code "Swap"      ; rdfs:label "스왑(합성)복제"@ko , "Swap-based"@en ; rdfs:comment "스왑 계약으로 지수 수익률 복제. 국내 '합성복제' 에 대응."@ko .
+fp:ReplicationMethod_Other     a fp:ReplicationMethod ; fp:code "Other"     ; rdfs:label "기타"@ko , "Other"@en .
+
+# ----------------------------------------------------------------------------
+# 4. 컬럼 속성 — 식별 / 명칭 / 상태
+# ----------------------------------------------------------------------------
+
+fp:etfGlRic a owl:DatatypeProperty ;
+    rdfs:label "종목번호(RIC)"@ko ;
+    rdfs:comment "Refinitiv RIC 형식 (예: 'AAUA.K', 'SPY.P'). 기본키. 사용자가 말하는 티커는 ticker 컬럼."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productCode ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_itm_no" .
+
+fp:etfGlTicker a owl:DatatypeProperty ;
+    rdfs:label "티커"@ko ;
+    rdfs:comment "미국 거래소 티커 (예: SPY, QQQ, SOXL). 대문자. 티커 질의는 UPPER(ticker) = 'QQQ'."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:ticker ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "ticker" .
+
+fp:etfGlName a owl:DatatypeProperty ;
+    rdfs:label "상품명(영문)"@ko ;
+    rdfs:comment "영문 상품명 (예: 'Invesco QQQ Trust'). 한글 검색 불가 — 키워드를 영문으로 변환해 LIKE."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:name ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_nm" .
+
+fp:etfGlProductType a owl:DatatypeProperty ;
+    rdfs:label "상품유형"@ko ;
+    rdfs:comment "'해외ETF' 또는 '해외ETN'."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:productType ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "product_type" .
+
+fp:etfGlGroup a owl:DatatypeProperty ;
+    rdfs:label "상품그룹"@ko ;
+    rdfs:comment "ETF / ETN 그룹 코드."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_grp_no" .
+
+fp:etfGlIsOnSale a owl:DatatypeProperty ;
+    rdfs:label "판매중 여부"@ko ;
+    rdfs:comment "1 = 당사에서 매매 가능, 0 = 불가. 추천 질의는 is_on_sale = 1."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "is_on_sale" .
+
+# ----------------------------------------------------------------------------
+# 5. 시장 / 통화 / 식별코드
+# ----------------------------------------------------------------------------
+
+fp:hasEtfGlExchange a owl:ObjectProperty ;
+    rdfs:label "상장 거래소"@ko ;
+    rdfs:comment "AMX = NYSE Arca, NAS = NASDAQ, NYS = NYSE, 101/102 = 기타."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range fp:Exchange ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_exg_mkt_cd" .
+
+fp:etfGlMarketId a owl:DatatypeProperty ;
+    rdfs:label "시장 ID"@ko ;
+    rdfs:comment "국가 시장 식별자. 현재 'US' 단일값."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_mkt_id" .
+
+fp:etfGlCurrency a owl:DatatypeProperty ;
+    rdfs:label "통화"@ko ;
+    rdfs:comment "거래 통화. 현재 'USD' 단일값. 모든 가격·AUM 은 달러."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:currency ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_curr_cd" .
+
+fp:etfGlIsin a owl:DatatypeProperty ;
+    rdfs:label "ISIN"@ko ;
+    rdfs:comment "국제 증권식별번호 (US 로 시작)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_isin_cd" .
+
+# ----------------------------------------------------------------------------
+# 6. 운용사 / 지수 / 전략
+# ----------------------------------------------------------------------------
+
+fp:etfGlManagerName a owl:DatatypeProperty ;
+    rdfs:label "운용사(영문)"@ko ;
+    rdfs:comment "영문 운용사명 (예: BlackRock, Vanguard, Invesco, ProShares, Direxion). 런타임에 fp:managedBy 로 연결. 한글 질의('블랙록')는 영문으로 변환."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "manager_name" .
+
+fp:etfGlBaseIndex a owl:DatatypeProperty ;
+    rdfs:label "기초지수(영문)"@ko ;
+    rdfs:comment "추종 지수명. 'Index is not provided by Management Company', 'Index is not available on Lipper database' 등은 결측 센티널이므로 지수로 취급하지 않는다 (액티브 ETF 에 흔함)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_base_index" .
+
+fp:etfGlStrategyText a owl:DatatypeProperty ;
+    rdfs:label "운용전략 설명(영문)"@ko ;
+    rdfs:comment "약 300자 영문 투자목적·전략 서술. 테마 검색(예: 'semiconductor', 'dividend', 'covered call')에 LIKE 로 활용."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    rdfs:subPropertyOf fp:strategy ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_strtegy" .
+
+# ----------------------------------------------------------------------------
+# 7. 보수 / 구조
+# ----------------------------------------------------------------------------
+
+fp:etfGlExpenseRatio a owl:DatatypeProperty ;
+    rdfs:label "총보수"@ko ;
+    rdfs:comment "연 총보수 %. 전 종목 수록 — 보수 비교·정렬의 표준 컬럼."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    rdfs:subPropertyOf fp:expenseRatio ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "expense_ratio_pct" .
+
+fp:etfGlTotalExpenseRatioRaw a owl:DatatypeProperty ;
+    rdfs:label "총보수(원천)"@ko ;
+    rdfs:comment "expense_ratio_pct 와 동일 원천값 %. 중복 컬럼이므로 expense_ratio_pct 사용을 권장."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_charge_rt" .
+
+fp:etfGlLeverageFactor a owl:DatatypeProperty ;
+    rdfs:label "레버리지 배수"@ko ;
+    rdfs:comment "2 / 3 = 레버리지, -1 / -2 / -3 = 인버스. NULL = 비레버리지. 레버리지 제외는 cu_lev_fector IS NULL OR cu_lev_fector = 1."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "배" ;
+    rdfs:subPropertyOf fp:leverageFactor ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_lev_fector" .
+
+fp:etfGlIsInverseOrShort a owl:DatatypeProperty ;
+    rdfs:label "인버스/숏 여부"@ko ;
+    rdfs:comment "'Y' = 인버스 또는 숏 전략. 그 외 NULL. 런타임에 fp:isInverseOrShort true 로 변환."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_inverse_short_yn" .
+
+fp:etfGlIsIndexTracking a owl:DatatypeProperty ;
+    rdfs:label "지수추종 여부"@ko ;
+    rdfs:comment "'Y' = 패시브 지수추종. NULL 은 액티브 또는 미분류."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_index_tracking_yn" .
+
+fp:hasEtfGlReplicationMethod a owl:ObjectProperty ;
+    rdfs:label "지수 복제방식"@ko ;
+    rdfs:comment "Optimized / Swap / Full / Other. 국내ETF 의 실물복제(Full/Optimized)·합성복제(Swap) 에 대응."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range fp:ReplicationMethod ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_index_repl_mthd" .
+
+fp:etfGlIsEtn a owl:DatatypeProperty ;
+    rdfs:label "ETN 여부"@ko ;
+    rdfs:comment "'Y' = ETN (발행사 신용위험 존재). product_type='해외ETN' 과 동일."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_etn_yn" .
+
+# ----------------------------------------------------------------------------
+# 8. 자산군 / 지역
+# ----------------------------------------------------------------------------
+
+fp:hasEtfGlAssetClass a owl:ObjectProperty ;
+    rdfs:label "투자자산유형"@ko ;
+    rdfs:comment "Equity / Alternatives / Bond / Mixed Assets / Commodity / Money Market (영문 원천값, fp:AssetClass fp:code 와 일치). 'Mixed Assets', 'Money Market' 은 공백 포함."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range fp:AssetClass ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "wu_inv_ast_type" .
+
+fp:etfGlInvestRegion a owl:DatatypeProperty ;
+    rdfs:label "투자지역(영문)"@ko ;
+    rdfs:comment "United States of America / Global / Global Ex US / Global Emerging Markets / China / Europe / Japan / India / Korea / Asia Pacific 등 영문 표기. '미국' 질의는 'United States of America'. 런타임에 fp:investsInRegion → fp:Region_<slug>."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "wu_inv_rgn" .
+
+fp:etfGlIsCore a owl:DatatypeProperty ;
+    rdfs:label "핵심ETF 여부"@ko ;
+    rdfs:comment "Y = 당사 선정 핵심 해외ETF, N = 일반."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "wu_core_yn" .
+
+# ----------------------------------------------------------------------------
+# 9. 규모 / 가격 / 수익률 / 유동성
+# ----------------------------------------------------------------------------
+
+fp:etfGlAum a owl:DatatypeProperty ;
+    rdfs:label "AUM"@ko ;
+    rdfs:comment "최근 운용자산 (USD). 규모 비교 기준. 국내ETF 순자산(KRW)과 통화가 다르므로 직접 비교 금지."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    rdfs:subPropertyOf fp:aum ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_last_aum" .
+
+fp:etfGlNav a owl:DatatypeProperty ;
+    rdfs:label "NAV"@ko ;
+    rdfs:comment "최근 순자산가치 (USD/주)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_last_nav" .
+
+fp:etfGlClosePrice a owl:DatatypeProperty ;
+    rdfs:label "종가"@ko ;
+    rdfs:comment "기준일 종가 (USD)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_clpr" .
+
+fp:etfGlOpenPrice a owl:DatatypeProperty ;
+    rdfs:label "시가"@ko ;
+    rdfs:comment "기준일 시가 (USD)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_opr" .
+
+fp:etfGlHighPrice a owl:DatatypeProperty ;
+    rdfs:label "고가"@ko ;
+    rdfs:comment "기준일 고가 (USD)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_hpr" .
+
+fp:etfGlLowPrice a owl:DatatypeProperty ;
+    rdfs:label "저가"@ko ;
+    rdfs:comment "기준일 저가 (USD)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_lpr" .
+
+fp:etfGlMarketPrice a owl:DatatypeProperty ;
+    rdfs:label "현재가"@ko ;
+    rdfs:comment "적재 시점 현재가 (USD). 스냅샷이므로 실시간 아님."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "ru_mkt_price" .
+
+fp:etfGlReturn1D a owl:DatatypeProperty ;
+    rdfs:label "1일 수익률"@ko ;
+    rdfs:comment "기준일 1일 수익률 %. 해외ETF 는 1개월·1년 등 장기 수익률 컬럼이 없다 — 기간 수익률 질의에 답할 수 없음을 명시."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "%" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_er_1d" .
+
+fp:etfGlVolume1D a owl:DatatypeProperty ;
+    rdfs:label "일거래량"@ko ;
+    rdfs:comment "기준일 거래량 (주)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:integer ; fp:unit "주" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_vol_1d" .
+
+fp:etfGlTradingValue1D a owl:DatatypeProperty ;
+    rdfs:label "일거래대금"@ko ;
+    rdfs:comment "기준일 거래대금 (USD)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:decimal ; fp:unit "USD" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "du_val_1d" .
+
+fp:etfGlListedShares a owl:DatatypeProperty ;
+    rdfs:label "상장주식수"@ko ;
+    rdfs:comment "발행 주식수 (주)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:integer ; fp:unit "주" ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_lst_stk_cnt" .
+
+fp:etfGlListingDate a owl:DatatypeProperty ;
+    rdfs:label "상장일"@ko ;
+    rdfs:comment "ISO 날짜."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:listingDate ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "listing_date" .
+
+fp:etfGlBaseDate a owl:DatatypeProperty ;
+    rdfs:label "기준일"@ko ;
+    rdfs:comment "스냅샷 기준일 2026-08-22 (국내 뷰보다 하루 뒤)."@ko ;
+    rdfs:domain fp:ForeignETF ; rdfs:range xsd:date ;
+    rdfs:subPropertyOf fp:baseDate ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "base_date" .
+
+# ----------------------------------------------------------------------------
+# 10. SHACL 제약
+# ----------------------------------------------------------------------------
+
+fp:ForeignETFShape a sh:NodeShape ;
+    sh:targetClass fp:ForeignETF ;
+    rdfs:label "해외ETF 제약"@ko ;
+    sh:property [
+        sh:path fp:hasEtfGlExchange ;
+        sh:class fp:Exchange ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasEtfGlReplicationMethod ;
+        sh:class fp:ReplicationMethod ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:hasEtfGlAssetClass ;
+        sh:class fp:AssetClass ;
+        sh:maxCount 1
+    ] ;
+    sh:property [
+        sh:path fp:etfGlExpenseRatio ;
+        sh:minInclusive 0 ;
+        sh:message "총보수는 0 이상이어야 합니다."@ko
+    ] ;
+    sh:property [
+        sh:path fp:etfGlCurrency ;
+        sh:in ( "USD" )
+    ] .
+
+fp:ExchangeShape a sh:NodeShape ;
+    sh:targetClass fp:Exchange ;
+    sh:property [
+        sh:path fp:code ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:in ( "AMX" "NAS" "NYS" "101" "102" )
+    ] .

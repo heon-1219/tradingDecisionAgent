@@ -1,0 +1,31 @@
+{"question_id": "S-001", "question": "현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘", "category": "채권", "difficulty": "하", "expect": "answered", "note": "PDF 예시. v_bond_kr is_sellable=1 AND crd_grd IN (AAA,AA+,AA0,AA-) → 78건"}
+{"question_id": "S-002", "question": "국민성장펀드의 구조와 투자전략 동향 등 찾아서 알려줘", "category": "펀드", "difficulty": "중", "expect": "answered", "note": "PDF 예시. 미래에셋국민참여형국민성장혼합자산투자신탁 4개 클래스 + 외부 문서"}
+{"question_id": "S-003", "question": "캠브리콘이 편입된 중국반도체 ETF를 알려줘", "category": "해외ETF", "difficulty": "중", "expect": "answered", "note": "PDF 예시. 그래프: 한무기(캠브리콘) constituentOf → RISE 차이나AI반도체TOP4Plus, KODEX 차이나AI반도체TOP10 등"}
+{"question_id": "S-004", "question": "최근 6개월 동안 우주항공 테마와 연결 이력이 있는 관련 ETF를 정리해줘", "category": "ETF", "difficulty": "상", "expect": "answered", "note": "PDF 예시. 테마 space_aero + listing_date >= 2026-02-21"}
+{"question_id": "S-005", "question": "에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘", "category": "국내ETF", "difficulty": "상", "expect": "answered", "note": "PDF 예시. 자회사→편입 ETF→pd_net_tamt 정렬→위험등급/변동성 + 위험요인 문서"}
+{"question_id": "U-001", "question": "신용등급 AAAA인 채권 찾아줘", "category": "채권", "difficulty": "불가", "expect": "cannot_confirm", "note": "PDF 답변불가 예시. 온톨로지 위반"}
+{"question_id": "U-002", "question": "Kimi 관련 투자상품 있어?", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "note": "PDF 답변불가 예시. 비상장(Moonshot AI), 데이터 없음"}
+{"question_id": "U-003", "question": "KODEX AI로봇 ETF 정보 알려줘", "category": "ETF", "difficulty": "불가", "expect": "clarify", "note": "PDF 답변불가 예시. 존재하지 않음 → KODEX 로봇액티브/RISE AI&로봇 역질문"}
+{"question_id": "T-001", "question": "미국증시에 상장된 주식형 ETF 중에서 총보수가 낮고 운용규모가 큰 상품 3개만 비교해주세요.", "category": "해외ETF", "difficulty": "중", "expect": "answered", "note": "과제설명 예시. v_etf_gl Equity, expense_ratio_pct, du_last_aum"}
+{"question_id": "T-002", "question": "국내 ETF 중 순자산이 가장 큰 상품 5개와 운용사를 알려줘", "category": "국내ETF", "difficulty": "하", "expect": "answered", "note": "pd_net_tamt DESC, pd_grp_no='ETF'"}
+{"question_id": "T-003", "question": "삼성자산운용이 운용하는 국내 상장 채권형 ETF 목록과 최근 1년 수익률 알려줘", "category": "국내ETF", "difficulty": "중", "expect": "answered", "note": "manager_name='삼성자산운용' AND wu_inv_ast_type='채권', du_er_1y"}
+{"question_id": "T-004", "question": "만기가 2027년인 매수가능 국고채의 매수수익률과 세후수익률을 알려줘", "category": "채권", "difficulty": "중", "expect": "answered", "note": "is_sellable=1 AND bd_knd='국고채권' AND mat_date LIKE '2027%'"}
+{"question_id": "T-005", "question": "잔존만기 1년 이내이고 신용등급 AA0 이상인 매수가능 회사채 중 세후수익률이 가장 높은 종목은?", "category": "채권", "difficulty": "상", "expect": "answered", "note": "remaining_days<=365, crd_grd IN (AAA,AA+,AA0), std_pd_mcls_nm='회사채', after_tax_yield DESC"}
+{"question_id": "T-006", "question": "KODEX 200과 TIGER 200의 순자산, 총보수, 1년 수익률을 비교해줘", "category": "국내ETF", "difficulty": "중", "expect": "answered", "note": "총보수는 미수록일 수 있음 → '데이터 없음' 명시 기대"}
+{"question_id": "T-007", "question": "월배당 국내 ETF 중 분배수익률이 높은 상품 5개 알려줘", "category": "국내ETF", "difficulty": "중", "expect": "answered", "note": "pd_dvid_cycl='M' ORDER BY pd_dvid_yield DESC"}
+{"question_id": "T-008", "question": "레버리지나 인버스가 아닌 미국 상장 반도체 ETF 중 AUM이 큰 순서로 5개 알려줘", "category": "해외ETF", "difficulty": "중", "expect": "answered", "note": "pd_nm LIKE '%Semiconductor%' AND cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL"}
+{"question_id": "T-009", "question": "VanEck China Semiconductor ETF의 총보수와 기초지수는?", "category": "해외ETF", "difficulty": "하", "expect": "answered", "note": "ticker SMHC"}
+{"question_id": "T-010", "question": "판매중인 공모 주식형 펀드 중 국내 투자 펀드의 순자산 상위 5개 패밀리를 알려줘", "category": "펀드", "difficulty": "중", "expect": "answered", "note": "product_type='공모펀드', is_on_sale=1, or_attr_desc='주식형', fd_ivst_rgn_desc='국내', GROUP BY fund_family"}
+{"question_id": "T-011", "question": "피델리티 글로벌 테크놀로지 펀드의 클래스별 판매 채널과 수수료 유형을 정리해줘", "category": "펀드", "difficulty": "중", "expect": "answered", "note": "itm_nm LIKE '%피델리티%글로벌테크%' han_clas_*"}
+{"question_id": "T-012", "question": "환헤지형 해외 채권형 공모펀드 중 판매중인 상품 수는 몇 개야?", "category": "펀드", "difficulty": "하", "expect": "answered", "note": "is_hedged=1 AND or_attr_desc='채권형' AND ovrs_fd_desc='해외' AND is_on_sale=1 COUNT"}
+{"question_id": "T-013", "question": "위험등급 1등급인 국내 ETF는 몇 개이고, 그중 순자산 1조원 이상은 어떤 상품이야?", "category": "국내ETF", "difficulty": "중", "expect": "answered", "note": "risk_grade=1, pd_net_tamt>=1e12"}
+{"question_id": "T-014", "question": "2차전지 테마 국내 ETF 중 에코프로비엠 편입 비중이 가장 높은 상품은?", "category": "국내ETF", "difficulty": "상", "expect": "answered", "note": "graph hasConstituent + weight (constituent CSV)"}
+{"question_id": "T-015", "question": "한화에어로스페이스와 한국항공우주를 모두 편입한 국내 ETF를 알려줘", "category": "국내ETF", "difficulty": "상", "expect": "answered", "note": "graph: 두 종목 constituentOf 교집합"}
+{"question_id": "T-016", "question": "퇴직연금에서 매수 가능한 채권 중 신용등급이 AAA인 종목 알려줘", "category": "채권", "difficulty": "중", "expect": "answered", "note": "pd_pen_tr_yn='Y' AND is_sellable=1 AND crd_grd='AAA'"}
+{"question_id": "T-017", "question": "국내 ETF와 해외 ETF 중 '우주' 관련 상품을 각각 3개씩 알려줘", "category": "ETF", "difficulty": "중", "expect": "answered", "note": "cross-table: 우주 LIKE + space/aerospace LIKE"}
+{"question_id": "T-018", "question": "커버드콜 ETF의 위험요인을 설명하고 국내 상장 커버드콜 ETF 순자산 상위 3개를 알려줘", "category": "국내ETF", "difficulty": "상", "expect": "answered", "note": "문서(위험요인) + SQL"}
+{"question_id": "U-004", "question": "TIGER 반도체 ETF의 내년 예상 수익률은 얼마야?", "category": "국내ETF", "difficulty": "불가", "expect": "cannot_confirm", "note": "전망 금지"}
+{"question_id": "U-005", "question": "위험등급 7등급 펀드 알려줘", "category": "펀드", "difficulty": "불가", "expect": "cannot_confirm", "note": "온톨로지 위반 (1~6)"}
+{"question_id": "U-006", "question": "미래에셋증권 직원 수는?", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "note": "데이터 범위 밖"}
+{"question_id": "U-007", "question": "삼성전자 주가 알려줘", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "note": "개별주식 시세 없음(편입종목으로만 존재)"}
+{"question_id": "U-008", "question": "제일 좋은 펀드 하나만 골라줘", "category": "펀드", "difficulty": "불가", "expect": "clarify", "note": "조건 모호 → 역질문"}

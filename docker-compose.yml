@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "80:8000"
+    restart: unless-stopped
+    # startup builds the index + knowledge graph (~70s); health check waits for it
+
+  # Optional: automatic HTTPS with Caddy. Set DOMAIN in .env and run: docker compose --profile https up -d
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    env_file: .env
+    ports:
+      - "443:443"
+      - "8080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
