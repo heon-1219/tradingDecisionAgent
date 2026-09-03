@@ -66,14 +66,20 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
             df[c] = df[c].map(yyyymmdd_to_iso)
     if table == "bond_kr":
         df["product_type"] = "국내채권"
-        df["is_sellable"] = df["buy_yield"].notna().astype(int)
+        # 주최측 공지(2026-08-24): BUYABLE_QUANTITY 값은 무효이며, 상장폐지·리스팅 종료 종목을 제외하면
+        # 모두 "구매 가능"으로 간주한다.  채권에서 그 판정은 상환(만기) 도래 여부다.
+        df["is_sellable"] = (df["mat_dt"].notna() & (df["mat_dt"] >= df["info_base_dt"])).astype(int)
+        # 매수·세후수익률이 실제로 수록된 종목(전체의 약 3%)은 별도 플래그로 남긴다.
+        df["has_buy_yield"] = df["buy_yield"].notna().astype(int)
         df["mat_date"], df["isu_date"], df["base_date"] = df["mat_dt"], df["isu_dt"], df["info_base_dt"]
         df["remaining_years"] = (df["remaining_days"] / 365.0).round(2)
         df["issuer_name"] = df["pd_pbcm"].map(clean_text)
         df["pd_nm"] = df["pd_nm"].map(clean_text)
     elif table == "etf_kr":
         df["product_type"] = df["pd_grp_no"].map(lambda g: "국내ETN" if g == "ETN" else "국내ETF")
-        df["is_on_sale"] = ((df["pd_sale_yn"] == "1") & (df["pd_tr_yn"].fillna("0") == "0")).astype(int)
+        # 상장 종료일이 9999-12-31 이면 상장 유지 중. 거래정지(pd_tr_yn=1)만 제외한다.
+        df["is_listed"] = (df["pd_lste_dt"].isna() | (df["pd_lste_dt"] > df["du_upt_dt"])).astype(int)
+        df["is_on_sale"] = (df["is_listed"].astype(bool) & (df["pd_tr_yn"].fillna("0") != "1")).astype(int)
         df["manager_name"] = df["cu_fund_mgmt_co"].map(lambda v: (lx.manager_canonical(v) or lx.manager_for_product_name(v) or clean_text(v)) if isinstance(v, str) else None)
         df["listing_date"], df["delisting_date"], df["base_date"] = df["pd_lstg_dt"], df["pd_lste_dt"], df["du_upt_dt"]
         df["risk_grade"] = df["pd_risk_nm"].map(risk_grade_from_name)
@@ -81,7 +87,8 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         df["pd_nm"] = df["pd_nm"].map(clean_text)
     elif table == "etf_gl":
         df["product_type"] = df["pd_grp_no"].map(lambda g: "해외ETN" if g == "ETN" else "해외ETF")
-        df["is_on_sale"] = ((df["pd_sale_yn"].fillna("1") == "1") & (df["pd_tr_yn"].fillna("0") == "0")).astype(int)
+        df["is_on_sale"] = (df["pd_tr_yn"].fillna("0") != "1").astype(int)
+        df["is_listed"] = df["is_on_sale"]
         df["manager_name"] = df["cu_fund_mgmt_co"].map(clean_text)
         df["ticker"] = df["pd_abrv_nm"].map(clean_text)
         df["listing_date"], df["base_date"] = df["pd_lstg_dt"], df["du_upt_dt"]
@@ -103,14 +110,14 @@ VIEWS: dict[str, str] = {
     "v_bond_kr": (
         "SELECT pd_no, pd_nm, pd_abrv_nm, pd_eng_nm, product_type, pd_exg_mkt, is_sellable, bdbns_abl_chnl_nm, issuer_name, "
         "bd_knd, std_pd_mcls_nm, std_pd_scls_nm, bd_ofr_tcd, bd_inrt_tcd, bd_intp_tcd, crd_grd, crd_grd_dt, pd_risk_nm, "
-        "pd_risk_gcd, curr_cd, srfc_irt, isu_date, mat_date, remaining_days, remaining_years, bd_tisu_a, isu_bal_amt, "
+        "pd_risk_gcd, curr_cd, srfc_irt, isu_date, mat_date, remaining_days, remaining_years, bd_tisu_a, isu_bal_amt, has_buy_yield, "
         "applied_yield, buy_yield, after_tax_yield, pref_tax_yield, avg_annual_tax_yield, corp_pretax_yield, "
         "corp_after_tax_yield, depo_equiv_yield_154, depo_equiv_yield_495, trade_price, buyable_quantity, eval_price, "
         "dirty, dur, cov, exg_close_price, exg_close_yield, exrt_grte_ern_r, exrt_rpy_r, pd_pen_tr_yn, base_date "
         "FROM bond_kr"
     ),
     "v_etf_kr": (
-        "SELECT pd_itm_no, pd_ticker, pd_abrv_nm, pd_nm, product_type, pd_grp_no, is_on_sale, pd_sale_yn, pd_tr_yn, "
+        "SELECT pd_itm_no, pd_ticker, pd_abrv_nm, pd_nm, product_type, pd_grp_no, is_on_sale, is_listed, pd_sale_yn, pd_tr_yn, "
         "manager_name, cu_fund_mgmt_co, cu_strtegy, cu_lev_fector, cu_base_index, ref_base_index, cu_charge_rt, "
         "cu_charge_etc_rt, wu_inv_ast_type, wu_inv_rgn, ref_ast_type, ref_geo_focus, wu_core_yn, pd_risk_nm, risk_grade, "
         "pd_pen_tr_yn, pd_pen_risk_nm, pd_net_tamt, du_last_aum, du_last_nav, du_clpr, ru_mkt_price, du_bpr, du_diff_rt, "
@@ -120,7 +127,7 @@ VIEWS: dict[str, str] = {
         "base_date FROM etf_kr"
     ),
     "v_etf_gl": (
-        "SELECT pd_itm_no, ticker, pd_nm, product_type, pd_grp_no, is_on_sale, pd_exg_mkt_cd, pd_mkt_id, pd_curr_cd, "
+        "SELECT pd_itm_no, ticker, pd_nm, product_type, pd_grp_no, is_on_sale, is_listed, pd_tr_yn, pd_sale_yn, pd_exg_mkt_cd, pd_mkt_id, pd_curr_cd, "
         "pd_isin_cd, manager_name, cu_base_index, cu_strtegy, expense_ratio_pct, cu_charge_rt, cu_lev_fector, "
         "cu_inverse_short_yn, cu_index_tracking_yn, cu_index_repl_mthd, cu_etn_yn, wu_inv_ast_type, wu_inv_rgn, "
         "wu_core_yn, du_last_aum, du_last_nav, du_clpr, du_opr, du_hpr, du_lpr, ru_mkt_price, du_er_1d, du_vol_1d, "

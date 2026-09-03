@@ -29,3 +29,5 @@
 {"question_id": "U-006", "question": "미래에셋증권 직원 수는?", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "note": "데이터 범위 밖"}
 {"question_id": "U-007", "question": "삼성전자 주가 알려줘", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "note": "개별주식 시세 없음(편입종목으로만 존재)"}
 {"question_id": "U-008", "question": "제일 좋은 펀드 하나만 골라줘", "category": "펀드", "difficulty": "불가", "expect": "clarify", "note": "조건 모호 → 역질문"}
+{"question_id": "X-001", "question": "삼성전자를 보유한 국내/해외ETF와 공모펀드를 1년 수익률 기준 TOP10 알려줘", "category": "교차", "difficulty": "상", "expect": "answered", "note": "주최측이 공지한 교차질의 예시. 편입종목은 국내ETF만 보유 → 나머지는 확인불가 범위 명시 필요"}
+{"question_id": "X-002", "question": "국내 ETF와 공모펀드를 합쳐 최근 1년 수익률 상위 10개를 비교해줘", "category": "교차", "difficulty": "상", "expect": "answered", "note": "UNION 교차질의"}

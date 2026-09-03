@@ -15,10 +15,13 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    llm_provider: Literal["anthropic", "openai", "stub"] = "anthropic"
-    llm_model: str = "claude-opus-5"
+    # 주최측 공지: 답변 생성 파이프라인은 NCP HyperCLOVA X 필수.
+    llm_provider: Literal["clova", "anthropic", "openai", "stub"] = "clova"
+    llm_model: str = "HCX-005"
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 4096  # CLOVA function calling 은 1024 이상이어야 동작
+    clova_api_key: str | None = None
+    clova_base_url: str = "https://clovastudio.stream.ntruss.com/v1/openai"
     llm_timeout_sec: float = 40.0
     anthropic_api_key: str | None = None
     anthropic_fallbacks: bool = True
@@ -32,8 +35,9 @@ class Settings(BaseSettings):
     vector_embed_model: str = "text-embedding-3-small"
 
     # Agent budget
-    time_budget_sec: float = 50.0
-    max_tool_rounds: int = 6
+    # 주최측 공지: 300초는 물리적 미응답 처리. 그 안이면 늦어도 채점되나 점수 차등.
+    time_budget_sec: float = 120.0
+    max_tool_rounds: int = 8
     sql_row_limit: int = 200
     sql_timeout_sec: float = 5.0
 

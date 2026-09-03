@@ -151,6 +151,7 @@ footer.end{border-top:1px solid var(--rule); padding-top:24px; color:var(--muted
     그리고 <strong>직접 돌려보는 방법</strong>을 처음 보는 사람 기준으로 정리한 것입니다.
   </p>
   <div class="chips">
+    <span class="chip">LLM <b>HyperCLOVA X</b></span>
     <span class="chip">상품 <b>53,375</b>건</span>
     <span class="chip">지식그래프 <b>108만</b> 트리플</span>
     <span class="chip">벡터 <b>384</b>차원</span>
@@ -159,6 +160,19 @@ footer.end{border-top:1px solid var(--rule); padding-top:24px; color:var(--muted
     <span class="chip warn">실제 LLM 검증 <b>미완료</b></span>
   </div>
 </header>
+
+<div class="callout" style="border-style:solid;border-color:var(--copper);background:var(--copper-soft);margin-bottom:34px">
+  <p style="margin-bottom:6px"><strong style="color:var(--copper)">2026-08-24 주최측 공지 반영 완료</strong></p>
+  <p style="max-width:none;font-size:14.5px">
+    ① 답변 생성은 <strong>NCP HyperCLOVA X 필수</strong> → 기본 제공자 교체 ·
+    ② <code>BUYABLE_QUANTITY</code> 무효 → <strong>구매가능 채권 634건 → 21,866건</strong>으로 정의 변경 ·
+    ③ 0·결측은 의도된 값 → 0으로 계산 금지 ·
+    ④ <strong>총 35문항</strong>(상10/중10/하10 + 답변불가 5) ·
+    ⑤ <strong>교차질의</strong> 출제 예고 ·
+    ⑥ 응답 <strong>300초</strong> 초과 시 미응답 처리.
+    아래 내용은 모두 이 공지를 반영한 상태입니다.
+  </p>
+</div>
 
 <div class="layout">
 <nav class="toc" aria-label="목차">
@@ -200,7 +214,7 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
     데이터로 확인이 안 되면 지어내지 않고 <strong>"제공된 데이터로는 확인할 수 없습니다"</strong>라고 답합니다.
   </p>
   <div class="callout">
-    <p><strong>왜 그게 중요한가</strong> — 대회 평가 30문항 중 5문항은 <em>답할 수 없는 질문</em>입니다.
+    <p><strong>왜 그게 중요한가</strong> — 대회 평가 35문항 중 5문항은 <em>답할 수 없는 질문</em>입니다.
     거기에 그럴듯한 답을 만들어내면 <strong>감점</strong>이고, "확인할 수 없음"이라고 해야 정답 처리됩니다.
     즉 이 시스템에서 "모른다고 말하는 능력"은 부가 기능이 아니라 채점 항목입니다.</p>
   </div>
@@ -216,7 +230,7 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
       <tbody>
         <tr><td class="num">20%</td><td>소스코드 + 개발환경 + README + 도메인별 <code>Ontology.ttl</code></td><td>완료 — <code>src/</code>, <code>requirements.txt</code>, README, TTL 5종</td></tr>
         <tr><td class="num">40%</td><td>기술제안서 (문제정의·제안방법·구성도·기대효과)</td><td><strong>미작성</strong> — 뼈대만 있음 (<code>docs/proposal_outline.md</code>)</td></tr>
-        <tr><td class="num">40%</td><td>평가용 API 답변 정확성 · 근거 표시 · 응답 시간</td><td>구현 완료, <strong>실제 LLM으로는 미검증</strong></td></tr>
+        <tr><td class="num">40%</td><td>평가용 API 답변 정확성 · 근거 표시 · 응답 시간<br><span class="kv" style="color:var(--muted)">총 35문항 = 상10 / 중10 / 하10 + 답변불가 5</span></td><td>구현 완료, <strong>HyperCLOVA X로는 미검증</strong></td></tr>
       </tbody>
     </table>
   </div>
@@ -486,13 +500,31 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
   </div>
 
   <div class="decision">
-    <header><span class="dnum">결정 09</span><h3>어떤 LLM을 쓸까</h3></header>
-    <p class="dq">주최측이 "LLM 활용 기준은 추후 공지"라고 했는데?</p>
+    <header><span class="dnum">결정 09</span><h3>어떤 LLM을 쓸까 — 규정으로 확정됨</h3></header>
+    <p class="dq">주최측 공지: 답변 생성 파이프라인은 <strong>NCP HyperCLOVA X 필수</strong>.</p>
     <div class="opts">
-      <div class="opt dropped"><span class="tag">기각</span><span class="name">한 제공자에 고정</span><span class="why">코드가 단순해지지만, 공지가 나왔을 때 갈아엎어야 할 수 있음.</span></div>
-      <div class="opt picked"><span class="tag">선택</span><span class="name">어댑터로 분리</span><span class="why">Anthropic(기본)과 OpenAI 호환 규격(OpenAI·Gemini·네이버 CLOVA Studio 등)을 모두 지원. 환경변수 한 줄로 전환.</span></div>
+      <div class="opt picked"><span class="tag">확정</span><span class="name">HyperCLOVA X (HCX-005)</span><span class="why">CLOVA Studio의 <strong>OpenAI 호환 엔드포인트</strong>로 연결. 규정이 요구하는 구간(의도분석·답변생성)을 전부 담당.</span></div>
+      <div class="opt dropped"><span class="tag">개발용</span><span class="name">Anthropic / OpenAI</span><span class="why">코드에는 남겨두되 <strong>제출·평가에는 사용 불가</strong>. 답변 품질을 비교해볼 때만 씁니다.</span></div>
+      <div class="opt dropped"><span class="tag">해당없음</span><span class="name">유료 LLM 추가 사용</span><span class="why">주최측이 유료 LLM 사용 지양 권고. 우리는 답변 경로 외에 다른 LLM을 쓰지 않습니다(벡터도 로컬 계산).</span></div>
     </div>
-    <div class="because"><p><b>왜 —</b> 아직 안 나온 규칙에 대비하는 가장 싼 방법입니다. 특히 네이버클라우드 환경을 쓰라는 지침이 나올 경우 CLOVA Studio가 OpenAI 호환 규격이라 그대로 붙습니다.</p></div>
+    <div class="because">
+      <p><b>결과적으로 어댑터 구조가 값을 했습니다 —</b> 이전 결정에서 제공자를 갈아끼울 수 있게 분리해뒀기 때문에, 이번 공지 반영은 <strong>클래스 하나 추가 + 기본값 변경</strong>으로 끝났습니다. 도구 호출 규격이 OpenAI와 동일해서 대화 로직은 그대로 재사용했습니다.</p>
+      <p><b>CLOVA에서 주의할 점 두 가지 —</b> ① function calling은 <code>max_tokens</code>가 <strong>1024 이상</strong>일 때만 동작합니다(미만이면 도구를 아예 호출하지 않아 "모델이 도구를 안 쓴다"처럼 보입니다 — 코드에서 자동으로 올려줍니다). ② function calling은 사고(reasoning)·구조화출력 모드와 <strong>동시에 켤 수 없습니다</strong>.</p>
+      <p><b>설정 —</b> <code>LLM_PROVIDER=clova</code>, <code>LLM_MODEL=HCX-005</code>, <code>CLOVA_API_KEY</code>에 CLOVA Studio 키. 엔드포인트는 <code>https://clovastudio.stream.ntruss.com/v1/openai</code>입니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 10</span><h3>"구매 가능"을 무엇으로 판정할까 — 공지로 뒤집힌 정의</h3></header>
+    <p class="dq">주최측 공지: <code>BUYABLE_QUANTITY</code> 값은 무효, 상장폐지·리스팅 종료 제외 종목은 모두 구매가능으로 가정.</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">폐기</span><span class="name">매수수익률 존재 여부</span><span class="why">처음엔 매수수익률·매수가능수량이 있는 채권만 "판매가능"으로 봤습니다 → <strong>634건</strong>.</span></div>
+      <div class="opt picked"><span class="tag">현재</span><span class="name">상환 미도래 = 구매가능</span><span class="why">공지에 맞춰 재정의 → <strong>21,866건</strong>. 매수수익률 수록 여부는 <code>has_buy_yield</code>로 분리 보존.</span></div>
+    </div>
+    <div class="because">
+      <p><b>영향이 큽니다 —</b> "구매 가능한 원화채권 중 AA- 이상"의 정답이 <strong>78건 → 15,837건</strong>으로 바뀝니다. 이 공지를 놓쳤다면 채권 문항을 전부 틀렸을 것입니다.</p>
+      <p><b>대신 잃은 정보를 살렸습니다 —</b> 매수수익률·세후수익률은 여전히 634건에만 수록돼 있습니다. 그래서 "수익률"을 묻는 질의는 <code>has_buy_yield=1</code>을 함께 걸도록 프롬프트에 명시했습니다. 그러지 않으면 수익률 칸이 전부 비어 있는 표가 나옵니다.</p>
+    </div>
   </div>
 </section>
 
@@ -501,7 +533,45 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
   <p class="sec-note">위 결정들의 근거가 된 실제 숫자입니다. 재현 가능한 것만 적었습니다.</p>
   <hr class="divider">
 
-  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin-bottom:10px">벡터 검색 튜닝 — 프로브 7개</h3>
+  <div class="callout" style="border-color:var(--copper)">
+    <p style="margin-bottom:6px"><strong>먼저 짚을 것 — 주최측은 평가 질의도 정답도 공개하지 않았습니다.</strong></p>
+    <p style="max-width:none">과제설명서에 예시 질문 8개(난이도 표시된 5개 + 답변불가 3개)가 있지만 <strong>정답은 없고</strong>, 자료에도
+    <em>"예시질문(참고용 질의set)은 본 자료에 포함되지 않습니다"</em>라고 명시돼 있습니다. 공개 채널에서도 찾을 수 없었습니다.</p>
+    <p style="max-width:none">그래서 아래 <strong>벡터 프로브 7개는 공식 정답이 아니라 제가 만든 검색 품질 점검용 질의</strong>였습니다.
+    이것만으로는 "우리 시스템이 얼마나 맞히는가"를 말할 수 없어서, <strong>데이터에서 정답이 계산되는 질문 20개</strong>로
+    정답 기준을 새로 만들었습니다. 바로 아래 표입니다.</p>
+  </div>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin-bottom:6px">정답 키 — 데이터에서 계산되는 20문항</h3>
+  <p class="kv" style="color:var(--muted);margin-bottom:12px">
+    각 문항의 정답을 SQL(또는 그래프 조회)로 정의했습니다. 채점할 때마다 데이터에서 다시 계산하므로,
+    데이터가 갱신되면 정답도 자동으로 따라갑니다. <code>data/eval/groundtruth.jsonl</code> · <code>scripts/eval_truth.py</code>
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>문항</th><th>난이도</th><th>계산된 정답</th></tr></thead>
+      <tbody>
+        <tr><td>구매 가능한 원화채권 중 AA- 이상 종목 수</td><td>하</td><td class="num">15,837</td></tr>
+        <tr><td>구매 가능 AAA · 만기 2027년 종목 수</td><td>하</td><td class="num">2,451</td></tr>
+        <tr><td>삼성자산운용 국내 상장 ETF 수</td><td>하</td><td class="num">240</td></tr>
+        <tr><td>위험등급 1등급 &amp; 순자산 1조 이상 ETF 수</td><td>중</td><td class="num">25</td></tr>
+        <tr><td>국내 ETF 순자산 상위 3</td><td>하</td><td>KODEX 200 · TIGER 미국S&amp;P500 · TIGER 미국나스닥100</td></tr>
+        <tr><td>VanEck China Semiconductor ETF 총보수</td><td>하</td><td class="num">0.65%</td></tr>
+        <tr><td>국민성장펀드 클래스 수</td><td>중</td><td class="num">4</td></tr>
+        <tr><td>환헤지 해외 채권형 공모펀드 판매중 수</td><td>중</td><td class="num">130</td></tr>
+        <tr><td>에코프로비엠을 편입한 국내 ETF 수 <span class="kv" style="color:var(--muted)">(그래프)</span></td><td>상</td><td class="num">84</td></tr>
+        <tr><td>삼성전자 보유 국내 ETF 중 순자산 상위 3 <span class="kv" style="color:var(--muted)">(그래프+SQL)</span></td><td>상</td><td>KODEX 200 · TIGER 200 · TIGER 반도체TOP10</td></tr>
+        <tr><td>국내ETF+공모펀드 1년 수익률 상위 3 <span class="kv" style="color:var(--muted)">(교차질의)</span></td><td>상</td><td>마이다스아시아리더스성장주 · TIGER 200IT레버리지 · KODEX 반도체레버리지</td></tr>
+        <tr><td>답변불가 5문항 <span class="kv" style="color:var(--muted)">(AAAA등급 · 8등급 · Kimi · 수익률 전망 · 펀드 편입종목)</span></td><td>불가</td><td>"확인할 수 없음"으로 답해야 정답</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="kv" style="color:var(--muted)">
+    <strong>지금은 정답률을 낼 수 없습니다.</strong> 채점하려면 HyperCLOVA X 키가 필요하고, 이 환경에는 없습니다.
+    키를 넣고 <code>python scripts/eval_truth.py --base http://127.0.0.1:8000</code>를 돌리면 <strong>20문항 중 몇 개를 맞혔는지</strong>가 바로 나옵니다.
+  </p>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">벡터 검색 튜닝 — 자체 프로브 7개 <span class="kv" style="color:var(--muted);font-weight:400">(공식 정답 아님, 검색 품질 점검용)</span></h3>
   <div class="tablewrap">
     <table>
       <thead><tr><th>질의</th><th>튜닝 전 1위 (max_df 없음)</th><th>튜닝 후 1위 (max_df=0.005)</th></tr></thead>
@@ -529,7 +599,8 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
         <tr><td>온톨로지</td><td class="num">2,820</td><td>TTL 5개 파일의 트리플 수</td></tr>
         <tr><td>컨테이너 기동</td><td class="num">87초</td><td>벡터 캐시를 이미지에 구운 후 (이전 211초)</td></tr>
         <tr><td>테스트</td><td class="num">52개</td><td>전부 통과 · 실행 약 95초</td></tr>
-        <tr><td>평가 질의 세트</td><td class="num">31문항</td><td>답변불가 8문항 포함 (대회 예시 8 + 자체 23)</td></tr>
+        <tr><td>구매가능 채권</td><td class="num">21,866</td><td>공지 반영 후(이전 정의로는 634). 매수수익률 수록은 634건</td></tr>
+        <tr><td>평가 질의 세트</td><td class="num">33 + 20</td><td>상태 점검용 33문항 + 정답 키 20문항</td></tr>
       </tbody>
     </table>
   </div>
@@ -545,16 +616,29 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
     <h3>제공 데이터 건수가 과제설명서와 다름 — 우리 파일이 맞는 것으로 확인</h3>
     <p>과제설명서 PDF는 4종 합계 <strong>약 14.5만 건, 기준일 2026-07-11</strong>이라고 적었지만, 실제 배포 파일은
     <strong>53,375건, 기준일 2026-08-21</strong>(해외ETF만 08-22)입니다. 채권은 42,394 → 21,882건, 펀드는 95,619 → 23,676건으로 크게 다릅니다.</p>
-    <p class="ask">→ 우리가 받은 8월 24일자 파일이 유효한 버전임을 확인했습니다. 만약 평가 직전에 더 큰 데이터가 배포되면
-    <code>python scripts/build_store.py</code> 한 번 다시 돌리면 반영됩니다(스키마가 같다는 가정 하에).</p>
+    <p class="ask">→ <strong>주최측 공지로 확정됐습니다:</strong> <em>"현재 26.07.11 전달드린 데이터는 정합성 및 코드관련 이슈가 있어,
+    지금 배포드린 데이터 기준으로 활용하시면 됩니다(26.08.24 기준, 영업일 08.22까지 / 해외는 한국시간 23일)."</em>
+    우리가 쓰는 파일이 정확히 그 버전입니다. 더 이상 확인할 것이 없습니다.</p>
   </div>
 
   <div class="flag blocking">
     <span class="state">최우선</span>
-    <h3>실제 LLM으로 한 번도 안 돌려봤습니다</h3>
-    <p>이 환경에 쓸 수 있는 API 키가 없어서, 지금까지 검증은 전부 <em>가짜 LLM</em>(정해진 대본대로 도구를 호출하는 테스트용)으로 했습니다.
-    데이터·검색·그래프·API 계약은 실제로 검증됐지만, <strong>LLM이 좋은 SQL을 쓰는지, 답변 문장이 괜찮은지는 아직 아무도 모릅니다.</strong></p>
-    <p class="ask">→ 아래 8번 절차대로 키를 넣고 <code>scripts/eval_run.py</code>를 돌리는 것이 지금 가장 중요한 다음 작업입니다. 프롬프트 튜닝은 그 결과를 보고 시작합니다.</p>
+    <h3>HyperCLOVA X로 한 번도 안 돌려봤습니다</h3>
+    <p>이 환경에 CLOVA Studio 키가 없어서, 지금까지 검증은 전부 <em>가짜 LLM</em>(정해진 대본대로 도구를 호출하는 테스트용)으로 했습니다.
+    데이터·검색·그래프·API 계약은 실제로 검증됐지만, <strong>HCX-005가 우리 도구를 제대로 호출하는지는 아직 아무도 모릅니다.</strong></p>
+    <p class="ask">→ 8번 절차대로 CLOVA 키를 넣고 <code>scripts/eval_truth.py</code>를 돌리는 것이 지금 가장 중요한 다음 작업입니다.
+    특히 <strong>HCX-005의 function calling 동작</strong>(도구를 실제로 부르는지, 몇 라운드를 도는지, 한 턴에 여러 도구를 부르는지)을 먼저 확인해야 합니다.
+    Claude·GPT 기준으로 짠 프롬프트가 CLOVA에서 그대로 통하지 않을 수 있습니다.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">데이터 확장</span>
+    <h3>교차질의를 위해 편입종목 범위를 넓혀야 할 수 있습니다</h3>
+    <p>주최측이 든 교차질의 예시가 <em>"삼성전자를 보유한 국내/해외ETF와 공모펀드를 1년 수익률 기준 TOP10"</em>입니다.
+    우리는 <strong>국내 ETF 편입종목만</strong> 갖고 있어서, 해외ETF·펀드 부분은 "확인 불가"로 답하게 됩니다.
+    공지에도 <em>"구성종목-상품 등에 대해서는 어떤 데이터를 활용할지는 여러분의 자율"</em>이라고 적혀 있습니다.</p>
+    <p class="ask">→ 남은 시간과 상의해서 결정할 사항입니다. 해외ETF 편입종목(예: 각 운용사 공시 PDF/CSV)이나 펀드 자산구성을 추가하면
+    교차질의 대응 폭이 넓어지지만, 9월 6일 동결까지 시간이 빠듯합니다. 우선순위는 <strong>HyperCLOVA X 검증 다음</strong>입니다.</p>
   </div>
 
   <div class="flag blocking">
@@ -565,11 +649,23 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
     <p class="ask">→ 배포와 프롬프트 튜닝을 전부 <strong>9월 6일 23:59 이전</strong>에 끝내야 합니다. 남은 시간을 여기에 맞춰 계획해야 합니다.</p>
   </div>
 
+  <div class="flag resolved">
+    <span class="state">확정됨</span>
+    <h3>LLM은 NCP HyperCLOVA X 필수로 확정됐습니다</h3>
+    <p>공지: <em>"질의에 대한 답변 제작 API 제작 시 NCP Hyper ClovaX 필수. 질의 Intent분석 - (데이터 조회 및 증거 제작) - 답변 생성
+    이외에는 제약사항 없음."</em> 그리고 <em>"유료버전의 LLM 사용은 지양"</em> 권고도 함께 나왔습니다.</p>
+    <p class="ask">→ 기본 제공자를 <code>clova</code>/<code>HCX-005</code>로 바꿨습니다. 데이터 조회·검색·그래프·벡터는 전부 LLM이 아닌 코드라 규정과 무관하며,
+    유료 LLM은 어디에도 쓰지 않습니다. <strong>한 가지 확인이 필요합니다</strong>: "Intent분석"까지 HyperCLOVA X여야 하는지 여부인데,
+    우리 구조는 의도분석·답변생성 모두 HyperCLOVA X가 하므로 어느 해석이든 규정을 만족합니다.</p>
+  </div>
+
   <div class="flag">
-    <span class="state">대기</span>
-    <h3>"LLM 활용 기준"이 아직 공지되지 않았습니다</h3>
-    <p>과제설명서에 <em>"LLM활용 기준 관련: 추후 공지 예정"</em>이라고만 적혀 있습니다. 특정 모델만 허용되거나, 네이버클라우드 내부 모델을 쓰라는 지침이 나올 수 있습니다.</p>
-    <p class="ask">→ 어댑터로 분리해뒀으니 공지가 나오면 <code>.env</code>의 <code>LLM_PROVIDER</code>·<code>LLM_MODEL</code>만 바꾸면 됩니다. 공지 확인은 계속 필요합니다.</p>
+    <span class="state">튜닝 여지</span>
+    <h3>응답 시간 기준이 바뀌어 예산을 늘렸습니다</h3>
+    <p>공지: <em>"응답시간의 기준은 공개하지 않으며, 타임아웃 300초는 물리적 '미응답' 처리이므로, 늦게라도 응답(300초 미만)과는 점수 차등 예정."</em>
+    즉 <strong>느려도 맞히는 편이 빠르게 틀리는 것보다 낫습니다.</strong></p>
+    <p class="ask">→ 내부 예산을 50초 → <strong>120초</strong>, 도구 라운드를 6 → 8로 올렸습니다. HyperCLOVA X의 실제 응답 속도를 측정한 뒤
+    다시 조정해야 합니다. 300초에 걸리는 문항이 하나라도 나오면 그건 미응답 처리라 반드시 피해야 합니다.</p>
   </div>
 
   <div class="flag">
@@ -648,16 +744,14 @@ GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 �
     <li>
       <h3>API 키 넣기</h3>
       <p><code>.env.example</code>을 <code>.env</code>로 복사하고 키를 채웁니다. 둘 중 하나만 있으면 됩니다.</p>
-      <pre><span class="c"># Anthropic을 쓸 때</span>
-LLM_PROVIDER=anthropic
-LLM_MODEL=claude-opus-5
-ANTHROPIC_API_KEY=sk-ant-...
-
-<span class="c"># OpenAI 호환(OpenAI·Gemini·CLOVA Studio 등)을 쓸 때</span>
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4.1
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=            <span class="c"># 다른 서비스면 주소 입력</span></pre>
+      <pre><span class="c"># 대회 규정: 반드시 HyperCLOVA X</span>
+LLM_PROVIDER=clova
+LLM_MODEL=HCX-005
+CLOVA_API_KEY=nv-...        <span class="c"># CLOVA Studio 테스트앱/서비스앱 API 키</span>
+CLOVA_BASE_URL=https://clovastudio.stream.ntruss.com/v1/openai
+LLM_MAX_TOKENS=4096         <span class="c"># function calling 은 1024 이상 필수</span></pre>
+      <p>키는 네이버클라우드 콘솔 → CLOVA Studio → 테스트앱/서비스앱에서 발급합니다.
+      <strong>주의:</strong> HCX-005는 function calling과 사고(reasoning) 모드를 동시에 켤 수 없습니다. 우리 코드는 function calling만 씁니다.</p>
     </li>
 
     <li>
@@ -680,13 +774,21 @@ OPENAI_BASE_URL=            <span class="c"># 다른 서비스면 주소 입력<
     </li>
 
     <li>
-      <h3>전체 평가 세트 돌리기 — 진짜 성능 확인</h3>
+      <h3>정답 키로 채점하기 — 진짜 성능 확인</h3>
       <p>서버를 켜둔 채 <strong>다른 터미널</strong>에서:</p>
-      <pre>.venv\Scripts\python.exe scripts\eval_run.py --base http://127.0.0.1:8000</pre>
-      <p>31문항(대회 예시 8개 + 자체 23개, 답변불가 8개 포함)을 순서대로 던지고 문항별 소요 시간과 상태를 표로 출력합니다.
-      <code>✓</code>는 기대한 상태(답변/확인불가/역질문)와 일치했다는 뜻입니다. 전체 결과는 <code>data/eval/results.jsonl</code>에 저장됩니다.</p>
-      <p><strong>여기서 봐야 할 것:</strong> ① 60초를 넘는 문항이 있는가 ② 답변불가 8문항(<code>U-</code>로 시작)이 전부 확인불가로 나오는가
-      ③ <code>✗</code> 문항의 <code>think_trace</code>를 열어 LLM이 어디서 헤맸는가.</p>
+      <pre><span class="c"># 정답 키만 먼저 확인 (서버·키 없이도 됨)</span>
+.venv\Scripts\python.exe scripts\eval_truth.py --compute
+
+<span class="c"># 서버 답변을 정답과 대조해 채점</span>
+.venv\Scripts\python.exe scripts\eval_truth.py --base http://127.0.0.1:8000
+
+<span class="c"># 상태·지연시간 점검용 33문항 (정답 대조 없음)</span>
+.venv\Scripts\python.exe scripts\eval_run.py --base http://127.0.0.1:8000</pre>
+      <p><code>eval_truth</code>는 <strong>20문항 중 몇 개를 맞혔는지</strong>를 백분율로 출력합니다.
+      정답은 채점 시점에 데이터에서 다시 계산되므로 사람이 채점표를 관리할 필요가 없습니다.</p>
+      <p><strong>여기서 봐야 할 것:</strong> ① 정답률이 몇 %인가 ② <strong>300초에 걸리는 문항이 있는가</strong>(있으면 미응답 처리)
+      ③ 답변불가 5문항이 전부 "확인할 수 없음"으로 나오는가 ④ <code>X</code> 문항의 <code>think_trace</code>를 열어
+      HyperCLOVA X가 어디서 헤맸는가 — 도구를 아예 안 불렀다면 <code>max_tokens</code>를 먼저 의심하세요.</p>
     </li>
   </ol>
 </section>
@@ -703,6 +805,7 @@ OPENAI_BASE_URL=            <span class="c"># 다른 서비스면 주소 입력<
         <tr><td>테마 동의어 추가<br><span class="kv" style="color:var(--muted)">예: "양자컴퓨팅" 테마를 인식시키기</span></td><td><code>data/enrichment/themes.yaml</code></td><td>쉬움</td></tr>
         <tr><td>운용사 표기 통일</td><td><code>data/enrichment/managers.yaml</code></td><td>쉬움</td></tr>
         <tr><td>평가 질문 추가</td><td><code>data/eval/questions.jsonl</code></td><td>쉬움 — 한 줄이 한 문항</td></tr>
+        <tr><td>정답 키 문항 추가<br><span class="kv" style="color:var(--muted)">SQL로 정답이 계산되는 질문</span></td><td><code>data/eval/groundtruth.jsonl</code></td><td>보통 — <code>truth_sql</code> 작성 필요</td></tr>
         <tr><td>배경 지식 문서 추가</td><td><code>data/external/docs/*.md</code></td><td>쉬움 — 앞머리에 출처·기준일 필수</td></tr>
         <tr><td>LLM에게 주는 지시·SQL 예시 수정<br><span class="kv" style="color:var(--muted)">답변 품질에 가장 직접적인 영향</span></td><td><code>src/finagent/agent/prompts.py</code></td><td>보통</td></tr>
         <tr><td>도구 추가·설명 수정</td><td><code>src/finagent/agent/tools.py</code></td><td>보통</td></tr>
@@ -723,7 +826,7 @@ OPENAI_BASE_URL=            <span class="c"># 다른 서비스면 주소 입력<
     코드: <code>fin-agent/</code> · 상세 문서: <code>README.md</code>, <code>docs/api_spec.md</code>, <code>docs/proposal_outline.md</code> ·
     설계 배경: <code>docs/superpowers/specs/</code>
   </p>
-  <p style="max-width:none">이 문서의 모든 숫자는 2026년 9월 3일 기준 실제 실행 결과입니다.</p>
+  <p style="max-width:none">이 문서의 모든 숫자는 2026년 9월 4일 기준 실제 실행 결과이며, 2026-08-24 주최측 공지를 반영한 상태입니다.</p>
 </footer>
 
 </main>

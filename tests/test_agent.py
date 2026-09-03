@@ -90,7 +90,7 @@ def _state(tiny_store, llm, tmp_path):
     except Exception:
         ontology = FallbackValidators()
     tools = ToolRegistry(rdb, idx, resolver, kg, docs, ontology, lx, settings)
-    orch = Orchestrator(settings, llm, tools, resolver, ontology, lx, build_system_prompt(ontology, rdb.meta(), docs.titles()))
+    orch = Orchestrator(settings, llm, tools, resolver, ontology, lx, build_system_prompt(ontology, rdb.meta(), docs.titles(), settings))
 
     class S:  # minimal AppState stand-in
         pass

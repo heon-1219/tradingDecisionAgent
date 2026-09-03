@@ -7,7 +7,8 @@
 | Method / Path | `GET /answer` |
 | Content-Type (응답) | `application/json; charset=utf-8` |
 | 인증 | 없음 (인증 헤더·POST 바디 미사용) |
-| 권장 응답 시간 | 문항당 60초 이내 (서버 내부 예산 50초, 초과 시 확보된 근거로 즉시 답변) |
+| 응답 시간 | 주최측 기준: **300초 초과 시 미응답 처리**, 그 안이면 늦어도 채점(점수 차등). 서버 내부 예산 120초, 초과 시 확보된 근거로 즉시 답변 |
+| 답변 생성 LLM | NCP HyperCLOVA X (`HCX-005`, CLOVA Studio OpenAI 호환 엔드포인트) — 대회 규정 |
 | 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (안내 문구) |
 
 ## Request (Query String)

@@ -1,0 +1,147 @@
+"""Score answers against a computed answer key.
+
+The organizers never published an evaluation question set or answers ("예시질문(참고용 질의set)은 본
+자료에 포함되지 않습니다"), so there is nothing official to grade against.  This builds the next best
+thing: questions whose correct answer is *derivable from the delivered data itself* — a count, a name,
+a top-N list — computed by SQL or by a graph lookup at scoring time.  That gives a real accuracy
+number instead of a subjective read of the answers.
+
+  python scripts/eval_truth.py --compute                      # 정답 키만 계산해서 출력 (LLM 불필요)
+  python scripts/eval_truth.py --base http://127.0.0.1:8000   # 서버에 물어보고 채점
+
+Checks are deliberately loose about formatting: numbers match with or without thousands separators,
+names match after whitespace/case normalisation, and an "cannot_confirm" item passes when the answer
+declines rather than inventing a result.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+import unicodedata
+from pathlib import Path
+
+import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # noqa: BLE001
+    pass
+
+from finagent.config import get_settings  # noqa: E402
+from finagent.kb.graph import KG  # noqa: E402
+from finagent.kb.lexicon import Lexicon  # noqa: E402
+from finagent.kb.rdb import RDB  # noqa: E402
+
+DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "없습니다", "존재하지 않")
+
+
+def norm(s: str) -> str:
+    return re.sub(r"[\s,·・\-_()\[\]]+", "", unicodedata.normalize("NFKC", str(s or "")).lower())
+
+
+def compute_truth(item: dict, rdb: RDB, kg: KG | None) -> list[str]:
+    """Return the list of strings the answer must contain."""
+    kind = item.get("truth_kind")
+    if kind in ("graph_count", "graph_join"):
+        if kg is None:
+            return []
+        g = item["truth_graph"]
+        hits = kg.neighbors(g["entity"], relation=g["relation"], limit=5000).get(g["relation"], [])
+        if kind == "graph_count":
+            return [str(len(hits))]
+        ids = [h["iri"].rsplit("/", 1)[-1] for h in hits]
+        if not ids:
+            return []
+        sql = item["truth_sql"].replace("{ids}", ",".join(f"'{i}'" for i in ids))
+        return [str(r[0]) for r in rdb.fetch_all(sql)]
+    if item.get("truth_sql"):
+        return [str(r[0]) for r in rdb.fetch_all(item["truth_sql"])]
+    return []
+
+
+def score(item: dict, answer: str, truth: list[str]) -> tuple[bool, str]:
+    check = item.get("check")
+    a_norm = norm(answer)
+    if check == "cannot_confirm":
+        ok = any(d in answer for d in DECLINE)
+        return ok, "확인불가 표현 " + ("있음" if ok else "없음 — 답을 지어냈을 가능성")
+    if not truth:
+        return False, "정답 키 계산 실패"
+    if check == "number":
+        want = truth[0]
+        try:
+            num = float(want)
+            cands = {f"{num:,.0f}", f"{num:.0f}", f"{num:g}", f"{num:,.2f}".rstrip("0").rstrip(".")}
+        except ValueError:
+            cands = {want}
+        digits = {norm(c) for c in cands}
+        ok = any(d and d in a_norm for d in digits)
+        return ok, f"기대값 {want} " + ("포함" if ok else "미포함")
+    if check == "text":
+        ok = norm(truth[0])[:14] in a_norm
+        return ok, f"'{truth[0][:28]}' " + ("포함" if ok else "미포함")
+    if check == "text_all":
+        found = [t for t in truth if norm(t)[:14] in a_norm]
+        return len(found) == len(truth), f"{len(found)}/{len(truth)}개 포함"
+    return False, f"알 수 없는 check: {check}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", default="http://127.0.0.1:8000")
+    ap.add_argument("--file", default=str(ROOT / "data/eval/groundtruth.jsonl"))
+    ap.add_argument("--out", default=str(ROOT / "data/eval/truth_results.jsonl"))
+    ap.add_argument("--compute", action="store_true", help="정답 키만 계산하고 종료 (서버·LLM 불필요)")
+    ap.add_argument("--timeout", type=float, default=300.0)
+    a = ap.parse_args()
+
+    items = [json.loads(l) for l in Path(a.file).read_text(encoding="utf-8").splitlines() if l.strip()]
+    s = get_settings()
+    rdb = RDB(s.store_path)
+    needs_graph = any(i.get("truth_kind") for i in items)
+    kg = KG.build(rdb, Lexicon.load(s.enrichment_dir), None, s.constituents_dir, log=lambda *x: None) if needs_graph else None
+
+    truths = {i["question_id"]: compute_truth(i, rdb, kg) for i in items}
+
+    if a.compute:
+        print(f"{'ID':8} {'난이도':4} 정답 키")
+        print("-" * 92)
+        for i in items:
+            t = truths[i["question_id"]]
+            shown = "(확인불가로 답해야 정답)" if i.get("check") == "cannot_confirm" else " | ".join(x[:44] for x in t) or "계산 실패"
+            print(f"{i['question_id']:8} {i.get('difficulty','-'):4} {shown}")
+        print(f"\n{len(items)}문항 · 정답 키 계산 완료. 서버를 띄운 뒤 --compute 없이 실행하면 채점합니다.")
+        return 0
+
+    rows, passed = [], 0
+    with httpx.Client(timeout=a.timeout) as client, open(a.out, "w", encoding="utf-8") as fh:
+        for i in items:
+            t0 = time.time()
+            try:
+                r = client.get(f"{a.base}/answer", params={"question_id": i["question_id"], "question": i["question"]})
+                body = r.json()
+            except Exception as e:  # noqa: BLE001
+                body = {"answer": f"<요청 실패: {e}>", "retrieved_context": "", "think_trace": ""}
+            sec = time.time() - t0
+            ok, why = score(i, body.get("answer", ""), truths[i["question_id"]])
+            passed += ok
+            rows.append({**i, "seconds": round(sec, 1), "ok": ok, "why": why, "truth": truths[i["question_id"]],
+                         "answer": body.get("answer", ""), "retrieved_context": body.get("retrieved_context", ""),
+                         "think_trace": body.get("think_trace", "")})
+            fh.write(json.dumps(rows[-1], ensure_ascii=False) + "\n")
+            fh.flush()
+            print(f"{'O' if ok else 'X'} {i['question_id']:8} {i.get('difficulty','-'):4} {sec:6.1f}s  {why}")
+    n = len(rows)
+    slow = sum(1 for r in rows if r["seconds"] >= 300)
+    print(f"\n정답률 {passed}/{n} ({passed / n * 100:.0f}%) · 평균 {sum(r['seconds'] for r in rows) / n:.1f}초 · 300초 초과 {slow}건")
+    print(f"상세 결과 → {a.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

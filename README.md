@@ -55,6 +55,18 @@ flowchart LR
 
 기동 시 TBox(`ontology/*.ttl`)를 ABox와 같은 그래프에 병합하고 세 가지 규칙을 물질화합니다: **상위 클래스 상속**(`x a fp:DomesticETF` → `x a fp:ETF`, `fp:Product`), **역관계**(`owl:inverseOf` 선언에 따라 `fp:managedBy` ↔ `fp:manages` 등), **domain/range 타입 추론**. 결과적으로 명시 969,880개 트리플에서 109,045개가 추론으로 생성되어, `?p a fp:Product`(51,990건)·`?am fp:manages ?p`(22,295건) 같은 질의가 별도 적재 없이 동작합니다. `/health`가 `kg_asserted`/`kg_inferred`로 이 수치를 보고합니다.
 
+### 주최측 공지 반영 (2026-08-24)
+
+| 공지 | 반영 |
+|---|---|
+| 답변 생성 파이프라인은 **NCP HyperCLOVA X 필수** | `LLM_PROVIDER=clova` 기본값, CLOVA Studio OpenAI 호환 엔드포인트로 function calling 사용 |
+| `BUYABLE_QUANTITY` 값 무효, 상장폐지·리스팅 종료 제외 종목은 모두 구매가능 | `is_sellable` 재정의 — 채권은 **상환 미도래 21,866건**(기존 634건). 매수수익률 수록 종목은 `has_buy_yield`로 분리 |
+| 0·결측값은 의도된 것, 값을 빼거나 없다고 응답 | 프롬프트 규칙 6번에 명시. NULL을 0으로 계산·정렬하지 않음 |
+| 총 35문항(상10/중10/하10 + 답변불가 5) | 평가 세트를 그 구성에 맞춰 확장 |
+| 교차질의(2개 이상 상품군 비교) 출제 | 프롬프트에 `UNION ALL` 패턴과 "해외ETF는 1년 수익률 미제공" 처리 지침 추가 |
+| 코드값 테이블 미제공, 해당 질의 없음 | 원문 코드값 해석에 의존하지 않음 |
+| 300초 초과는 미응답, 그 안이면 늦어도 채점(점수 차등) | 내부 예산 50초 → **120초**, 라운드 6 → 8 |
+
 ### 답변 정책 (평가 규칙 반영)
 - 수치·상품명은 도구 결과에서만. 근거(테이블 한글명·기준일·상품코드·단위)를 답변과 `retrieved_context`에 표시.
 - 확인 불가(존재하지 않는 상품/기업/값, 데이터 범위 밖) → `제공된 데이터로는 확인할 수 없습니다` 명시. 모호 → 역질문.
@@ -70,9 +82,9 @@ fin-agent/
 ├─ data/raw/               # 주최측 제공 Excel 8개 (data + schema)
 ├─ data/enrichment/        # managers.yaml, themes.yaml, companies.yaml, constituents/*.csv
 ├─ data/external/docs/     # 외부 참고 문서(Markdown, front-matter에 출처·기준일)
-├─ data/eval/              # questions.jsonl (평가 재현용 질의 세트), results.jsonl
+├─ data/eval/              # questions.jsonl(질의 세트), groundtruth.jsonl(정답 키), results.jsonl
 ├─ data/store/             # 빌드 산출물 products.db (git 제외)
-├─ scripts/                # build_store.py, warmup.py, explore.py, eval_run.py, fetch_constituents_naver.py, parse_docs.py
+├─ scripts/                # build_store.py, warmup.py, explore.py, eval_run.py, eval_truth.py, fetch_constituents_naver.py, parse_docs.py
 ├─ tests/                  # pytest
 ├─ docs/                   # anatomy.html(전체 해설), api_spec.md, proposal_outline.md, superpowers/
 ├─ requirements.txt · pyproject.toml · Dockerfile · docker-compose.yml · Caddyfile · .env.example
@@ -93,13 +105,13 @@ cp .env.example .env                                     # LLM 키 입력
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `LLM_PROVIDER` | `anthropic` | `anthropic` / `openai`(OpenAI·Gemini OpenAI-compat·NCP CLOVA Studio 등 OpenAI 호환) / `stub`(테스트) |
-| `LLM_MODEL` | `claude-opus-5` | 모델 ID. OpenAI 호환은 예: `gpt-4.1`, `gemini-2.5-pro` |
-| `LLM_EFFORT` | `medium` | Claude 추론 깊이(`low`~`max`). 응답 시간과 트레이드오프 |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, `OPENAI_BASE_URL` | | 제공자별 키·엔드포인트 |
-| `ANTHROPIC_FALLBACKS` | `true` | Claude 서버측 안전 거부 대체 모델 자동 사용 |
-| `TIME_BUDGET_SEC` | `50` | 문항당 내부 시간 예산 |
-| `MAX_TOOL_ROUNDS` | `6` | 도구 호출 최대 라운드 |
+| `LLM_PROVIDER` | `clova` | **대회 규정상 `clova` 고정.** `anthropic`/`openai`는 개발 비교용, `stub`은 테스트용 |
+| `LLM_MODEL` | `HCX-005` | CLOVA Studio 모델 ID |
+| `CLOVA_API_KEY` | | CLOVA Studio 테스트앱/서비스앱 API 키 |
+| `CLOVA_BASE_URL` | `https://clovastudio.stream.ntruss.com/v1/openai` | OpenAI 호환 엔드포인트 |
+| `LLM_MAX_TOKENS` | `4096` | CLOVA function calling은 **1024 이상 필수**(미만이면 자동 상향) |
+| `TIME_BUDGET_SEC` | `120` | 문항당 내부 시간 예산 (300초 초과 시 미응답 처리) |
+| `MAX_TOOL_ROUNDS` | `8` | 도구 호출 최대 라운드 |
 | `VECTOR_BACKEND` | `lsa` | `lsa`(오프라인 TF-IDF+SVD, 키 불필요) / `openai`(임베딩 API) / `off` |
 | `VECTOR_DIMS`, `VECTOR_MAX_DF` | `384`, `0.005` | 벡터 차원 수와 고빈도 토큰 제거 임계값 |
 
@@ -154,7 +166,11 @@ docker compose --profile https up -d  # Caddy 가 Let's Encrypt 인증서를 자
 ## 7. 평가 재현
 
 ```bash
-# 서버 기동 후, 예시 질의 31문항(대회 예시 8 + 자체 23, 답변불가 8 포함) 실행 → 지연시간·상태 매칭 출력
+# (A) 정답 키 기반 채점 — 데이터에서 SQL/그래프로 계산한 정답과 대조 (권장)
+python scripts/eval_truth.py --compute                      # 정답 키만 확인 (LLM 불필요)
+python scripts/eval_truth.py --base http://127.0.0.1:8000   # 서버 답변 채점
+
+# (B) 상태 기반 점검 — 33문항의 응답 상태·지연시간 확인
 python scripts/eval_run.py --base http://127.0.0.1:8000
 
 # LLM 없이 각 저장소를 직접 들여다보기 (키 불필요)
@@ -163,7 +179,11 @@ python scripts/explore.py search "차이나 반도체" --mode hybrid
 python scripts/explore.py pre "신용등급 AAAA인 채권 찾아줘"
 ```
 
-결과는 `data/eval/results.jsonl`에 저장됩니다(문항별 `seconds`, `got` 상태, 근거·추적 전문).
+결과는 `data/eval/results.jsonl` / `data/eval/truth_results.jsonl`에 저장됩니다(문항별 `seconds`, 채점 결과, 근거·추적 전문).
+
+> **정답 기준에 대하여** — 주최측은 평가 질의와 정답을 공개하지 않았습니다(과제설명서: "예시질문(참고용 질의set)은 본 자료에 포함되지 않습니다").
+> 따라서 `data/eval/groundtruth.jsonl`은 **제공 데이터에서 SQL·그래프로 정답이 계산되는 질문**으로 구성했습니다.
+> 정답 키는 채점 시점에 데이터에서 다시 계산되므로, 데이터가 갱신되면 정답도 함께 갱신됩니다.
 
 테스트:
 

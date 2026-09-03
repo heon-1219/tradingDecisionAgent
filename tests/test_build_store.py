@@ -16,8 +16,14 @@ def test_build_store(tmp_path):
     counts = build_store(ROOT / "data" / "raw", tmp_path / "p.db", Lexicon.load(ROOT / "data" / "enrichment"), log=lambda *a: None)
     assert counts["bond_kr"] == 21882 and counts["fund_pub"] == 23676
     con = sqlite3.connect(tmp_path / "p.db")
-    assert con.execute("select count(*) from v_bond_kr where is_sellable=1").fetchone()[0] == 634
-    assert con.execute("select count(*) from v_bond_kr where is_sellable=1 and crd_grd in ('AAA','AA+','AA0','AA-')").fetchone()[0] == 78
+    # 주최측 공지(2026-08-24): buyable_quantity 무효, 상환 미도래 종목은 모두 구매가능
+    assert con.execute("select count(*) from v_bond_kr where is_sellable=1").fetchone()[0] == 21866
+    assert con.execute("select count(*) from v_bond_kr where has_buy_yield=1").fetchone()[0] == 634
+    assert con.execute(
+        "select count(distinct pd_no) from v_bond_kr where is_sellable=1 and curr_cd='KRW' "
+        "and crd_grd in ('AAA','AA+','AA0','AA-')"
+    ).fetchone()[0] == 15837
+    assert con.execute("select count(*) from v_etf_kr where is_on_sale=1").fetchone()[0] == 1536
     assert con.execute("select count(distinct fund_family) from v_fund_pub where itm_nm like '%국민성장%'").fetchone()[0] == 1
     assert con.execute("select base_date from meta where table_name='etf_gl'").fetchone()[0] == "2026-08-22"
     assert con.execute("select manager_name from v_etf_kr where pd_abrv_nm='KODEX 로봇액티브'").fetchone()[0] == "삼성자산운용"

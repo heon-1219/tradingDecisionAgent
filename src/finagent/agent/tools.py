@@ -19,10 +19,10 @@ VIEW_ID_NAME = {
     "v_fund_pub": ("itm_no", "itm_nm"),
 }
 SEMANTICS = {
-    "v_bond_kr": "판매가능(매수가능) 채권 = is_sellable=1 (634건, 모두 장외·'온오프 겸용'). crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 같은 pd_no가 장내/장외 행으로 중복될 수 있으니 DISTINCT 고려.",
-    "v_etf_kr": "판매중 = is_on_sale=1. ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 18%만 수록(NULL이면 '데이터 없음'). 순자산 pd_net_tamt(KRW). 상장일 listing_date. 대표명 pd_abrv_nm.",
-    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. 레버리지/인버스 제외 시 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL.",
-    "v_fund_pub": "공모펀드 = product_type='공모펀드'. 판매중 = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY. 보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(상대 비교만). 수익률은 약 30%만 수록.",
+    "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 같은 pd_no가 장내/장외 행으로 중복되므로 DISTINCT 필수.",
+    "v_etf_kr": "판매중(구매가능) = is_on_sale=1 (상장 유지 + 거래정지 아님, 1,534건). ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 일부만 수록(NULL이면 '데이터 없음'이라고 답하고 0으로 취급하지 않는다). 순자산 pd_net_tamt(KRW). 상장일 listing_date, 상장종료일 delisting_date(9999-12-31=상장 유지). 대표명 pd_abrv_nm.",
+    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'), 기준일 2026-08-22. 구매가능 = is_on_sale=1(거래정지 아님). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목 수록). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. 레버리지/인버스 제외 시 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL. 편입종목 데이터 없음.",
+    "v_fund_pub": "공모펀드 = product_type='공모펀드'(14,716건), 사모도 섞여 있으므로 반드시 조건에 넣는다. 판매중(구매가능) = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY 하고 대표 1개만 제시. 보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
 }
 
 

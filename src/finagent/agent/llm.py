@@ -234,7 +234,45 @@ class OpenAILLM:
         return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text)
 
 
+class ClovaLLM(OpenAILLM):
+    """NCP HyperCLOVA X via CLOVA Studio's OpenAI-compatible endpoint.
+
+    The competition mandates HyperCLOVA X for the answer pipeline, so this is the default provider.
+    CLOVA Studio exposes `https://clovastudio.stream.ntruss.com/v1/openai`, which accepts the OpenAI
+    SDK plus `tools` / `tool_choice` / `parallel_tool_calls`, so the OpenAI conversation shape is
+    reused verbatim.  Two CLOVA-specific rules are enforced here:
+
+    * function calling only works when `max_tokens` >= 1024 — a smaller value silently returns no
+      tool calls, which would look like the model refusing to use its tools;
+    * function calling cannot be combined with the thinking/structured-output modes, so nothing else
+      is switched on.
+    """
+
+    name = "clova"
+    MIN_TOOL_TOKENS = 1024
+
+    def __init__(self, settings):
+        import openai
+
+        key = settings.clova_api_key or settings.openai_api_key
+        self.client = openai.AsyncOpenAI(
+            api_key=key or None,
+            base_url=settings.clova_base_url,
+            timeout=settings.llm_timeout_sec,
+            max_retries=1,
+        )
+        self.model = settings.llm_model
+        self.max_tokens = max(int(settings.llm_max_tokens), self.MIN_TOOL_TOKENS)
+        if settings.llm_max_tokens < self.MIN_TOOL_TOKENS:
+            log.warning(
+                "CLOVA function calling needs max_tokens >= %d; raising %d -> %d",
+                self.MIN_TOOL_TOKENS, settings.llm_max_tokens, self.max_tokens,
+            )
+
+
 def make_llm(settings) -> LLMClient:
+    if settings.llm_provider == "clova":
+        return ClovaLLM(settings)
     if settings.llm_provider == "anthropic":
         return AnthropicLLM(settings)
     if settings.llm_provider == "openai":
