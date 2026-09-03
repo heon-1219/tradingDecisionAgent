@@ -37,7 +37,9 @@ from finagent.kb.graph import KG  # noqa: E402
 from finagent.kb.lexicon import Lexicon  # noqa: E402
 from finagent.kb.rdb import RDB  # noqa: E402
 
-DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "없습니다", "존재하지 않")
+# "없습니다" 같은 흔한 종결어미는 넣지 않는다 — 정상 답변에도 자주 나와 오탐이 된다.
+DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없")
+CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인")
 
 
 def norm(s: str) -> str:
@@ -68,8 +70,10 @@ def score(item: dict, answer: str, truth: list[str]) -> tuple[bool, str]:
     check = item.get("check")
     a_norm = norm(answer)
     if check == "cannot_confirm":
-        ok = any(d in answer for d in DECLINE)
-        return ok, "확인불가 표현 " + ("있음" if ok else "없음 — 답을 지어냈을 가능성")
+        declined = any(d in answer for d in DECLINE)
+        asked_back = any(c in answer for c in CLARIFY) and "?" in answer
+        ok = declined or asked_back
+        return ok, "확인불가 명시" if declined else ("역질문" if asked_back else "없음 — 답을 지어냈을 가능성")
     if not truth:
         return False, "정답 키 계산 실패"
     if check == "number":

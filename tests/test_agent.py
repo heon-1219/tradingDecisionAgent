@@ -187,3 +187,38 @@ def test_answer_helpers():
     assert normalize_answer("cannot_confirm", "해당 상품 없음").startswith("제공된 데이터로는 확인할 수 없습니다")
     assert normalize_answer("clarify", "어느 것").endswith("?")
     assert json.loads('{"a": 1}')["a"] == 1
+
+
+async def test_nonexistent_product_is_not_answered_as_a_similar_one(tiny_store, tmp_path):
+    """'KODEX AI로봇' 은 존재하지 않는다. 모델이 KODEX 로봇액티브로 바꿔 답하면 서버가 역질문으로 보정한다."""
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "KODEX AI로봇의 순자산은 500억원이며 삼성자산운용이 운용합니다.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    pre = s.orchestrator.pre_analyze("KODEX AI로봇 ETF 정보 알려줘")
+    assert pre.unresolved and pre.unresolved[0][0] == "KODEX AI로봇"
+    assert "존재하지 않습니다" in pre.text
+    resp = await s.orchestrator.answer("U-003", "KODEX AI로봇 ETF 정보 알려줘")
+    assert "확인할 수 없습니다" in resp.answer
+    assert "KODEX 로봇액티브" in resp.answer  # 후보를 제시하며 되물음
+    assert "역질문으로 보정" in resp.think_trace
+
+
+async def test_real_product_is_not_falsely_flagged(tiny_store, tmp_path):
+    """운용사 접두어나 '펀드' 접미사 차이는 미존재로 보면 안 된다(오탐 방지)."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    assert s.orchestrator.pre_analyze("KODEX 로봇액티브 순자산 알려줘").unresolved == []
+    assert s.orchestrator.pre_analyze("삼성 KODEX 2차전지산업의 위험등급은?").unresolved == []
+
+
+async def test_acknowledged_decline_is_left_alone(tiny_store, tmp_path):
+    """모델이 이미 '없다'고 답했으면 서버가 덧붙이지 않는다."""
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "cannot_confirm",
+        "answer": "KODEX AI로봇이라는 상품은 확인할 수 없습니다. 혹시 KODEX 로봇액티브를 말씀하시나요?",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("U-003", "KODEX AI로봇 ETF 정보 알려줘")
+    assert resp.answer.count("확인할 수 없습니다") == 1
+    assert "역질문으로 보정" not in resp.think_trace

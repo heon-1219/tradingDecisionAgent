@@ -27,6 +27,26 @@ class PreAnalysis:
     invalid: list[str] = field(default_factory=list)
     mentions: list[str] = field(default_factory=list)
     steps: list[str] = field(default_factory=list)
+    # 질문이 특정 상품명을 지목했는데 그런 상품이 없는 경우: (언급, 유사 후보 이름들)
+    unresolved: list[tuple[str, list[str]]] = field(default_factory=list)
+
+
+# 답변이 "그 상품은 없다"는 사실을 인지했는지 판정할 때 쓰는 표현들
+_ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "찾을 수 없", "없습니다만", "혹시", "말씀하시", "유사한", "다른 상품")
+
+
+def _mention_resolved(mention: str, title: str) -> bool:
+    """언급과 후보 상품명이 사실상 같은 것을 가리키는지.
+
+    'KODEX AI로봇' vs 'KODEX 로봇액티브' 는 서로 포함하지 않으므로 불일치(→ 존재하지 않는 상품),
+    '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100' 이나 '국민성장펀드' vs
+    '미래에셋국민참여형국민성장혼합자산투자신탁…' 은 일치로 본다(접두 운용사·일반 접미사 차이일 뿐).
+    """
+    from ..kb.search import _strip_generic, norm_title
+
+    m, t = norm_title(mention), norm_title(title)
+    core = _strip_generic(m)
+    return bool(t) and (t in m or (len(core) >= 2 and core in t))
 
 
 class Orchestrator:
@@ -45,10 +65,19 @@ class Orchestrator:
         invalid: list[str] = []
         steps: list[str] = []
         mentions = extract_product_mentions(question)
+        unresolved: list[tuple[str, list[str]]] = []
         for m in mentions:
             r = self.resolver.resolve(m, k=4)
-            tag = "정확 일치" if r.exact else "정확 일치 없음"
+            resolved = r.exact or any(_mention_resolved(m, h.title) for h in r.products[:3])
+            tag = "정확 일치" if r.exact else ("유사 상품으로 해석 가능" if resolved else "일치하는 상품 없음")
             lines.append(f"- 상품 언급 '{m}': {tag}. " + ("; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in r.products[:4]) or "후보 없음"))
+            if not resolved:
+                cands = [h.title for h in r.products[:3]]
+                unresolved.append((m, cands))
+                lines.append(
+                    f"  ⚠ '{m}' 이라는 상품은 데이터에 존재하지 않습니다. 위 후보는 이름이 비슷할 뿐 다른 상품이므로, "
+                    f"그 중 하나를 질문의 상품인 것처럼 답하면 오답입니다. 존재하지 않음을 밝히고 후보를 제시하며 되물으세요."
+                )
         whole = self.resolver.resolve(question, k=3) if not mentions else None
         comps = self.lexicon.match_companies(question)
         for c in comps:
@@ -109,8 +138,9 @@ class Orchestrator:
             + (f"; 기업 {', '.join(c.name_ko for c in comps)}" if comps else "")
             + (f"; 테마 {', '.join(t.label_ko for t in themes)}" if themes else "")
             + (f"; 온톨로지 위반 {len(invalid)}건" if invalid else "")
+            + (f"; 미존재 상품 {len(unresolved)}건" if unresolved else "")
         )
-        return PreAnalysis(text, invalid, mentions, steps)
+        return PreAnalysis(text, invalid, mentions, steps, unresolved)
 
     # ------------------------------------------------------------ main loop
     async def answer(self, question_id: str, question: str) -> AnswerResponse:
@@ -204,6 +234,21 @@ class Orchestrator:
             answer = f"{CANNOT_PREFIX} {' '.join(pre.invalid)}\n\n(참고) {answer}"
             status = "cannot_confirm"
             steps.append("온톨로지 위반 조건이 있어 답변을 확인불가로 보정")
+        # 존재하지 않는 상품명을 물었는데 모델이 유사 상품으로 그냥 답해버린 경우를 잡는다.
+        # 답변불가 문항은 배점이 걸려 있어 프롬프트 준수에만 맡기지 않는다.
+        if pre.unresolved and status == "answered" and not any(k in answer for k in _ACKNOWLEDGED):
+            names = [m for m, _ in pre.unresolved]
+            shown = [c for _, group in pre.unresolved for c in group[:2]]
+            asked = (
+                f"이름이 비슷한 상품으로는 {', '.join(shown)} 등이 있습니다. 이 중 찾으시는 상품이 있나요?"
+                if shown else "찾으시는 상품명을 다시 확인해 주시겠어요?"
+            )
+            answer = (
+                f"'{', '.join(names)}'와(과) 정확히 일치하는 상품은 제공된 데이터에서 확인할 수 없습니다. {asked}"
+                f"\n\n(참고: 아래는 유사 상품 기준으로 조회한 내용입니다)\n{answer}"
+            )
+            status = "clarify"
+            steps.append(f"존재하지 않는 상품({', '.join(names)})을 답변에 사용 → 역질문으로 보정")
         elapsed = time.monotonic() - t0
         steps.append(f"최종: status={status}, 근거 {len(evidences)}건, 소요 {elapsed:.1f}s")
         return AnswerResponse(

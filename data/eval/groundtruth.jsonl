@@ -18,3 +18,5 @@
 {"question_id": "G-018", "question": "Kimi 관련 투자상품이 있나요?", "category": "전체", "difficulty": "불가", "expect": "cannot_confirm", "check": "cannot_confirm", "note": "비상장 스타트업, 데이터 없음"}
 {"question_id": "G-019", "question": "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘", "category": "국내ETF", "difficulty": "불가", "expect": "cannot_confirm", "check": "cannot_confirm", "note": "전망 생성 금지"}
 {"question_id": "G-020", "question": "삼성전자를 보유한 공모펀드를 알려줘", "category": "펀드", "difficulty": "불가", "expect": "cannot_confirm", "check": "cannot_confirm", "note": "펀드 편입종목 데이터 없음 → 확인 불가로 답해야 함"}
+{"question_id": "G-021", "question": "KODEX AI로봇 ETF 정보 알려줘", "category": "국내ETF", "difficulty": "불가", "expect": "clarify", "check": "cannot_confirm", "note": "과제설명서 답변불가 예시. 존재하지 않는 상품명 — KODEX 로봇액티브로 바꿔 답하면 오답"}
+{"question_id": "G-022", "question": "TIGER 양자컴퓨팅커버드콜 ETF의 순자산을 알려줘", "category": "국내ETF", "difficulty": "불가", "expect": "clarify", "check": "cannot_confirm", "note": "실존하지 않는 조합. 유사 상품으로 답하면 오답"}
