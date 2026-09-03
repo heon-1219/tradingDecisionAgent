@@ -5,7 +5,19 @@ import re
 from dataclasses import dataclass, field
 
 from .lexicon import Company, Lexicon, Manager, Theme
-from .search import Hit, SearchIndex, norm_title, tokenize
+from .search import Hit, SearchIndex, _strip_generic, norm_title, tokenize
+
+
+def mention_resolves(mention: str, title: str) -> bool:
+    """언급과 후보 상품명이 사실상 같은 것을 가리키는지.
+
+    'KODEX AI로봇' vs 'KODEX 로봇액티브'는 서로 포함하지 않으므로 불일치(= 존재하지 않는 상품),
+    '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100', '국민성장펀드' vs
+    '미래에셋국민참여형국민성장혼합자산투자신탁…'은 일치로 본다(운용사 접두어·일반 접미사 차이일 뿐).
+    """
+    m, t = norm_title(mention), norm_title(title)
+    core = _strip_generic(m)
+    return bool(t) and (t in m or (len(core) >= 2 and core in t))
 
 
 @dataclass
@@ -17,6 +29,11 @@ class Resolution:
     themes: list[Theme] = field(default_factory=list)
     exact: bool = False
 
+    @property
+    def resolved(self) -> bool:
+        """언급된 상품이 실재하는가. exact 보다 느슨하되, 이름이 비슷할 뿐인 다른 상품은 배제한다."""
+        return self.exact or any(mention_resolves(self.mention, h.title) for h in self.products[:3])
+
     def summary(self, max_products: int = 5) -> str:
         parts = []
         if self.products:
@@ -24,6 +41,12 @@ class Resolution:
                 ("정확히 일치하는 상품: " if self.exact else "유사 상품 후보(정확 일치 아님): ")
                 + "; ".join(f"[{h.table}] {h.title} (id={h.id}, score={h.score:.1f})" for h in self.products[:max_products])
             )
+            if not self.resolved:
+                parts.append(
+                    f"⚠ '{self.mention}' 이라는 상품은 데이터에 존재하지 않습니다. 위 후보는 이름이 비슷할 뿐 "
+                    "다른 상품이므로, 그중 하나를 질문의 상품인 것처럼 답하면 오답입니다. "
+                    "존재하지 않음을 밝히고 후보를 제시하며 되물으세요."
+                )
         else:
             parts.append("상품명 일치/유사 후보 없음")
         if self.companies:

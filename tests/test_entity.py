@@ -45,3 +45,21 @@ def test_resolver_company_and_theme():
     assert any(t.id == "battery" for t in r.themes)
     r2 = EntityResolver(_idx(), Lexicon.load(ENRICH)).resolve("Kimi 관련 투자상품 있어?")
     assert any(c.id == "moonshot_kimi" and c.not_listed for c in r2.companies)
+
+
+def test_resolution_flags_nonexistent_product_in_summary():
+    """도구 출력과 사전분석이 같은 기준으로 '존재하지 않음'을 경고해야 한다."""
+    lx = Lexicon.load(ENRICH)
+    r = EntityResolver(_idx(), lx).resolve("KODEX AI로봇")
+    assert not r.resolved and "존재하지 않습니다" in r.summary()
+    ok = EntityResolver(_idx(), lx).resolve("KODEX 로봇액티브")
+    assert ok.resolved and "존재하지 않습니다" not in ok.summary()
+
+
+def test_mention_resolves_tolerates_prefix_and_suffix():
+    from finagent.kb.entity import mention_resolves
+
+    assert mention_resolves("미래에셋 TIGER 미국나스닥100", "TIGER 미국나스닥100")
+    assert mention_resolves("국민성장펀드", "미래에셋국민참여형국민성장혼합자산투자신탁(사모투자재간접형) 종류C")
+    assert not mention_resolves("KODEX AI로봇", "KODEX 로봇액티브")
+    assert not mention_resolves("TIGER 양자컴퓨팅커버드콜", "TIGER 미국나스닥100커버드콜")

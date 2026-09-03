@@ -35,20 +35,6 @@ class PreAnalysis:
 _ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "찾을 수 없", "없습니다만", "혹시", "말씀하시", "유사한", "다른 상품")
 
 
-def _mention_resolved(mention: str, title: str) -> bool:
-    """언급과 후보 상품명이 사실상 같은 것을 가리키는지.
-
-    'KODEX AI로봇' vs 'KODEX 로봇액티브' 는 서로 포함하지 않으므로 불일치(→ 존재하지 않는 상품),
-    '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100' 이나 '국민성장펀드' vs
-    '미래에셋국민참여형국민성장혼합자산투자신탁…' 은 일치로 본다(접두 운용사·일반 접미사 차이일 뿐).
-    """
-    from ..kb.search import _strip_generic, norm_title
-
-    m, t = norm_title(mention), norm_title(title)
-    core = _strip_generic(m)
-    return bool(t) and (t in m or (len(core) >= 2 and core in t))
-
-
 class Orchestrator:
     def __init__(self, settings, llm: LLMClient, tools: ToolRegistry, resolver, ontology, lexicon, system_prompt: str):
         self.settings, self.llm, self.tools = settings, llm, tools
@@ -68,7 +54,7 @@ class Orchestrator:
         unresolved: list[tuple[str, list[str]]] = []
         for m in mentions:
             r = self.resolver.resolve(m, k=4)
-            resolved = r.exact or any(_mention_resolved(m, h.title) for h in r.products[:3])
+            resolved = r.resolved  # 판정은 EntityResolver 가 소유한다(도구 출력과 동일 기준)
             tag = "정확 일치" if r.exact else ("유사 상품으로 해석 가능" if resolved else "일치하는 상품 없음")
             lines.append(f"- 상품 언급 '{m}': {tag}. " + ("; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in r.products[:4]) or "후보 없음"))
             if not resolved:
