@@ -72,9 +72,9 @@ fin-agent/
 ├─ data/external/docs/     # 외부 참고 문서(Markdown, front-matter에 출처·기준일)
 ├─ data/eval/              # questions.jsonl (평가 재현용 질의 세트), results.jsonl
 ├─ data/store/             # 빌드 산출물 products.db (git 제외)
-├─ scripts/                # build_store.py, warmup.py, eval_run.py, fetch_constituents_naver.py, parse_docs.py
+├─ scripts/                # build_store.py, warmup.py, explore.py, eval_run.py, fetch_constituents_naver.py, parse_docs.py
 ├─ tests/                  # pytest
-├─ docs/                   # api_spec.md, proposal_outline.md, superpowers/(설계·계획)
+├─ docs/                   # anatomy.html(전체 해설), api_spec.md, proposal_outline.md, superpowers/
 ├─ requirements.txt · pyproject.toml · Dockerfile · docker-compose.yml · Caddyfile · .env.example
 ```
 
@@ -154,8 +154,13 @@ docker compose --profile https up -d  # Caddy 가 Let's Encrypt 인증서를 자
 ## 7. 평가 재현
 
 ```bash
-# 서버 기동 후, 예시 질의 30개(PDF 예시 8 + 자체 22, 답변불가 8 포함) 실행 → 지연시간·상태 매칭 출력
+# 서버 기동 후, 예시 질의 31문항(대회 예시 8 + 자체 23, 답변불가 8 포함) 실행 → 지연시간·상태 매칭 출력
 python scripts/eval_run.py --base http://127.0.0.1:8000
+
+# LLM 없이 각 저장소를 직접 들여다보기 (키 불필요)
+python scripts/explore.py health
+python scripts/explore.py search "차이나 반도체" --mode hybrid
+python scripts/explore.py pre "신용등급 AAAA인 채권 찾아줘"
 ```
 
 결과는 `data/eval/results.jsonl`에 저장됩니다(문항별 `seconds`, `got` 상태, 근거·추적 전문).
