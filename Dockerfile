@@ -12,5 +12,5 @@ COPY . .
 RUN python scripts/build_store.py
 
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=420s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"
 CMD ["uvicorn", "finagent.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "75"]

@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from ..kb.rdb import SQLGuardError
+from ..kb.vector import hybrid_search
 from .answer import FINAL_ANSWER_SCHEMA, Evidence
 from .llm import ToolSpec
 
@@ -55,9 +56,10 @@ def rows_to_text(cols: list[str], rows: list[dict], max_rows: int = 40) -> str:
 
 
 class ToolRegistry:
-    def __init__(self, rdb, index, resolver, kg, docs, ontology, lexicon, settings):
+    def __init__(self, rdb, index, resolver, kg, docs, ontology, lexicon, settings, vectors=None):
         self.rdb, self.index, self.resolver, self.kg, self.docs = rdb, index, resolver, kg, docs
         self.ontology, self.lexicon, self.settings = ontology, lexicon, settings
+        self.vectors = vectors
         self.meta = rdb.meta() if rdb is not None else {}
 
     # ------------------------------------------------------------------ specs
@@ -84,14 +86,15 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "search_products",
-                "상품명·운용사·기초지수·전략 텍스트에 대한 키워드/유사 검색(BM25). 정확한 상품명을 모르거나 테마 키워드(예: 우주항공, robot, China semiconductor)로 후보를 찾을 때 사용. "
-                "해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
+                "상품명·운용사·기초지수·전략 텍스트 검색. mode=hybrid(기본)는 어휘검색(BM25)과 의미검색(벡터)을 RRF로 결합하고, lexical은 정확한 표기 매칭, vector는 표현이 달라도 의미가 가까운 상품을 찾습니다. "
+                "정확한 상품명을 모르거나 테마 키워드(예: 우주항공, robot, China semiconductor)로 후보를 찾을 때 사용. 해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
                 {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"},
                         "table": {"type": "string", "enum": list(VIEW_ID_NAME), "description": "특정 테이블로 제한(선택)"},
                         "k": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
+                        "mode": {"type": "string", "enum": ["hybrid", "lexical", "vector"], "default": "hybrid"},
                     },
                     "required": ["query"],
                 },
@@ -176,17 +179,31 @@ class ToolRegistry:
         text += f"\n총 {r.row_count}건" + (" (LIMIT로 잘림 — 집계가 필요하면 COUNT/GROUP BY 사용)" if r.truncated else "")
         return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, r.row_count, refs))
 
-    def _t_search_products(self, query: str, table: str | None = None, k: int = 10) -> ToolResult:
-        hits = self.index.search(query, k=int(k), table=table)
+    def _t_search_products(self, query: str, table: str | None = None, k: int = 10, mode: str = "hybrid") -> ToolResult:
+        k = int(k)
+        mode = mode if mode in ("hybrid", "lexical", "vector") else "hybrid"
+        if self.vectors is None or len(self.vectors) == 0:
+            mode = "lexical"
+        if mode == "lexical":
+            hits = self.index.search(query, k=k, table=table)
+        elif mode == "vector":
+            hits = self.vectors.search(query, k=k, table=table)
+        else:
+            hits = hybrid_search(
+                self.index.search(query, k=max(k, 20), table=table),
+                self.vectors.search(query, k=max(k, 20), table=table),
+                k=k,
+            )
+        detail = f"search_products('{query}', mode={mode}" + (f", table={table}" if table else "") + ")"
         if not hits:
-            return ToolResult("검색 결과 없음", False, Evidence("search", table, None, None, f"search_products('{query}')", 0))
+            return ToolResult("검색 결과 없음", False, Evidence("search", table, None, None, detail, 0))
         lines, refs = [], []
         for h in hits:
             idc, _ = VIEW_ID_NAME.get(h.table, ("id", "name"))
             key = {k2: v for k2, v in h.payload.items() if v not in (None, "") and k2 not in (idc,)}
             lines.append(f"- [{h.table}] id={h.id} | {h.title} | " + ", ".join(f"{a}={_fmt_val(b, 40)}" for a, b in list(key.items())[:8]))
             refs.append(f"{h.id} {h.title}")
-        return ToolResult("\n".join(lines), False, Evidence("search", table, None, None, f"search_products('{query}')", len(hits), refs))
+        return ToolResult("\n".join(lines), False, Evidence("search", table, None, None, detail, len(hits), refs))
 
     def _t_resolve_entity(self, mention: str) -> ToolResult:
         r = self.resolver.resolve(mention, k=5)

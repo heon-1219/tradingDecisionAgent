@@ -45,6 +45,8 @@ def slug(s: str | None) -> str:
 class KG:
     def __init__(self, g: rdflib.Graph):
         self.graph = g
+        self.asserted_triples = len(g)
+        self.inferred_triples = 0
         self._label_index: dict[str, list[URIRef]] = defaultdict(list)
         self._reindex()
 
@@ -305,8 +307,89 @@ class KG:
         log(f"  funds: {n} ({len(fam_seen)} families)")
         # --- constituents ---------------------------------------------------
         n = cls._load_constituents(g, lexicon, comp_iri, constituents_dir) if constituents_dir else 0
-        log(f"  constituents: {n} | triples: {len(g):,} | {time.time() - t0:.1f}s")
-        return cls(g)
+        log(f"  constituents: {n}")
+        # --- TBox + inference -----------------------------------------------
+        asserted = len(g)
+        inferred = cls._materialize(g, ontology, log) if ontology is not None and getattr(ontology, "graph", None) is not None else 0
+        log(f"  triples: {len(g):,} (명시 {asserted:,} + 추론 {inferred:,}) | {time.time() - t0:.1f}s")
+        kg = cls(g)
+        kg.asserted_triples, kg.inferred_triples = asserted, inferred
+        return kg
+
+    # --------------------------------------------------------------- inference
+    @staticmethod
+    def _materialize(g: rdflib.Graph, ontology, log=print) -> int:
+        """Merge the TBox and apply the three entailment rules the ontology declares.
+
+        1. type inheritance   x a A, A rdfs:subClassOf B      -> x a B
+        2. inverse properties x P y, P owl:inverseOf Q         -> y Q x
+        3. domain / range     x P y, P rdfs:domain D / range R -> x a D / y a R
+
+        This is what makes the ontology a reasoning layer rather than a vocabulary: a query for
+        `?p a fp:Product` or `?am fp:manages ?p` answers even though only the leaf facts were loaded.
+        """
+        from rdflib import OWL
+
+        before = len(g)
+        for triple in ontology.graph:  # merge TBox (classes, properties, SHACL shapes, enumerations)
+            g.add(triple)
+
+        # 1) transitive superclass map
+        parents: dict[URIRef, set[URIRef]] = defaultdict(set)
+        for c, p in g.subject_objects(RDFS.subClassOf):
+            if isinstance(c, URIRef) and isinstance(p, URIRef):
+                parents[c].add(p)
+        ancestors: dict[URIRef, set[URIRef]] = {}
+
+        def anc(c: URIRef) -> set[URIRef]:
+            if c in ancestors:
+                return ancestors[c]
+            ancestors[c] = set()  # guards cycles
+            out: set[URIRef] = set()
+            for p in parents.get(c, ()):
+                out.add(p)
+                out |= anc(p)
+            ancestors[c] = out
+            return out
+
+        for s, o in list(g.subject_objects(RDF.type)):
+            if isinstance(o, URIRef):
+                for a in anc(o):
+                    g.add((s, RDF.type, a))
+
+        # 2) inverse properties
+        inverses: list[tuple[URIRef, URIRef]] = []
+        for p, q in g.subject_objects(OWL.inverseOf):
+            if isinstance(p, URIRef) and isinstance(q, URIRef):
+                inverses += [(p, q), (q, p)]
+        for p, q in inverses:
+            for s, o in list(g.subject_objects(p)):
+                if isinstance(o, URIRef):
+                    g.add((o, q, s))
+
+        # 3) domain / range typing (object properties only; literals carry no type)
+        used = set(g.predicates(None, None))  # skip TBox properties absent from the data
+        for prop, dom in list(g.subject_objects(RDFS.domain)):
+            if prop not in used:
+                continue
+            if not (isinstance(prop, URIRef) and isinstance(dom, URIRef) and str(dom).startswith(str(FP))):
+                continue
+            for s, _o in list(g.subject_objects(prop)):
+                if isinstance(s, URIRef) and str(s).startswith(str(D)):
+                    g.add((s, RDF.type, dom))
+                    for a in anc(dom):
+                        g.add((s, RDF.type, a))
+        for prop, rng in list(g.subject_objects(RDFS.range)):
+            if prop not in used:
+                continue
+            if not (isinstance(prop, URIRef) and isinstance(rng, URIRef) and str(rng).startswith(str(FP))):
+                continue
+            for _s, o in list(g.subject_objects(prop)):
+                if isinstance(o, URIRef) and str(o).startswith(str(D)):
+                    g.add((o, RDF.type, rng))
+                    for a in anc(rng):
+                        g.add((o, RDF.type, a))
+        return len(g) - before
 
     @staticmethod
     def _load_constituents(g: rdflib.Graph, lexicon, comp_iri: dict[str, URIRef], d: Path) -> int:
@@ -351,12 +434,9 @@ class KG:
     # ------------------------------------------------------------------ query
     def _reindex(self) -> None:
         self._label_index.clear()
-        for s, o in self.graph.subject_objects(FP.name):
-            self._label_index[_norm(o)].append(s)
-        for s, o in self.graph.subject_objects(FP.productCode):
-            self._label_index[_norm(o)].append(s)
-        for s, o in self.graph.subject_objects(FP.ticker):
-            self._label_index[_norm(o)].append(s)
+        for pred in (FP.name, FP.productCode, FP.ticker, RDFS.label, FP.code):
+            for s, o in self.graph.subject_objects(pred):
+                self._label_index[_norm(o)].append(s)
 
     @property
     def size(self) -> int:

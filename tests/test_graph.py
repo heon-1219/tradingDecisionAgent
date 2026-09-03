@@ -73,3 +73,28 @@ def test_query_adds_prefixes_and_limit(small_rdb):
     kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, None, log=lambda *a: None)
     rows = kg.query("SELECT ?p ?n WHERE { ?p a fp:DomesticETF ; fp:name ?n }")
     assert rows[0]["n"] == "KODEX 2차전지산업"
+
+
+def test_ontology_inference_materializes_supertypes_and_inverses(small_rdb, tmp_path):
+    """Axioms + logic rules produce facts nobody asserted (the tech session's inference story)."""
+    from finagent.ontology.loader import Ontology
+
+    ont = Ontology.load(ROOT / "ontology")
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), ont, None, log=lambda *a: None)
+    assert kg.inferred_triples > 0
+    # 1) type inheritance: only `a fp:DomesticETF` was asserted
+    assert len(kg.query("SELECT ?p WHERE { ?p a fp:DomesticETF }")) == 1
+    assert len(kg.query("SELECT ?p WHERE { ?p a fp:ETF }")) == 1
+    assert len(kg.query("SELECT ?p WHERE { ?p a fp:Product }")) == 1
+    # 2) inverse properties declared in the TBox
+    assert kg.query("SELECT ?am WHERE { ?am fp:manages ?p }")
+    # 3) the TBox itself is queryable at runtime (ontology as a live layer)
+    assert kg.query("SELECT ?c WHERE { ?c rdfs:subClassOf fp:Product }")
+    # 4) enumerations are reachable by label/code through find()
+    assert kg.neighbors("매우높은위험(1등급)") or kg.neighbors("RiskGrade1")
+
+
+def test_inference_is_skipped_without_ontology(small_rdb):
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, None, log=lambda *a: None)
+    assert kg.inferred_triples == 0
+    assert len(kg.query("SELECT ?p WHERE { ?p a fp:Product }")) == 0

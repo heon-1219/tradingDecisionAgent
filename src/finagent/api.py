@@ -55,6 +55,12 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
             "tables": st.rdb.meta(),
             "index_docs": len(st.index.docs),
             "kg_triples": st.kg.size if st.kg is not None else 0,
+            "kg_asserted": getattr(st.kg, "asserted_triples", 0) if st.kg is not None else 0,
+            "kg_inferred": getattr(st.kg, "inferred_triples", 0) if st.kg is not None else 0,
+            "vector": (
+                {"backend": st.vectors.stats.backend, "docs": st.vectors.stats.docs, "dims": st.vectors.stats.dims}
+                if getattr(st, "vectors", None) is not None else None
+            ),
             "docs_chunks": len(st.docs),
             "llm": f"{st.llm.name}/{st.settings.llm_model}",
         }

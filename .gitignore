@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .env
 data/store/
+data/enrichment/constituents/.cache/
 data/external/cache/
 .pytest_cache/
 *.log

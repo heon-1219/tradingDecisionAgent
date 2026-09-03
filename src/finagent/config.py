@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str | None = None
 
+    # Vector index
+    vector_backend: Literal["lsa", "openai", "off"] = "lsa"
+    vector_dims: int = 384
+    vector_max_df: float = 0.005
+    vector_embed_model: str = "text-embedding-3-small"
+
     # Agent budget
     time_budget_sec: float = 50.0
     max_tool_rounds: int = 6
@@ -54,6 +60,10 @@ class Settings(BaseSettings):
     @property
     def docs_dir(self) -> Path:
         return self.data_dir / "external" / "docs"
+
+    @property
+    def vector_cache_path(self) -> Path:
+        return self.data_dir / "store" / "vector_cache.npz"
 
 
 @lru_cache

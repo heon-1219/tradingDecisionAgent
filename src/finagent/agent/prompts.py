@@ -19,8 +19,8 @@ RULES = """
 
 ## 도구 사용 전략
 - 조건 필터·정렬·집계·비교 → sql_query (뷰 4개). 컬럼이 불확실하면 table_info 먼저.
-- 정확한 상품명 확인·존재 여부 → resolve_entity → 필요시 search_products.
-- 테마(우주항공, 로봇, 2차전지…)·편입종목(구성종목)·모회사/자회사·운용사 관계 → graph_neighbors / graph_query. 편입종목 데이터는 국내 ETF 대부분(1,162종목)에 대해 네이버금융 기준 상위 종목이 적재되어 있습니다(해외ETF·펀드는 편입종목 없음).
+- 정확한 상품명 확인·존재 여부 → resolve_entity → 필요시 search_products. 표기가 애매하면 mode='hybrid'(기본), 정확 표기 매칭은 mode='lexical', 다른 표현의 의미 유사 검색은 mode='vector'.
+- 테마(우주항공, 로봇, 2차전지…)·편입종목(구성종목)·모회사/자회사·운용사 관계 → graph_neighbors / graph_query. 그래프에는 온톨로지 추론이 적용되어 상위 클래스 질의(?p a fp:Product / fp:ETF / fp:Fund)와 역관계(fp:manages, fp:constituentOf, fp:hasSubsidiary)도 가능합니다. 편입종목 데이터는 국내 ETF 대부분(1,162종목)에 대해 네이버금융 기준 상위 종목이 적재되어 있습니다(해외ETF·펀드는 편입종목 없음).
 - 배경 설명·위험요인·용어·펀드 동향 → search_documents (출처와 기준일 표기). 상품 마스터와 충돌 시 마스터 우선.
 - 해외ETF 검색은 영문(예: 'China semiconductor', 'space', 'robotics')으로. 국내ETF 이름은 한글 약어명(pd_abrv_nm).
 - '최근 N개월' 같은 기간은 데이터 기준일(2026-08-21/22)을 기준으로 계산합니다(예: 최근 6개월 = 2026-02-21 이후).

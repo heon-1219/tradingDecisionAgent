@@ -8,7 +8,7 @@
 | Content-Type (응답) | `application/json; charset=utf-8` |
 | 인증 | 없음 (인증 헤더·POST 바디 미사용) |
 | 권장 응답 시간 | 문항당 60초 이내 (서버 내부 예산 50초, 초과 시 확보된 근거로 즉시 답변) |
-| 보조 | `GET /health` (상태·테이블 기준일·그래프 크기), `GET /` (안내 문구) |
+| 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (안내 문구) |
 
 ## Request (Query String)
 
