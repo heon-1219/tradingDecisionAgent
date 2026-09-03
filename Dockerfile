@@ -8,8 +8,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
-# Build the SQLite store from the Excel masters at image build time (~2 min)
-RUN python scripts/build_store.py
+# Build the SQLite store from the Excel masters and warm the vector cache at image build time
+# (~3 min here, but it takes ~80s off every container start)
+RUN python scripts/build_store.py && python scripts/warmup.py
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=420s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"

@@ -72,7 +72,7 @@ fin-agent/
 ├─ data/external/docs/     # 외부 참고 문서(Markdown, front-matter에 출처·기준일)
 ├─ data/eval/              # questions.jsonl (평가 재현용 질의 세트), results.jsonl
 ├─ data/store/             # 빌드 산출물 products.db (git 제외)
-├─ scripts/                # build_store.py, eval_run.py, fetch_constituents_naver.py, parse_docs.py
+├─ scripts/                # build_store.py, warmup.py, eval_run.py, fetch_constituents_naver.py, parse_docs.py
 ├─ tests/                  # pytest
 ├─ docs/                   # api_spec.md, proposal_outline.md, superpowers/(설계·계획)
 ├─ requirements.txt · pyproject.toml · Dockerfile · docker-compose.yml · Caddyfile · .env.example
@@ -100,6 +100,8 @@ cp .env.example .env                                     # LLM 키 입력
 | `ANTHROPIC_FALLBACKS` | `true` | Claude 서버측 안전 거부 대체 모델 자동 사용 |
 | `TIME_BUDGET_SEC` | `50` | 문항당 내부 시간 예산 |
 | `MAX_TOOL_ROUNDS` | `6` | 도구 호출 최대 라운드 |
+| `VECTOR_BACKEND` | `lsa` | `lsa`(오프라인 TF-IDF+SVD, 키 불필요) / `openai`(임베딩 API) / `off` |
+| `VECTOR_DIMS`, `VECTOR_MAX_DF` | `384`, `0.005` | 벡터 차원 수와 고빈도 토큰 제거 임계값 |
 
 ## 4. 데이터 적재 및 실행
 
@@ -107,12 +109,15 @@ cp .env.example .env                                     # LLM 키 입력
 # (1) Excel → SQLite (약 1~2분, data/store/products.db 생성)
 python scripts/build_store.py
 
-# (2) 서버 실행 (기동 시 색인·벡터·그래프+추론 구축 약 2분, 재기동 시 벡터 캐시로 단축; /health 로 확인)
+# (2) (선택) 벡터 캐시 예열 — 이후 기동 시간을 약 80초 단축
+python scripts/warmup.py
+
+# (3) 서버 실행 (기동 시 색인·벡터·그래프+추론 구축: 캐시 있으면 약 1분 30초, 없으면 3~3.5분. /health 로 확인)
 uvicorn finagent.api:app --host 0.0.0.0 --port 8000 --app-dir src
 #   또는
 python -m finagent.api
 
-# (3) 호출
+# (4) 호출
 curl -G "http://127.0.0.1:8000/answer" --data-urlencode "question_id=Q-001" --data-urlencode "question=현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘"
 ```
 

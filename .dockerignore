@@ -3,7 +3,8 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-data/store/
+data/store/*.db
+data/store/kg.ttl
 data/external/cache/
 data/eval/results.jsonl
 docs/superpowers/
