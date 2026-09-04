@@ -7,3 +7,6 @@ data/enrichment/constituents/.cache/
 data/external/cache/
 .pytest_cache/
 *.log
+
+# 튜닝 학습셋은 스크립트로 재생성 가능 (CSV 는 용량이 큼)
+data/tuning/*.csv
