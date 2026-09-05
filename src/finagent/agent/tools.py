@@ -39,9 +39,38 @@ class ToolResult:
     evidence: Evidence | None = None
 
 
+_UNITS = ((10**12, "조"), (10**8, "억"), (10**4, "만"))
+
+
+def korean_magnitude(v: float) -> str:
+    """25474813891225 -> '25조 4,748억'.
+
+    Large amounts arrive as raw integers and the model converts them to Korean units itself, which it
+    gets wrong: KODEX 200's 순자산 came back as '254조 4,818십억' in one run and '25조 4,748십억' in the
+    next — the same query, an order of magnitude apart.  Doing the conversion here removes the step
+    that was failing.  No currency is named: the magnitude is what gets mistranscribed, and the column
+    already says whether it is KRW or USD.
+    """
+    n = abs(int(v))
+    parts, rest = [], n
+    for size, name in _UNITS:
+        q, rest = divmod(rest, size)
+        if q:
+            parts.append(f"{q:,}{name}")
+        if len(parts) == 2:  # two units is enough to read; more is noise
+            break
+    if not parts:
+        return ""
+    return ("-" if v < 0 else "") + " ".join(parts)
+
+
 def _fmt_val(v, width: int = 70) -> str:
     if v is None:
         return "NULL"
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) >= 10**8:
+        mag = korean_magnitude(v)
+        raw = f"{int(v):,}" if float(v).is_integer() else f"{v:,.2f}"
+        return f"{raw}({mag})" if mag else raw
     if isinstance(v, float):
         if v.is_integer() and abs(v) >= 1000:
             return f"{int(v):,}"
