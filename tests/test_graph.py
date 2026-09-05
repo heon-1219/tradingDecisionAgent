@@ -38,6 +38,20 @@ def small_rdb(tmp_path):
         "null manager_name, null fund_family, null bmrk_nm, null or_attr_desc, null zrin_ptn_nm, null fd_ivst_rgn_desc, null risk_grade, "
         "null is_hedged, null fd_nast_suma where 0"
     )
+    c.execute(
+        "create table etf_constituent(etf_itm_no, etf_ticker, etf_name, company_code, company_name, "
+        "company_id, weight_pct, is_cash, as_of)"
+    )
+    c.executemany(
+        "insert into etf_constituent values (?,?,?,?,?,?,?,?,?)",
+        [
+            ("KR1", "305720", "KODEX 2차전지산업", "247540", "에코프로비엠", "ecopro_bm", 12.3, 0, "2026-08-21"),
+            ("KR1", "305720", "KODEX 2차전지산업", "003670", "포스코퓨처엠", None, 8.0, 0, "2026-08-21"),
+            ("KR1", "305720", "KODEX 2차전지산업", None, "듣보잡소재", None, 1.0, 0, "2026-08-21"),
+            ("KR1", "305720", "KODEX 2차전지산업", None, "원화현금", None, 3.0, 1, "2026-08-21"),
+        ],
+    )
+    c.execute("create view v_etf_constituent as select * from etf_constituent")
     c.execute("create table meta(table_name, source_id, korean_name, base_date, row_count, built_at)")
     c.commit()
     c.close()
@@ -45,23 +59,15 @@ def small_rdb(tmp_path):
 
 
 def test_build_query_neighbors(small_rdb, tmp_path):
-    cons = tmp_path / "cons"
-    cons.mkdir()
-    (cons / "kr.csv").write_text(
-        "etf_id,etf_table,ticker,etf_name,company_id,company_name,weight_pct,as_of,source\n"
-        "KR1,v_etf_kr,305720,KODEX 2차전지산업,ecopro_bm,에코프로비엠,12.3,2026-08-21,test\n"
-        "KR1,v_etf_kr,305720,KODEX 2차전지산업,,포스코퓨처엠,8.0,2026-08-21,test\n"
-        "KR1,v_etf_kr,305720,KODEX 2차전지산업,,듣보잡소재,1.0,2026-08-21,test\n",
-        encoding="utf-8",
-    )
-    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, cons, log=lambda *a: None)
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, log=lambda *a: None)
     rows = kg.query("SELECT ?etf WHERE { ?etf fp:hasConstituent ?c . ?c fp:subsidiaryOf ?p . ?p fp:name '에코프로' }")
     assert rows and "etf_kr/KR1" in rows[0]["etf"]
     nb = kg.neighbors("KODEX 2차전지산업")
     assert "hasTheme" in nb and any("battery" in x["iri"] for x in nb["hasTheme"])
     assert "managedBy" in nb and nb["managedBy"][0]["label"] == "삼성자산운용"
     labels = {x["label"] for x in nb["hasConstituent"]}
-    assert {"에코프로비엠", "포스코퓨처엠", "듣보잡소재"} <= labels  # alias-mapped, and auto company
+    assert {"에코프로비엠", "포스코퓨처엠", "듣보잡소재"} <= labels  # by lexicon id, by code, and by name
+    assert "원화현금" not in labels  # is_cash rows are holdings but not companies
     inv = kg.neighbors("에코프로", relation="subsidiaryOf_inverse")
     assert {x["label"] for x in inv["subsidiaryOf_inverse"]} >= {"에코프로비엠", "에코프로에이치엔"}
     assert kg.neighbors("305720")["managedBy"]  # ticker lookup
@@ -70,7 +76,7 @@ def test_build_query_neighbors(small_rdb, tmp_path):
 
 
 def test_query_adds_prefixes_and_limit(small_rdb):
-    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, None, log=lambda *a: None)
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, log=lambda *a: None)
     rows = kg.query("SELECT ?p ?n WHERE { ?p a fp:DomesticETF ; fp:name ?n }")
     assert rows[0]["n"] == "KODEX 2차전지산업"
 
@@ -80,7 +86,7 @@ def test_ontology_inference_materializes_supertypes_and_inverses(small_rdb, tmp_
     from finagent.ontology.loader import Ontology
 
     ont = Ontology.load(ROOT / "ontology")
-    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), ont, None, log=lambda *a: None)
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), ont, log=lambda *a: None)
     assert kg.inferred_triples > 0
     # 1) type inheritance: only `a fp:DomesticETF` was asserted
     assert len(kg.query("SELECT ?p WHERE { ?p a fp:DomesticETF }")) == 1
@@ -95,6 +101,6 @@ def test_ontology_inference_materializes_supertypes_and_inverses(small_rdb, tmp_
 
 
 def test_inference_is_skipped_without_ontology(small_rdb):
-    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, None, log=lambda *a: None)
+    kg = KG.build(small_rdb, Lexicon.load(ROOT / "data/enrichment"), None, log=lambda *a: None)
     assert kg.inferred_triples == 0
     assert len(kg.query("SELECT ?p WHERE { ?p a fp:Product }")) == 0

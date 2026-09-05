@@ -5,9 +5,9 @@ from finagent.ontology.loader import Ontology
 ONT = Path(__file__).resolve().parents[1] / "ontology"
 
 
-def test_load_all_five_files():
+def test_load_all_ttl_files():
     o = Ontology.load(ONT)
-    assert {t.view for t in o.tables()} == {"v_bond_kr", "v_etf_kr", "v_etf_gl", "v_fund_pub"}
+    assert {t.view for t in o.tables()} == {"v_bond_kr", "v_etf_kr", "v_etf_gl", "v_fund_pub", "v_etf_constituent"}
     assert len(o.graph) > 300
 
 

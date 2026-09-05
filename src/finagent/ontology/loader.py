@@ -14,7 +14,7 @@ import rdflib
 from rdflib import OWL, RDF, RDFS, Literal, Namespace
 
 FP = Namespace("http://mafest.ai/product#")
-FILES = ["common.ttl", "bond_kr.ttl", "etf_kr.ttl", "etf_gl.ttl", "fund_pub.ttl"]
+FILES = ["common.ttl", "bond_kr.ttl", "etf_kr.ttl", "etf_gl.ttl", "fund_pub.ttl", "etf_constituent.ttl"]
 
 
 @dataclass

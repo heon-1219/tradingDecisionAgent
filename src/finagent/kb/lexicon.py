@@ -159,14 +159,10 @@ class Lexicon:
     def manager(self, manager_id: str) -> Manager | None:
         return self._manager_by_id.get(manager_id)
 
-    def company_by_alias(self, name: str | None) -> Company | None:
-        n = norm(name)
-        if not n:
-            return None
-        for a, c in self._comp_alias:
-            if a == n:
-                return c
-        for a, c in self._comp_alias:
-            if len(a) >= 3 and (a in n or n in a):
-                return c
-        return None
+    # ``company_by_alias`` used to live here: an exact-alias lookup with a substring fallback.  It was
+    # written for question-side matching, where being forgiving is right, and then reused to identify
+    # 15,911 rows of ingested constituent data, where being forgiving is silent corruption — 677 rows
+    # landed under the wrong company because a two-letter name is a substring of a long one
+    # ("lg" ⊂ "shinhanfinancia|lg|roup").  Constituents now carry the source's stock code, so nothing
+    # needs to guess.  Use ``match_companies`` for text from a user: it anchors ASCII aliases on word
+    # boundaries and drops one-character ones.

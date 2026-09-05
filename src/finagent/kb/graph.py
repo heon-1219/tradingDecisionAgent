@@ -1,11 +1,10 @@
-"""Knowledge graph (ABox) built at startup from the SQLite store + curated lexicons + constituents.
+"""Knowledge graph (ABox) built at startup from the SQLite store + curated lexicons.
 
 TBox (classes/properties) lives in ontology/*.ttl; this module instantiates products, managers,
 issuers, indices, themes, companies and fund families as RDF and exposes SPARQL + neighbor lookups.
 """
 from __future__ import annotations
 
-import csv
 import re
 import time
 import unicodedata
@@ -52,7 +51,7 @@ class KG:
 
     # ------------------------------------------------------------------ build
     @classmethod
-    def build(cls, rdb, lexicon, ontology=None, constituents_dir: Path | None = None, log=print) -> "KG":
+    def build(cls, rdb, lexicon, ontology=None, log=print) -> "KG":
         t0 = time.time()
         g = rdflib.Graph()
         g.bind("fp", FP)
@@ -306,7 +305,7 @@ class KG:
             n += 1
         log(f"  funds: {n} ({len(fam_seen)} families)")
         # --- constituents ---------------------------------------------------
-        n = cls._load_constituents(g, lexicon, comp_iri, constituents_dir) if constituents_dir else 0
+        n = cls._load_constituents(g, comp_iri, rdb)
         log(f"  constituents: {n}")
         # --- TBox + inference -----------------------------------------------
         asserted = len(g)
@@ -392,43 +391,40 @@ class KG:
         return len(g) - before
 
     @staticmethod
-    def _load_constituents(g: rdflib.Graph, lexicon, comp_iri: dict[str, URIRef], d: Path) -> int:
-        d = Path(d)
-        if not d.exists():
+    def _load_constituents(g: rdflib.Graph, comp_iri: dict[str, URIRef], rdb) -> int:
+        """Holdings from the store, not from the CSV.
+
+        Reading the same file in two places was how the graph and SQL came to disagree: the ETL kept
+        the collector's verdict, the graph re-derived it through a fuzzy name matcher, and only one of
+        them was right.  One loader, one table, one answer.
+
+        Identity is the source's own stock code where it exists (79% of rows) and otherwise the name
+        the holding was published under — never string similarity.
+        """
+        try:
+            rows = rdb.fetch_all(
+                "SELECT etf_itm_no, company_code, company_name, company_id FROM etf_constituent WHERE is_cash = 0"
+            )
+        except Exception:  # noqa: BLE001 - a store built before this table simply has no constituents
             return 0
         n = 0
-        table_prefix = {"v_etf_kr": "etf_kr", "v_etf_gl": "etf_gl", "v_fund_pub": "fund", "v_bond_kr": "bond"}
-        for f in sorted(d.glob("*.csv")):
-            with open(f, encoding="utf-8-sig", newline="") as fh:
-                for r in csv.DictReader(fh):
-                    etf_id, table = (r.get("etf_id") or "").strip(), (r.get("etf_table") or "v_etf_kr").strip()
-                    if not etf_id:
-                        continue
-                    pi = D[f"{table_prefix.get(table, 'etf_kr')}/{etf_id}"]
-                    cid = (r.get("company_id") or "").strip()
-                    cname = (r.get("company_name") or "").strip()
-                    if _norm(cname) in _CASH_LIKE:
-                        continue
-                    if not cid or cid.startswith("auto_"):
-                        c = lexicon.company_by_alias(cname)  # re-resolve with the current lexicon
-                        cid = c.id if c else (cid or f"auto_{slug(cname)}")
-                    ci = comp_iri.get(cid)
-                    if ci is None:
-                        ci = D[f"company/{cid}"]
-                        comp_iri[cid] = ci
-                        g.add((ci, RDF.type, FP.Company))
-                        g.add((ci, FP.name, Literal(cname or cid)))
-                        g.add((ci, RDFS.label, Literal(cname or cid, lang="ko")))
-                    g.add((pi, FP.hasConstituent, ci))
-                    g.add((ci, FP.constituentOf, pi))
-                    w = (r.get("weight_pct") or "").strip()
-                    if w:
-                        try:
-                            # reified weight kept simple: one statement per (etf, company) pair
-                            g.add((pi, FP[f"weight_{slug(cid)}"], Literal(float(w))))
-                        except ValueError:
-                            pass
-                    n += 1
+        for etf_id, code, cname, cid in rows:
+            if not etf_id or not cname:
+                continue
+            pi = D[f"etf_kr/{etf_id}"]
+            cid = (cid or "").strip() or (f"code_{code}" if code else f"auto_{slug(cname)}")
+            ci = comp_iri.get(cid)
+            if ci is None:
+                ci = D[f"company/{cid}"]
+                comp_iri[cid] = ci
+                g.add((ci, RDF.type, FP.Company))
+                g.add((ci, FP.name, Literal(cname)))
+                g.add((ci, RDFS.label, Literal(cname, lang="ko")))
+            if code:
+                g.add((ci, FP.ticker, Literal(str(code))))
+            g.add((pi, FP.hasConstituent, ci))
+            g.add((ci, FP.constituentOf, pi))
+            n += 1
         return n
 
     # ------------------------------------------------------------------ query

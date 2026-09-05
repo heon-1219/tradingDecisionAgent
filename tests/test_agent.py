@@ -53,6 +53,15 @@ def tiny_store(tmp_path_factory):
     )
     c.execute("create view v_etf_kr as select * from etf_kr")
     c.execute(
+        "create table etf_constituent(etf_itm_no, etf_ticker, etf_name, company_code, company_name, "
+        "company_id, weight_pct, is_cash, as_of)"
+    )
+    c.execute(
+        "insert into etf_constituent values ('KRE1','305720','KODEX 2차전지산업','247540','에코프로비엠',"
+        "'ecopro_bm',7.0,0,'2026-08-21')"
+    )
+    c.execute("create view v_etf_constituent as select * from etf_constituent")
+    c.execute(
         "create view v_etf_gl as select null pd_itm_no, null ticker, null pd_nm, null product_type, null is_on_sale, null base_date, null manager_name, "
         "null cu_base_index, null wu_inv_ast_type, null wu_inv_rgn, null expense_ratio_pct, null du_last_aum, null cu_lev_fector, null cu_inverse_short_yn, "
         "null listing_date, null cu_strtegy, null pd_exg_mkt_cd where 0"
@@ -75,13 +84,7 @@ def _state(tiny_store, llm, tmp_path):
     lx = Lexicon.load(ROOT / "data/enrichment")
     idx = SearchIndex.from_rdb(rdb)
     resolver = EntityResolver(idx, lx)
-    cons = tmp_path / "cons"
-    cons.mkdir(exist_ok=True)
-    (cons / "c.csv").write_text(
-        "etf_id,etf_table,ticker,etf_name,company_id,company_name,weight_pct,as_of,source\nKRE1,v_etf_kr,305720,KODEX 2차전지산업,ecopro_bm,에코프로비엠,7.0,2026-08-21,t\n",
-        encoding="utf-8",
-    )
-    kg = KG.build(rdb, lx, None, cons, log=lambda *a: None)
+    kg = KG.build(rdb, lx, None, log=lambda *a: None)
     docs = DocStore.load(ROOT / "data/external/docs")
     from finagent.ontology.loader import FallbackValidators, Ontology
 

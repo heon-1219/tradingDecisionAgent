@@ -5,6 +5,7 @@ Run:  python -m finagent.etl.build_store   (or scripts/build_store.py)
 """
 from __future__ import annotations
 
+import csv
 import datetime as dt
 import sqlite3
 import sys
@@ -110,6 +111,10 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
 
 
 VIEWS: dict[str, str] = {
+    "v_etf_constituent": (
+        "SELECT etf_itm_no, etf_ticker, etf_name, company_code, company_name, weight_pct, is_cash, as_of "
+        "FROM etf_constituent"
+    ),
     "v_bond_kr": (
         "SELECT pd_no, pd_nm, pd_abrv_nm, pd_eng_nm, product_type, pd_exg_mkt, info_seq, is_sellable, bdbns_abl_chnl_nm, issuer_name, "
         "bd_knd, std_pd_mcls_nm, std_pd_scls_nm, bd_ofr_tcd, bd_inrt_tcd, bd_intp_tcd, crd_grd, crd_grd_dt, pd_risk_nm, "
@@ -154,10 +159,57 @@ INDEXES = [
     "etf_kr(pd_itm_no)", "etf_kr(pd_abrv_nm)", "etf_kr(pd_ticker)",
     "etf_gl(pd_itm_no)", "etf_gl(ticker)", "etf_gl(pd_nm)",
     "fund_pub(itm_no)", "fund_pub(fund_family)", "fund_pub(is_on_sale)", "fund_pub(itm_nm)",
+    "etf_constituent(etf_itm_no)", "etf_constituent(company_code)", "etf_constituent(company_name)",
 ]
 
+# Cash and deposit lines are holdings in the source but not companies; flagged rather than dropped so
+# the store stays a faithful copy and both SQL and the graph filter on the same column.
+_CASH_LIKE = {"원화현금", "설정현금액", "현금", "usd", "달러현금", "외화현금", "원화예금"}
 
-def build_store(raw_dir: Path, store_path: Path, lx: Lexicon, log=print) -> dict[str, int]:
+
+def _load_constituents(con: sqlite3.Connection, path: Path | None, log=print) -> int:
+    """ETF holdings into the store, so that 'X를 보유한 ETF 중 순자산 상위 3개' is one SQL join.
+
+    They used to live only in the knowledge graph, which left no way to combine a holding with the
+    numbers in the ETF master: the agent tried ``WHERE pd_ticker='005930'`` on the ETF table (the ETF's
+    own ticker) and answered "확인할 수 없습니다" while the graph held all 238 rows.  Weights lived as
+    ~5,000 distinct ``weight_<company>`` predicates, which is a column pretending to be a vocabulary.
+    """
+    # Created even when there is no CSV: v_etf_constituent is declared with the other views, and a
+    # view over a missing table breaks every query against the store, not just this one.
+    con.execute(
+        "CREATE TABLE etf_constituent("
+        " etf_itm_no TEXT, etf_ticker TEXT, etf_name TEXT, company_code TEXT, company_name TEXT,"
+        " company_id TEXT, weight_pct REAL, is_cash INTEGER, as_of TEXT)"
+    )
+    rows: list[tuple] = []
+    for f in sorted(Path(path).glob("*.csv")) if path and Path(path).exists() else []:
+        with open(f, encoding="utf-8-sig", newline="") as fh:
+            for r in csv.DictReader(fh):
+                etf_id = (r.get("etf_id") or "").strip()
+                name = (r.get("company_name") or "").strip()
+                if not etf_id or not name:
+                    continue
+                w = (r.get("weight_pct") or "").strip()
+                try:
+                    weight = float(w) if w else None
+                except ValueError:
+                    weight = None
+                rows.append((
+                    etf_id, (r.get("ticker") or "").strip(), (r.get("etf_name") or "").strip(),
+                    (r.get("company_code") or "").strip() or None, name,
+                    (r.get("company_id") or "").strip() or None, weight,
+                    1 if name.replace(" ", "").lower() in _CASH_LIKE else 0,
+                    (r.get("as_of") or "").strip() or None,
+                ))
+    if rows:
+        con.executemany("INSERT INTO etf_constituent VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    log(f"  etf_constituent: {len(rows):,} rows")
+    return len(rows)
+
+
+def build_store(raw_dir: Path, store_path: Path, lx: Lexicon, log=print,
+                constituents_dir: Path | None = None) -> dict[str, int]:
     store_path = Path(store_path)
     store_path.parent.mkdir(parents=True, exist_ok=True)
     if store_path.exists():
@@ -178,6 +230,15 @@ def build_store(raw_dir: Path, store_path: Path, lx: Lexicon, log=print) -> dict
         )
         counts[table] = len(df)
         log(f"  {table}: {len(df):,} rows (base {base}) in {time.time() - t0:.1f}s")
+    n = _load_constituents(con, Path(constituents_dir) if constituents_dir else None, log=log)
+    if n:
+        counts["etf_constituent"] = n
+        as_of = con.execute("SELECT as_of FROM etf_constituent WHERE as_of IS NOT NULL LIMIT 1").fetchone()
+        con.execute(
+            "INSERT INTO meta VALUES (?,?,?,?,?,?)",
+            ("etf_constituent", "naver_finance", "국내ETF편입종목", as_of[0] if as_of else None, n,
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
     for name, sql in VIEWS.items():
         con.execute(f"CREATE VIEW {name} AS {sql}")
     for ix in INDEXES:
@@ -192,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
 
     s = get_settings()
     print(f"Building {s.store_path} from {s.raw_dir} ...")
-    counts = build_store(s.raw_dir, s.store_path, Lexicon.load(s.enrichment_dir))
+    counts = build_store(s.raw_dir, s.store_path, Lexicon.load(s.enrichment_dir),
+                         constituents_dir=s.constituents_dir)
     print("done:", counts)
     return 0
 

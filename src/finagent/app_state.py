@@ -71,7 +71,7 @@ class AppState:
                 log.warning("vector index unavailable (%s); lexical + graph only", e)
         kg: KG | None = None
         if build_graph:
-            kg = KG.build(rdb, lexicon, ontology, settings.constituents_dir, log=log.info)
+            kg = KG.build(rdb, lexicon, ontology, log=log.info)
         docs = DocStore.load(settings.docs_dir)
         llm = llm or make_llm(settings)
         tools = ToolRegistry(rdb, index, resolver, kg, docs, ontology, lexicon, settings, vectors=vectors)

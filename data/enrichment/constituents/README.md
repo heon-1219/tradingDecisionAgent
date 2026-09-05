@@ -13,7 +13,7 @@ answer "which ETFs hold company X" / "what does ETF Y hold" questions.
     they are mapped through the `reutersCode` ticker (e.g. `688256.SS`) when the ticker is in companies.yaml.
 - **Source**: Naver Finance (`m.stock.naver.com` JSON API; fallback `finance.naver.com` / wisereport iframe).
   Primary endpoint actually used: `https://m.stock.naver.com/api/etf/{ticker}/constituent` (paginated, `?cursor=`).
-- **Fetched on**: 2026-09-03
+- **Fetched on**: 2026-09-05
 - **Coverage**: ETFs attempted 1235, with >=1 constituent 1162,
   failed/empty 73 (mostly delisted or not-on-sale funds), rows 22599.
   ETFs by source: constituent=1162, etfAnalysis=0,

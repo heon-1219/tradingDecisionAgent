@@ -19,7 +19,7 @@ RULES = """
 9. 마지막은 항상 final_answer 도구 호출로 끝냅니다. answer 필드에는 사용자에게 보여줄 완성된 답변 전문을 씁니다(마크다운 표/목록 가능, 과도한 길이 금지).
 
 ## 도구 사용 전략
-- 조건 필터·정렬·집계·비교 → sql_query (뷰 4개). 컬럼이 불확실하면 table_info 먼저.
+- 조건 필터·정렬·집계·비교 → sql_query (뷰 5개). 컬럼이 불확실하면 table_info 먼저.
 - 정확한 상품명 확인·존재 여부 → resolve_entity → 필요시 search_products. 표기가 애매하면 mode='hybrid'(기본), 정확 표기 매칭은 mode='lexical', 다른 표현의 의미 유사 검색은 mode='vector'.
 - 테마(우주항공, 로봇, 2차전지…)·편입종목(구성종목)·모회사/자회사·운용사 관계 → graph_neighbors / graph_query. 그래프에는 온톨로지 추론이 적용되어 상위 클래스 질의(?p a fp:Product / fp:ETF / fp:Fund)와 역관계(fp:manages, fp:constituentOf, fp:hasSubsidiary)도 가능합니다. 편입종목 데이터는 국내 ETF 대부분(1,162종목)에 대해 네이버금융 기준 상위 종목이 적재되어 있습니다(해외ETF·펀드는 편입종목 없음 → 그 범위는 "확인할 수 없음"으로 명시).
 - 배경 설명·위험요인·용어·펀드 동향 → search_documents (출처와 기준일 표기). 상품 마스터와 충돌 시 마스터 우선.
@@ -52,8 +52,8 @@ ORDER BY 수익률1년 DESC LIMIT 10
 
 주의: 해외ETF에는 기간 수익률이 du_er_1d(1일)만 있고 1년 수익률이 없습니다. 이런 경우 해외ETF는 순위에서 제외하고
 "해외ETF는 1년 수익률이 제공되지 않아 비교에서 제외했다"고 답변에 명시하세요. 없는 값을 0으로 채우면 안 됩니다.
-특정 종목 보유 조건(예: "삼성전자를 보유한")은 국내 ETF만 편입종목 데이터가 있으므로, 국내 ETF는 그래프로 찾고
-해외ETF·펀드는 확인 불가 범위임을 밝힙니다.
+특정 종목 보유 조건(예: "삼성전자를 보유한")은 v_etf_constituent 를 조인해 SQL 한 번으로 풉니다(아래 패턴).
+편입종목은 국내 ETF에만 있으므로, 해외ETF·펀드까지 묻는 질의라면 그 범위는 확인 불가임을 밝힙니다.
 
 ## 자주 쓰는 SQL 패턴
 - 구매가능 원화채권 AA- 이상: SELECT DISTINCT pd_no, pd_nm, crd_grd, srfc_irt, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY mat_date
@@ -61,12 +61,18 @@ ORDER BY 수익률1년 DESC LIMIT 10
 - 미국 상장 주식형 해외ETF 중 총보수 낮고 규모 큰 3개: SELECT ticker, pd_nm, expense_ratio_pct, du_last_aum, cu_base_index FROM v_etf_gl WHERE wu_inv_ast_type='Equity' AND is_on_sale=1 AND cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL AND expense_ratio_pct IS NOT NULL ORDER BY expense_ratio_pct ASC, du_last_aum DESC LIMIT 3
 - 국내 ETF 순자산 상위: SELECT pd_ticker, pd_abrv_nm, manager_name, pd_net_tamt, pd_risk_nm FROM v_etf_kr WHERE pd_grp_no='ETF' AND is_on_sale=1 AND pd_net_tamt IS NOT NULL ORDER BY pd_net_tamt DESC LIMIT 10
 - 펀드 패밀리 요약: SELECT fund_family, MIN(itm_nm) AS name, COUNT(*) AS classes, MAX(fd_nast_suma) AS max_nav, MAX(bmrk_nm), MAX(or_attr_desc) FROM v_fund_pub WHERE product_type='공모펀드' AND itm_nm LIKE '%국민성장%' GROUP BY fund_family
+- 특정 종목을 편입한 ETF (순자산 상위 3개): SELECT e.pd_abrv_nm, e.pd_net_tamt FROM v_etf_kr e JOIN v_etf_constituent c ON c.etf_itm_no = e.pd_itm_no WHERE c.company_name='삼성전자' AND c.is_cash=0 AND e.is_on_sale=1 AND e.pd_net_tamt IS NOT NULL ORDER BY e.pd_net_tamt DESC LIMIT 3
+  (종목코드를 알면 c.company_code='005930' 이 더 정확합니다. 개수를 물으면 COUNT(DISTINCT e.pd_itm_no).)
 """
 
 
 # 시스템 프롬프트에 넣을 핵심 컬럼. 전체 컬럼(48~58개)을 매 요청에 실으면 입력이 1.3만 토큰이 되어
 # CLOVA TPM 한도(테스트앱 3만/분)를 한 번의 호출로 소진한다. 나머지는 table_info 로 필요할 때만 준다.
 CORE_COLUMNS = {
+    "v_etf_constituent": [
+        "etf_itm_no", "etf_ticker", "etf_name", "company_code", "company_name",
+        "weight_pct", "is_cash", "as_of",
+    ],
     "v_bond_kr": [
         "pd_no", "pd_nm", "product_type", "pd_exg_mkt", "is_sellable", "has_buy_yield", "issuer_name",
         "bd_knd", "std_pd_mcls_nm", "bd_ofr_tcd", "crd_grd", "pd_risk_nm", "curr_cd", "srfc_irt",

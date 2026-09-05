@@ -51,8 +51,12 @@ CACHE_DIR = ROOT / "data" / "external" / "cache" / "naver_etf"
 FAILURES_JSON = CACHE_DIR / "_failures.json"
 
 ETF_TABLE = "v_etf_kr"
+# company_code is the constituent's own stock code as the source reports it (005930 for 삼성전자,
+# 005935 for 삼성전자우).  It used to be dropped, which left the name as the only identity and forced
+# downstream code to guess: 'LG' was matched to 신한금융지주 and 'KT' to SK텔레콤 by substring.  Keep the
+# key the source hands us — it is the one field that cannot be reinterpreted.
 CSV_HEADER = [
-    "etf_id", "etf_table", "ticker", "etf_name", "company_id", "company_name",
+    "etf_id", "etf_table", "ticker", "etf_name", "company_code", "company_id", "company_name",
     "weight_pct", "as_of", "source",
 ]
 
@@ -467,6 +471,7 @@ def run(args: argparse.Namespace) -> None:
                         "etf_table": ETF_TABLE,
                         "ticker": ticker,
                         "etf_name": name,
+                        "company_code": h.code or "",
                         "company_id": companies.match(h.name, h.code),
                         "company_name": h.name,
                         "weight_pct": "" if h.weight is None else f"{h.weight:.4f}".rstrip("0").rstrip("."),

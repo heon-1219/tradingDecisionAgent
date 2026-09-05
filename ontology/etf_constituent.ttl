@@ -1,0 +1,97 @@
+# ============================================================================
+# etf_constituent.ttl — 국내 ETF 편입종목 (v_etf_constituent) TBox
+#
+# 목적
+#   "삼성전자를 보유한 ETF 중 순자산 상위 3개" 처럼 관계와 수치를 함께 묻는 질의를 한 번의
+#   SQL 조인으로 풀 수 있게, 편입종목을 정형 테이블로 문서화한다.
+#
+# 왜 별도 뷰인가
+#   편입종목은 주최측 4종 마스터에 없다. 네이버금융에서 수집해 1,162개 국내 ETF · 22,599행을
+#   확보했고, 이전에는 지식그래프에만 실려 있었다. 그 결과 그래프는 관계를 알지만 SQL 은 순자산을
+#   알아서 둘을 잇지 못했고, 에이전트는 없는 조인을 지어냈다(v_etf_kr.pd_ticker 에 종목코드를 걸어
+#   0건). 같은 사실을 두 곳에서 각자 해석한 것이 원인이므로, 적재는 ETL 한 곳에서만 한다.
+#
+# 신원(identity)
+#   company_code 는 출처가 준 종목코드다(79% 수록). 삼성전자 005930 과 삼성전자우 005935 는
+#   서로 다른 종목이며 코드로만 구분된다. 코드가 없는 행(해외 종목·현금)은 출처가 게시한 이름을
+#   그대로 신원으로 쓴다. 이름 유사도로 종목을 합치지 않는다 — 그렇게 했을 때 'LG' 가
+#   신한금융지주로, 'KT' 가 SK텔레콤으로 귀속되는 오염이 677행 발생했다.
+#
+# TBox / ABox
+#   d:etf_kr/<ISIN> --fp:hasConstituent--> d:company/<id> 로 그래프에도 동시에 반영된다.
+#   그래프와 이 뷰는 같은 테이블에서 만들어지므로 개수가 어긋날 수 없다.
+#
+# 데이터 특성 (as_of 2026-09-03)
+#   - is_cash=1 은 원화현금·설정현금액 등 종목이 아닌 행. 종목을 셀 때는 is_cash=0 을 건다.
+#   - weight_pct 는 비중(%)이며 ETF 별 상위 편입종목만 수집되어 합이 100% 가 되지 않는다.
+#   - 해외ETF(v_etf_gl)·공모펀드(v_fund_pub)는 편입종목 데이터가 없다.
+# ============================================================================
+
+@prefix fp:   <http://mafest.ai/product#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# ----------------------------------------------------------------------------
+# 1. 테이블 클래스
+# ----------------------------------------------------------------------------
+
+fp:ETFHolding a owl:Class ;
+    rdfs:label "ETF편입종목"@ko , "ETF holding"@en ;
+    rdfs:comment "국내 ETF 한 종목이 편입한 개별 종목 한 건. 원천 네이버금융 → 뷰 v_etf_constituent. 기준일 2026-09-03."@ko ;
+    fp:sourceTable "v_etf_constituent" ;
+    fp:sourceId "naver_finance" .
+
+# ----------------------------------------------------------------------------
+# 2. 속성
+# ----------------------------------------------------------------------------
+
+fp:holdingEtfIsin a owl:DatatypeProperty ;
+    rdfs:label "ETF 종목번호(ISIN)"@ko ;
+    rdfs:comment "편입한 쪽 ETF 의 ISIN. v_etf_kr.pd_itm_no 와 조인하는 키."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "etf_itm_no" .
+
+fp:holdingEtfTicker a owl:DatatypeProperty ;
+    rdfs:label "ETF 단축코드"@ko ;
+    rdfs:comment "편입한 쪽 ETF 의 6자리 단축코드."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "etf_ticker" .
+
+fp:holdingEtfName a owl:DatatypeProperty ;
+    rdfs:label "ETF 명"@ko ;
+    rdfs:comment "편입한 쪽 ETF 의 약어명."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "etf_name" .
+
+fp:holdingCompanyCode a owl:DatatypeProperty ;
+    rdfs:label "편입종목 종목코드"@ko ;
+    rdfs:comment "편입된 종목의 코드 (삼성전자 005930, 삼성전자우 005935). 전체의 79% 에 수록되며, 있으면 이 컬럼으로 지정하는 것이 가장 정확하다. 해외 종목·현금은 NULL."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "company_code" .
+
+fp:holdingCompanyName a owl:DatatypeProperty ;
+    rdfs:label "편입종목명"@ko ;
+    rdfs:comment "출처가 게시한 종목명. 해외 종목은 한글 표기(예: '엔비디아', '마이크론 테크놀로지'). 코드가 없을 때의 신원."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "company_name" .
+
+fp:holdingWeight a owl:DatatypeProperty ;
+    rdfs:label "편입비중"@ko ;
+    rdfs:comment "ETF 내 비중. 상위 종목만 수집되어 ETF 별 합계가 100% 에 못 미친다."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:decimal ;
+    fp:unit "%" ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "weight_pct" .
+
+fp:holdingIsCash a owl:DatatypeProperty ;
+    rdfs:label "현금성 여부"@ko ;
+    rdfs:comment "1 이면 원화현금·설정현금액 등 종목이 아닌 행. 종목을 세거나 나열할 때는 is_cash=0 을 건다."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:boolean ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "is_cash" .
+
+fp:holdingAsOf a owl:DatatypeProperty ;
+    rdfs:label "수집 기준일"@ko ;
+    rdfs:comment "편입종목을 수집한 날짜. 상품 마스터 기준일(2026-08-21)과 다르므로 근거에 함께 밝힌다."@ko ;
+    rdfs:domain fp:ETFHolding ; rdfs:range xsd:date ;
+    fp:sourceTable "v_etf_constituent" ; fp:sourceColumn "as_of" .
