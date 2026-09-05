@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from ..kb.rdb import SQLGuardError
@@ -19,7 +20,7 @@ VIEW_ID_NAME = {
     "v_fund_pub": ("itm_no", "itm_nm"),
 }
 SEMANTICS = {
-    "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 같은 pd_no가 장내/장외 행으로 중복되므로 DISTINCT 필수.",
+    "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 한 종목이 여러 행일 수 있다(장내/장외 + 장외 판매 LOT info_seq, 최대 4행). 따라서 '몇 개'를 물으면 COUNT(DISTINCT pd_no) 를 쓴다. LOT 마다 매수수익률·단가가 다르므로 행 자체는 의미가 있다.",
     "v_etf_kr": "판매중(구매가능) = is_on_sale=1 (상장 유지 + 거래정지 아님, 1,534건). ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 일부만 수록(NULL이면 '데이터 없음'이라고 답하고 0으로 취급하지 않는다). 순자산 pd_net_tamt(KRW). 상장일 listing_date, 상장종료일 delisting_date(9999-12-31=상장 유지). 대표명 pd_abrv_nm.",
     "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'), 기준일 2026-08-22. 구매가능 = is_on_sale=1(거래정지 아님). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목 수록). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. 레버리지/인버스 제외 시 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL. 편입종목 데이터 없음.",
     "v_fund_pub": "공모펀드 = product_type='공모펀드'(14,716건), 사모도 섞여 있으므로 반드시 조건에 넣는다. 판매중(구매가능) = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY 하고 대표 1개만 제시. 보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
@@ -164,6 +165,36 @@ class ToolRegistry:
         text = f"{card}\n기준일: {base} · 행수: {m.get('row_count')}\n판정 규칙: {SEMANTICS[table]}"
         return ToolResult(text, False, Evidence("schema", table, kname, base, "table_info", None))
 
+    # 한 상품이 여러 행인 뷰: 행 수와 상품 수가 다르다.
+    #   v_bond_kr  — 장내/장외 + 장외 판매 LOT(info_seq) 로 한 종목이 최대 4행
+    #   v_fund_pub — 한 펀드가 클래스별로 여러 행
+    ROW_UNIT = {
+        "v_bond_kr": ("pd_no", "채권 종목"),
+        "v_fund_pub": ("fund_family", "펀드(클래스 합산)"),
+    }
+    _COUNT_STAR = re.compile(r"count\s*\(\s*\*\s*\)", re.I)
+
+    def _unit_warning(self, sql: str, view: str | None) -> str:
+        """COUNT(*) 로 '몇 개'를 물으면 행 수가 나온다. 실제 상품 수를 함께 알려줘 오답을 막는다.
+
+        프롬프트에 'DISTINCT 를 쓰라'고 적어두었지만 모델이 무시해 16,023(행) vs 15,837(종목) 오답이
+        실제로 나왔다. 지시 대신 결과에 정답을 같이 얹는다.
+        """
+        if not view or view not in self.ROW_UNIT:
+            return ""
+        if not self._COUNT_STAR.search(sql) or "distinct" in sql.lower():
+            return ""
+        key, unit = self.ROW_UNIT[view]
+        try:
+            alt = self.rdb.query(self._COUNT_STAR.sub(f"COUNT(DISTINCT {key})", sql))
+        except SQLGuardError:
+            return ""
+        if not alt.rows:
+            return ""
+        n = list(alt.rows[0].values())[0]
+        return (f"\n⚠ 위 숫자는 '행 수'입니다. {view} 는 한 상품이 여러 행일 수 있어 "
+                f"실제 {unit} 수는 {n:,}개입니다. 개수를 묻는 질문이라면 {n:,}개로 답하세요.")
+
     def _t_sql_query(self, sql: str, purpose: str = "") -> ToolResult:
         r = self.rdb.query(sql)
         view = next((v for v in VIEW_ID_NAME if v in r.sql), None)
@@ -177,6 +208,7 @@ class ToolRegistry:
                     refs.append(f"{cid or ''} {cname or ''}".strip())
         text = rows_to_text(r.columns, r.rows)
         text += f"\n총 {r.row_count}건" + (" (LIMIT로 잘림 — 집계가 필요하면 COUNT/GROUP BY 사용)" if r.truncated else "")
+        text += self._unit_warning(r.sql, view)
         return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, r.row_count, refs))
 
     def _t_search_products(self, query: str, table: str | None = None, k: int = 10, mode: str = "hybrid") -> ToolResult:

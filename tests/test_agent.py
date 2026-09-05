@@ -222,3 +222,19 @@ async def test_acknowledged_decline_is_left_alone(tiny_store, tmp_path):
     resp = await s.orchestrator.answer("U-003", "KODEX AI로봇 ETF 정보 알려줘")
     assert resp.answer.count("확인할 수 없습니다") == 1
     assert "역질문으로 보정" not in resp.think_trace
+
+
+async def test_count_star_on_bonds_reports_product_count(tiny_store, tmp_path):
+    """'몇 개'를 COUNT(*) 로 물으면 행 수가 나온다. 실제 종목 수를 함께 알려줘야 한다."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    r = await s.tools.execute("sql_query", {"sql": "SELECT COUNT(*) FROM v_bond_kr WHERE is_sellable=1"})
+    assert not r.is_error
+    assert "행 수" in r.content and "채권 종목" in r.content
+
+    # 이미 DISTINCT 를 쓴 질의에는 경고하지 않는다
+    ok = await s.tools.execute("sql_query", {"sql": "SELECT COUNT(DISTINCT pd_no) FROM v_bond_kr WHERE is_sellable=1"})
+    assert "행 수" not in ok.content
+
+    # 목록 조회에도 경고하지 않는다
+    lst = await s.tools.execute("sql_query", {"sql": "SELECT pd_no, pd_nm FROM v_bond_kr LIMIT 2"})
+    assert "행 수" not in lst.content

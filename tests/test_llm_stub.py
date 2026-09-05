@@ -29,3 +29,61 @@ def test_make_llm_by_provider():
     assert a.name == "anthropic" and a.model == "claude-opus-5"
     o = make_llm(Settings(_env_file=None, llm_provider="openai", openai_api_key="x", openai_base_url="http://localhost:1/v1"))
     assert o.name == "openai"
+
+
+async def test_rate_limit_is_retried_not_surfaced_as_error():
+    """429 는 모델 실력과 무관한 인프라 오류다. 즉시 포기하면 그 문항을 통째로 잃는다."""
+    import httpx
+    import openai
+
+    from finagent.agent.llm import call_with_rate_limit_retry, retry_delay
+
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise openai.RateLimitError(
+                "rate exceeded",
+                response=httpx.Response(429, request=httpx.Request("POST", "http://x"), headers={"retry-after": "1"}),
+                body=None,
+            )
+        return "ok"
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    assert await call_with_rate_limit_retry(flaky, retries=4, sleep=fake_sleep) == "ok"
+    assert calls["n"] == 3 and slept == [1.0, 1.0]  # Retry-After 를 존중
+
+
+async def test_rate_limit_gives_up_after_retries():
+    import httpx
+    import openai
+
+    from finagent.agent.llm import call_with_rate_limit_retry
+
+    async def always():
+        raise openai.RateLimitError(
+            "rate exceeded", response=httpx.Response(429, request=httpx.Request("POST", "http://x")), body=None
+        )
+
+    async def fake_sleep(s):
+        pass
+
+    try:
+        await call_with_rate_limit_retry(always, retries=2, sleep=fake_sleep)
+    except openai.RateLimitError:
+        pass
+    else:
+        raise AssertionError("재시도 소진 후에는 예외가 올라와야 한다")
+
+
+def test_retry_delay_backoff_and_cap():
+    from finagent.agent.llm import retry_delay
+
+    assert retry_delay(0) == 2.0 and retry_delay(1) == 4.0 and retry_delay(2) == 8.0
+    assert retry_delay(10) == 30.0            # 상한
+    assert retry_delay(0, retry_after="7") == 7.0   # 서버 지시 우선
+    assert retry_delay(0, retry_after="bad") == 2.0  # 파싱 실패 시 백오프로

@@ -172,10 +172,52 @@ class AnthropicLLM:
         return AnthropicConversation(self.client, self.model, self.effort, self.max_tokens, self.fallbacks, system, tools, user_text)
 
 
+# --------------------------------------------------------------------------- rate limits
+def retry_delay(attempt: int, retry_after: str | float | None = None, base: float = 2.0, cap: float = 30.0) -> float:
+    """429 재시도 대기 시간. 서버가 Retry-After 를 주면 그 값을 우선한다."""
+    if retry_after is not None:
+        try:
+            return max(0.0, min(float(retry_after), cap))
+        except (TypeError, ValueError):
+            pass
+    return min(base * (2 ** attempt), cap)
+
+
+async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None):
+    """429(rate exceeded)만 지수 백오프로 재시도한다.
+
+    CLOVA Studio 는 테스트앱 기준 요청 빈도 제한이 낮아, 평가처럼 질의를 연속으로 보내면 429 가 난다.
+    이때 즉시 오류로 끝내면 그 문항은 '모델이 답하지 못한' 상태가 되므로 반드시 기다렸다 다시 부른다.
+    """
+    import asyncio
+
+    import openai
+
+    sleep = sleep or asyncio.sleep
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return await make_call()
+        except openai.RateLimitError as e:  # 429 만 재시도 대상
+            last = e
+            if attempt >= retries:
+                break
+            after = None
+            resp = getattr(e, "response", None)
+            if resp is not None and getattr(resp, "headers", None):
+                after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            wait = retry_delay(attempt, after)
+            log.warning("429 rate limited; %.1f초 후 재시도 (%d/%d)", wait, attempt + 1, retries)
+            await sleep(wait)
+    raise last  # type: ignore[misc]
+
+
 # --------------------------------------------------------------------------- openai-compatible
 class OpenAIConversation:
-    def __init__(self, client, model: str, max_tokens: int, system: str, tools: list[ToolSpec], user_text: str):
+    def __init__(self, client, model: str, max_tokens: int, system: str, tools: list[ToolSpec], user_text: str,
+                 rate_limit_retries: int = 4):
         self.client, self.model, self.max_tokens = client, model, max_tokens
+        self.rate_limit_retries = rate_limit_retries
         self.tools = [{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.input_schema}} for t in tools]
         self.messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_text}]
 
@@ -183,8 +225,11 @@ class OpenAIConversation:
         import openai
 
         try:
-            resp = await self.client.chat.completions.create(
-                model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens
+            resp = await call_with_rate_limit_retry(
+                lambda: self.client.chat.completions.create(
+                    model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens
+                ),
+                retries=self.rate_limit_retries,
             )
         except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
             log.error("openai error: %s", e)
@@ -229,9 +274,11 @@ class OpenAILLM:
             timeout=settings.llm_timeout_sec, max_retries=1,
         )
         self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
+        self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
 
     def start(self, system, tools, user_text):
-        return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text)
+        return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text,
+                                  rate_limit_retries=self.rate_limit_retries)
 
 
 class ClovaLLM(OpenAILLM):
@@ -262,6 +309,7 @@ class ClovaLLM(OpenAILLM):
             max_retries=1,
         )
         self.model = settings.llm_model
+        self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
         self.max_tokens = max(int(settings.llm_max_tokens), self.MIN_TOOL_TOKENS)
         if settings.llm_max_tokens < self.MIN_TOOL_TOKENS:
             log.warning(

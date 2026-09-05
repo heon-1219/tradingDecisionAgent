@@ -40,6 +40,13 @@ from finagent.kb.rdb import RDB  # noqa: E402
 # "없습니다" 같은 흔한 종결어미는 넣지 않는다 — 정상 답변에도 자주 나와 오탐이 된다.
 DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없")
 CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인")
+# 시스템 장애로 생성된 대체 답변. 문구상 '확인할 수 없습니다'로 시작하므로 그냥 두면
+# 확인불가 문항이 전부 통과한 것처럼 보인다 — 실제로는 모델이 판단조차 못 한 것이다.
+ERROR_MARKERS = ("시스템 처리 중 문제가 발생", "<요청 실패", "내부 오류")
+
+
+def is_infra_error(answer: str, trace: str = "") -> bool:
+    return any(m in (answer or "") for m in ERROR_MARKERS) or "LLM 오류" in (trace or "")
 
 
 def norm(s: str) -> str:
@@ -66,8 +73,10 @@ def compute_truth(item: dict, rdb: RDB, kg: KG | None) -> list[str]:
     return []
 
 
-def score(item: dict, answer: str, truth: list[str]) -> tuple[bool, str]:
+def score(item: dict, answer: str, truth: list[str], trace: str = "") -> tuple[bool, str]:
     check = item.get("check")
+    if is_infra_error(answer, trace):
+        return False, "시스템 오류 — 모델이 답하지 못함(채점 불가)"
     a_norm = norm(answer)
     if check == "cannot_confirm":
         declined = any(d in answer for d in DECLINE)
@@ -102,6 +111,8 @@ def main() -> int:
     ap.add_argument("--out", default=str(ROOT / "data/eval/truth_results.jsonl"))
     ap.add_argument("--compute", action="store_true", help="정답 키만 계산하고 종료 (서버·LLM 불필요)")
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--delay", type=float, default=0.0,
+                    help="문항 사이 대기(초). CLOVA 테스트앱은 요청 빈도 제한이 낮아 429 가 날 수 있다.")
     a = ap.parse_args()
 
     items = [json.loads(l) for l in Path(a.file).read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -132,7 +143,7 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001
                 body = {"answer": f"<요청 실패: {e}>", "retrieved_context": "", "think_trace": ""}
             sec = time.time() - t0
-            ok, why = score(i, body.get("answer", ""), truths[i["question_id"]])
+            ok, why = score(i, body.get("answer", ""), truths[i["question_id"]], body.get("think_trace", ""))
             passed += ok
             rows.append({**i, "seconds": round(sec, 1), "ok": ok, "why": why, "truth": truths[i["question_id"]],
                          "answer": body.get("answer", ""), "retrieved_context": body.get("retrieved_context", ""),
@@ -140,9 +151,18 @@ def main() -> int:
             fh.write(json.dumps(rows[-1], ensure_ascii=False) + "\n")
             fh.flush()
             print(f"{'O' if ok else 'X'} {i['question_id']:8} {i.get('difficulty','-'):4} {sec:6.1f}s  {why}")
+            if a.delay:
+                time.sleep(a.delay)
     n = len(rows)
     slow = sum(1 for r in rows if r["seconds"] >= 300)
+    errs = sum(1 for r in rows if is_infra_error(r["answer"], r["think_trace"]))
+    graded = n - errs
     print(f"\n정답률 {passed}/{n} ({passed / n * 100:.0f}%) · 평균 {sum(r['seconds'] for r in rows) / n:.1f}초 · 300초 초과 {slow}건")
+    if errs:
+        pct = f"{passed / graded * 100:.0f}%" if graded else "측정 불가"
+        print(f"⚠ 시스템 오류 {errs}건(LLM 429·타임아웃 등)은 모델 실력과 무관합니다. "
+              f"실제로 채점된 문항은 {graded}건, 그 기준 정답률은 {pct} 입니다. "
+              f"오류를 먼저 없앤 뒤 다시 측정하세요.")
     print(f"상세 결과 → {a.out}")
     return 0
 

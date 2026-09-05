@@ -75,6 +75,9 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         df["remaining_years"] = (df["remaining_days"] / 365.0).round(2)
         df["issuer_name"] = df["pd_pbcm"].map(clean_text)
         df["pd_nm"] = df["pd_nm"].map(clean_text)
+        # 한 종목이 여러 행일 수 있다: 장내/장외 시장 구분 + 장외 판매 LOT(info_seq).
+        # 307종목은 LOT 마다 매수수익률·단가가 실제로 다르므로 행을 합치면 안 된다.
+        # 대신 종목 수를 세는 질의를 도구 계층에서 잡아준다(agent/tools.py 의 단위 경고).
     elif table == "etf_kr":
         df["product_type"] = df["pd_grp_no"].map(lambda g: "국내ETN" if g == "ETN" else "국내ETF")
         # 상장 종료일이 9999-12-31 이면 상장 유지 중. 거래정지(pd_tr_yn=1)만 제외한다.
@@ -108,7 +111,7 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
 
 VIEWS: dict[str, str] = {
     "v_bond_kr": (
-        "SELECT pd_no, pd_nm, pd_abrv_nm, pd_eng_nm, product_type, pd_exg_mkt, is_sellable, bdbns_abl_chnl_nm, issuer_name, "
+        "SELECT pd_no, pd_nm, pd_abrv_nm, pd_eng_nm, product_type, pd_exg_mkt, info_seq, is_sellable, bdbns_abl_chnl_nm, issuer_name, "
         "bd_knd, std_pd_mcls_nm, std_pd_scls_nm, bd_ofr_tcd, bd_inrt_tcd, bd_intp_tcd, crd_grd, crd_grd_dt, pd_risk_nm, "
         "pd_risk_gcd, curr_cd, srfc_irt, isu_date, mat_date, remaining_days, remaining_years, bd_tisu_a, isu_bal_amt, has_buy_yield, "
         "applied_yield, buy_yield, after_tax_yield, pref_tax_yield, avg_annual_tax_yield, corp_pretax_yield, "

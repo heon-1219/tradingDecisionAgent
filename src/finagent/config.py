@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 4096  # CLOVA function calling 은 1024 이상이어야 동작
     clova_api_key: str | None = None
     clova_base_url: str = "https://clovastudio.stream.ntruss.com/v1/openai"
+    # CLOVA 테스트앱은 요청 빈도 제한이 낮아 429 가 자주 난다. 재시도하지 않으면 그 문항은 통째로 실패한다.
+    rate_limit_retries: int = 4
+    request_min_interval_sec: float = 0.0  # 필요 시 호출 간 최소 간격
     llm_timeout_sec: float = 40.0
     anthropic_api_key: str | None = None
     anthropic_fallbacks: bool = True
