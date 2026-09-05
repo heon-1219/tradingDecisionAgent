@@ -238,3 +238,25 @@ async def test_count_star_on_bonds_reports_product_count(tiny_store, tmp_path):
     # 목록 조회에도 경고하지 않는다
     lst = await s.tools.execute("sql_query", {"sql": "SELECT pd_no, pd_nm FROM v_bond_kr LIMIT 2"})
     assert "행 수" not in lst.content
+
+
+def test_system_prompt_stays_within_token_budget(tiny_store, tmp_path):
+    """프롬프트가 커지면 CLOVA TPM(테스트앱 3만/분)을 호출 한 번에 소진한다.
+
+    전체 스키마 카드를 실었을 때 13,389토큰이었고 그 상태로는 분당 2회밖에 호출하지 못해
+    평가 22문항 중 21문항이 429 로 실패했다. 요약 카드로 바꾼 뒤의 크기를 고정한다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    approx_tokens = len(s.orchestrator.system_prompt) / 1.6
+    assert approx_tokens < 8000, f"시스템 프롬프트가 너무 큼: {approx_tokens:,.0f} 토큰"
+    # 요약본에도 판정에 필요한 핵심 컬럼은 남아 있어야 한다
+    for col in ("is_sellable", "has_buy_yield", "crd_grd", "is_on_sale", "fund_family", "expense_ratio_pct"):
+        assert col in s.orchestrator.system_prompt, col
+    # 전체 정의는 table_info 로 여전히 받을 수 있다
+    assert "table_info" in s.orchestrator.system_prompt
+
+
+async def test_table_info_still_returns_full_card(tiny_store, tmp_path):
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    r = await s.tools.execute("table_info", {"table": "v_bond_kr"})
+    assert not r.is_error and len(r.content) > len(s.orchestrator.system_prompt) / 8

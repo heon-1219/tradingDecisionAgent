@@ -183,7 +183,24 @@ def retry_delay(attempt: int, retry_after: str | float | None = None, base: floa
     return min(base * (2 ** attempt), cap)
 
 
-async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None):
+_last_call_at = {"t": 0.0}
+
+
+async def throttle(min_interval: float) -> None:
+    """호출 사이 최소 간격을 강제한다. CLOVA 는 QPM 뿐 아니라 TPM(분당 토큰)도 재므로,
+    프롬프트가 큰 요청을 몰아 보내면 서비스앱에서도 429 가 난다."""
+    import asyncio
+    import time as _t
+
+    if min_interval <= 0:
+        return
+    wait = _last_call_at["t"] + min_interval - _t.monotonic()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_call_at["t"] = _t.monotonic()
+
+
+async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None, min_interval: float = 0.0):
     """429(rate exceeded)만 지수 백오프로 재시도한다.
 
     CLOVA Studio 는 테스트앱 기준 요청 빈도 제한이 낮아, 평가처럼 질의를 연속으로 보내면 429 가 난다.
@@ -197,6 +214,7 @@ async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None)
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
+            await throttle(min_interval)
             return await make_call()
         except openai.RateLimitError as e:  # 429 만 재시도 대상
             last = e
@@ -215,9 +233,10 @@ async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None)
 # --------------------------------------------------------------------------- openai-compatible
 class OpenAIConversation:
     def __init__(self, client, model: str, max_tokens: int, system: str, tools: list[ToolSpec], user_text: str,
-                 rate_limit_retries: int = 4):
+                 rate_limit_retries: int = 4, min_interval: float = 0.0):
         self.client, self.model, self.max_tokens = client, model, max_tokens
         self.rate_limit_retries = rate_limit_retries
+        self.min_interval = min_interval
         self.tools = [{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.input_schema}} for t in tools]
         self.messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_text}]
 
@@ -230,6 +249,7 @@ class OpenAIConversation:
                     model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens
                 ),
                 retries=self.rate_limit_retries,
+                min_interval=self.min_interval,
             )
         except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
             log.error("openai error: %s", e)
@@ -275,10 +295,12 @@ class OpenAILLM:
         )
         self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
+        self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
 
     def start(self, system, tools, user_text):
         return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text,
-                                  rate_limit_retries=self.rate_limit_retries)
+                                  rate_limit_retries=self.rate_limit_retries,
+                                  min_interval=getattr(self, "min_interval", 0.0))
 
 
 class ClovaLLM(OpenAILLM):
@@ -310,6 +332,7 @@ class ClovaLLM(OpenAILLM):
         )
         self.model = settings.llm_model
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
+        self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
         self.max_tokens = max(int(settings.llm_max_tokens), self.MIN_TOOL_TOKENS)
         if settings.llm_max_tokens < self.MIN_TOOL_TOKENS:
             log.warning(

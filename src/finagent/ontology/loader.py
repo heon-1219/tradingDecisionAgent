@@ -134,13 +134,20 @@ class Ontology:
         p = self.prop(prop_name)
         return p.enum if p else []
 
-    def schema_card(self, view: str) -> str:
+    def schema_card(self, view: str, columns: list[str] | None = None, compact: bool = False) -> str:
+        """뷰의 컬럼 설명표.
+
+        `columns` 를 주면 그 컬럼만, `compact=True` 면 설명문을 빼고 라벨·단위·허용값만 남긴다.
+        매 요청에 전체 카드를 실으면 입력 토큰이 1만 개를 넘어 CLOVA TPM 한도를 그대로 잡아먹으므로,
+        시스템 프롬프트에는 요약본을 넣고 전체는 table_info 도구로 필요할 때만 내보낸다.
+        """
         t = self.table(view)
         head = f"### {view} — {t.label_ko} (원천 {t.source_id})" if t else f"### {view}"
         lines = [head]
+        want = set(columns) if columns else None
         seen: set[str] = set()
         for p in self.props_for(view):
-            if p.column in seen:
+            if p.column in seen or (want is not None and p.column not in want):
                 continue
             seen.add(p.column)
             extra = []
@@ -148,7 +155,7 @@ class Ontology:
                 extra.append(f"단위:{p.unit}")
             if p.enum:
                 extra.append("값:" + "/".join(e.code for e in p.enum))
-            if p.comment:
+            if p.comment and not compact:
                 extra.append(p.comment)
             lines.append(f"- {p.column}: {p.label_ko}" + (f" ({'; '.join(extra)})" if extra else ""))
         return "\n".join(lines)

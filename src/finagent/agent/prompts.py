@@ -54,6 +54,37 @@ ORDER BY 수익률1년 DESC LIMIT 10
 """
 
 
+# 시스템 프롬프트에 넣을 핵심 컬럼. 전체 컬럼(48~58개)을 매 요청에 실으면 입력이 1.3만 토큰이 되어
+# CLOVA TPM 한도(테스트앱 3만/분)를 한 번의 호출로 소진한다. 나머지는 table_info 로 필요할 때만 준다.
+CORE_COLUMNS = {
+    "v_bond_kr": [
+        "pd_no", "pd_nm", "product_type", "pd_exg_mkt", "is_sellable", "has_buy_yield", "issuer_name",
+        "bd_knd", "std_pd_mcls_nm", "bd_ofr_tcd", "crd_grd", "pd_risk_nm", "curr_cd", "srfc_irt",
+        "isu_date", "mat_date", "remaining_days", "remaining_years", "applied_yield", "buy_yield",
+        "after_tax_yield", "dur", "pd_pen_tr_yn", "base_date",
+    ],
+    "v_etf_kr": [
+        "pd_itm_no", "pd_ticker", "pd_abrv_nm", "pd_nm", "product_type", "pd_grp_no", "is_on_sale",
+        "manager_name", "cu_strtegy", "cu_lev_fector", "cu_base_index", "cu_charge_rt", "wu_inv_ast_type",
+        "wu_inv_rgn", "risk_grade", "pd_risk_nm", "pd_pen_tr_yn", "pd_net_tamt", "du_last_aum", "du_clpr",
+        "du_er_1m", "du_er_3m", "du_er_6m", "du_er_ytd", "du_er_1y", "du_vlty_1y", "du_vol_1d",
+        "pd_dvid_cycl", "pd_dvid_yield", "listing_date", "delisting_date", "base_date",
+    ],
+    "v_etf_gl": [
+        "pd_itm_no", "ticker", "pd_nm", "product_type", "is_on_sale", "pd_exg_mkt_cd", "pd_mkt_id",
+        "pd_curr_cd", "manager_name", "cu_base_index", "cu_strtegy", "expense_ratio_pct", "cu_lev_fector",
+        "cu_inverse_short_yn", "wu_inv_ast_type", "wu_inv_rgn", "du_last_aum", "du_clpr", "du_er_1d",
+        "du_vol_1d", "listing_date", "base_date",
+    ],
+    "v_fund_pub": [
+        "itm_no", "itm_nm", "fund_family", "product_type", "prvo_pbff_desc", "is_on_sale", "manager_name",
+        "or_attr_desc", "zrin_btyp_nm", "zrin_ptn_nm", "fd_ivst_rgn_desc", "ovrs_fd_desc", "bmrk_nm",
+        "is_hedged", "risk_grade", "han_clas_fee_type", "han_clas_sales_channel", "fd_nast_suma",
+        "fd_mm3_ern_r", "fd_mm6_ern_r", "fd_yr1_ern_r", "fd_yr3_ern_r", "base_date",
+    ],
+}
+
+
 def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None = None, settings=None) -> str:
     budget = getattr(settings, "time_budget_sec", 120)
     rounds = getattr(settings, "max_tool_rounds", 8)
@@ -69,10 +100,12 @@ def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None =
             f"{m.get('row_count', '?')}행 — {SEMANTICS[view]}"
         )
     if ontology is not None:
-        parts.append("\n## 온톨로지 클래스 계층\n" + ontology.summary())
-        parts.append("\n## 스키마 카드(컬럼: 한글 의미 (단위; 허용값; 주의))")
+        parts.append(
+            "\n## 스키마 요약(자주 쓰는 컬럼만 · 컬럼: 한글 의미 (단위; 허용값))\n"
+            "여기 없는 컬럼이 필요하면 table_info 도구로 해당 뷰의 전체 정의를 받으세요."
+        )
         for view in VIEW_ID_NAME:
-            parts.append(ontology.schema_card(view))
+            parts.append(ontology.schema_card(view, columns=CORE_COLUMNS.get(view), compact=True))
     if doc_titles:
         parts.append("\n## 외부 참고 문서\n- " + "\n- ".join(doc_titles))
     return "\n".join(parts)
