@@ -20,7 +20,7 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-from finagent.agent.llm import ToolSpec, make_llm  # noqa: E402
+from finagent.agent.llm import ToolSpec, make_llm, rate_state  # noqa: E402
 from finagent.config import get_settings  # noqa: E402
 
 PING_TOOL = ToolSpec(
@@ -88,6 +88,15 @@ async def main() -> int:
             print("     → max_tokens(≥1024), tools 전달, 모델의 function calling 지원 여부를 확인하세요.")
 
     print("-" * 68)
+    toks, reqs, reset = rate_state.get("tokens"), rate_state.get("requests"), rate_state.get("reset_s")
+    if toks is not None or reqs is not None:
+        print(f"남은 한도  요청 {reqs if reqs is not None else '?'} 건 · 토큰 {toks if toks is not None else '?'} "
+              f"· 리셋까지 {reset if reset is not None else '?'}초")
+        if toks is not None:
+            tier = "서비스앱으로 보입니다" if toks >= 100000 else ("테스트앱으로 보입니다" if toks <= 60000 else "판단 보류")
+            print(f"           → TPM 규모상 {tier} (테스트앱 3만~6만 / 서비스앱 12만~30만)")
+    else:
+        print("남은 한도  헤더가 오지 않았습니다(x-ratelimit-*). 한도는 콘솔에서 확인하세요.")
     if ok == a.repeat:
         print(f"정상: {ok}/{a.repeat} 호출에서 도구 호출 확인. 서버를 띄우고 eval_truth 를 돌려도 됩니다.")
     else:

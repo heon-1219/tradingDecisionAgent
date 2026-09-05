@@ -184,6 +184,59 @@ def retry_delay(attempt: int, retry_after: str | float | None = None, base: floa
 
 
 _last_call_at = {"t": 0.0}
+# 마지막 응답의 x-ratelimit-* 헤더. CLOVA 는 QPM(요청)과 TPM(토큰)을 따로 재고 둘 중 하나만
+# 소진돼도 429 를 낸다. 헤더를 읽어두면 한도에 닿기 전에 스스로 멈출 수 있다.
+rate_state: dict[str, float | None] = {"requests": None, "tokens": None, "reset_s": None}
+
+
+def _num(v) -> float | None:
+    """'123', '1.5s', '2m' 같은 값을 초/개수로 관대하게 파싱한다."""
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    mult = 1.0
+    if s.endswith("ms"):
+        s, mult = s[:-2], 0.001
+    elif s.endswith("s"):
+        s, mult = s[:-1], 1.0
+    elif s.endswith("m"):
+        s, mult = s[:-1], 60.0
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
+def note_rate_headers(headers) -> dict[str, float | None]:
+    """응답 헤더에서 남은 한도를 기록한다."""
+    if not headers:
+        return rate_state
+    get = headers.get if hasattr(headers, "get") else (lambda k: None)
+    rate_state["requests"] = _num(get("x-ratelimit-remaining-requests"))
+    rate_state["tokens"] = _num(get("x-ratelimit-remaining-tokens"))
+    resets = [_num(get("x-ratelimit-reset-requests")), _num(get("x-ratelimit-reset-tokens"))]
+    resets = [r for r in resets if r is not None]
+    rate_state["reset_s"] = max(resets) if resets else None
+    return rate_state
+
+
+async def wait_if_nearly_exhausted(min_tokens: float = 8000, min_requests: float = 1, sleep=None) -> float:
+    """남은 한도가 한 번의 호출도 못 버틸 만큼이면 리셋까지 미리 기다린다(429 예방)."""
+    import asyncio
+
+    sleep = sleep or asyncio.sleep
+    reset = rate_state.get("reset_s")
+    if reset is None or reset <= 0:
+        return 0.0
+    toks, reqs = rate_state.get("tokens"), rate_state.get("requests")
+    short = (toks is not None and toks < min_tokens) or (reqs is not None and reqs < min_requests)
+    if not short:
+        return 0.0
+    wait = min(reset, 60.0)
+    log.warning("한도 소진 임박(잔여 토큰 %s, 요청 %s) — %.1f초 대기", toks, reqs, wait)
+    await sleep(wait)
+    rate_state["tokens"] = rate_state["requests"] = None
+    return wait
 
 
 async def throttle(min_interval: float) -> None:
@@ -215,6 +268,7 @@ async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None,
     for attempt in range(retries + 1):
         try:
             await throttle(min_interval)
+            await wait_if_nearly_exhausted()
             return await make_call()
         except openai.RateLimitError as e:  # 429 만 재시도 대상
             last = e
@@ -224,6 +278,7 @@ async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None,
             resp = getattr(e, "response", None)
             if resp is not None and getattr(resp, "headers", None):
                 after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+                note_rate_headers(resp.headers)
             wait = retry_delay(attempt, after)
             log.warning("429 rate limited; %.1f초 후 재시도 (%d/%d)", wait, attempt + 1, retries)
             await sleep(wait)
@@ -244,12 +299,15 @@ class OpenAIConversation:
         import openai
 
         try:
-            resp = await call_with_rate_limit_retry(
-                lambda: self.client.chat.completions.create(
+            async def _call():
+                raw = await self.client.chat.completions.with_raw_response.create(
                     model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens
-                ),
-                retries=self.rate_limit_retries,
-                min_interval=self.min_interval,
+                )
+                note_rate_headers(getattr(raw, "headers", None))
+                return raw.parse()
+
+            resp = await call_with_rate_limit_retry(
+                _call, retries=self.rate_limit_retries, min_interval=self.min_interval
             )
         except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
             log.error("openai error: %s", e)
