@@ -81,6 +81,21 @@ _EN_ETF_MENTION = re.compile(r"\b[A-Z][A-Za-z0-9&+\-.]*(?:\s+[A-Za-z0-9&+\-.]+){
 _TRAIL = re.compile(r"(의|은|는|이|가|을|를|에|도|와|과|로|에서)$")
 _STOP_WORDS = {"etf", "etn", "정보", "알려줘", "알려", "주세요", "찾아서", "비교해줘", "추천해줘", "정리해줘", "구조와", "총보수는?", "총보수는"}
 
+# Category words, not product names.  "…펀드" matches the fund pattern, so "환헤지형 해외 채권형 공모펀드
+# 중 판매중인 상품은 몇 개?" used to extract 공모펀드, fail to resolve it, and get rewritten into a
+# clarification ("'공모펀드'와 일치하는 상품이 없습니다") on top of an otherwise correct count.
+_GENERIC_FUND_TERMS = {
+    "공모펀드", "사모펀드", "공모형펀드", "사모형펀드", "국내펀드", "해외펀드", "주식형펀드", "채권형펀드",
+    "혼합형펀드", "혼합자산펀드", "인덱스펀드", "재간접펀드", "머니마켓펀드", "단기금융펀드", "부동산펀드",
+    "특별자산펀드", "연금펀드", "적립식펀드", "거치식펀드", "액티브펀드", "패시브펀드", "상장지수펀드",
+    "개방형펀드", "폐쇄형펀드", "모펀드", "자펀드", "국내주식형펀드", "해외주식형펀드", "국내채권형펀드",
+    "해외채권형펀드", "환헤지펀드", "펀드", "투자신탁",
+}
+
+
+def _is_generic_category(span: str) -> bool:
+    return span.replace(" ", "").lower() in _GENERIC_FUND_TERMS
+
 
 def extract_product_mentions(question: str) -> list[str]:
     """Pull likely product-name spans out of a question (brand + name, ...펀드, English '... ETF')."""
@@ -101,6 +116,8 @@ def extract_product_mentions(question: str) -> list[str]:
                 if stripped != w:  # a particle ended the product name
                     break
             span = " ".join(cut).strip(" ,.?")
+            if _is_generic_category(span):
+                continue
             if len(span) >= 2 and span not in out and not any(span in o for o in out):
                 out.append(span)
     return out

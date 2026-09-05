@@ -442,6 +442,22 @@ class KG:
     def size(self) -> int:
         return len(self.graph)
 
+    @staticmethod
+    def _uniq(nodes: list[URIRef]) -> list[URIRef]:
+        """Distinct nodes, order preserved.
+
+        The label index registers a company under several aliases, so one entity can appear more than
+        once for the same IRI.  ``neighbors`` then walks it twice and every count doubles — 삼성전자
+        편입 ETF 238개가 476개로, 에코프로비엠 42개가 84개로 보고됐다.
+        """
+        seen: set[str] = set()
+        out: list[URIRef] = []
+        for n in nodes:
+            if str(n) not in seen:
+                seen.add(str(n))
+                out.append(n)
+        return out
+
     def find(self, entity: str, limit: int = 5) -> list[URIRef]:
         if entity.startswith("http://"):
             return [URIRef(entity)]
@@ -451,15 +467,15 @@ class KG:
         key = _norm(entity)
         exact = self._label_index.get(key, [])
         if exact:
-            return exact[:limit]
+            return self._uniq(exact)[:limit]
         stripped = re.sub(r"(etf|etn|펀드|투자신탁|채권)$", "", key)
         out = []
         for k, v in self._label_index.items():
             if len(key) >= 2 and (key in k or (stripped and len(stripped) >= 2 and stripped in k)):
                 out.extend(v)
-                if len(out) >= limit:
+                if len(self._uniq(out)) >= limit:
                     break
-        return out[:limit]
+        return self._uniq(out)[:limit]
 
     def query(self, sparql: str, limit: int = 100) -> list[dict]:
         q = sparql.strip()
@@ -483,8 +499,35 @@ class KG:
             return f"{short} ({label})" if label else short
         return str(v)
 
-    def neighbors(self, entity: str, relation: str | None = None, limit: int = 50) -> dict[str, list[dict]]:
+    def neighbors(
+        self,
+        entity: str,
+        relation: str | None = None,
+        limit: int = 50,
+        totals: dict[str, int] | None = None,
+    ) -> dict[str, list[dict]]:
+        """Relations of ``entity``, at most ``limit`` items per relation.
+
+        Pass ``totals`` to receive the *untruncated, distinct* count per relation.  Callers that
+        report a number to the user must use it: answering "몇 개?" with ``len(items)`` silently turns
+        the cap into the answer (에코프로비엠 편입 ETF 42개가 60개 상한에 걸려 보고된 사례).
+
+        Targets are counted once per relation even when the entity resolves to several nodes, so a
+        product reachable through two aliases is one product, not two.
+        """
         out: dict[str, list[dict]] = defaultdict(list)
+        tot = totals if totals is not None else {}
+        seen: dict[str, set[str]] = defaultdict(set)
+
+        def add(pname: str, target) -> None:
+            iri = str(target)
+            if iri in seen[pname]:
+                return
+            seen[pname].add(iri)
+            tot[pname] = tot.get(pname, 0) + 1
+            if len(out[pname]) < limit:
+                out[pname].append({"iri": iri, "label": self._label(target)})
+
         for node in self.find(entity):
             for p, o in self.graph.predicate_objects(node):
                 pname = str(p).split("#")[-1]
@@ -492,14 +535,12 @@ class KG:
                     continue
                 if pname in ("type", "label") or pname.startswith("weight_"):
                     continue
-                if len(out[pname]) < limit:
-                    out[pname].append({"iri": str(o), "label": self._label(o)})
+                add(pname, o)
             for s, p in self.graph.subject_predicates(node):
                 pname = str(p).split("#")[-1] + "_inverse"
                 if relation and pname != relation:
                     continue
-                if len(out[pname]) < limit:
-                    out[pname].append({"iri": str(s), "label": self._label(s)})
+                add(pname, s)
         return dict(out)
 
     def _label(self, o) -> str:

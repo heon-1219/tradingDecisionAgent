@@ -90,9 +90,16 @@ class VectorIndex:
         from sklearn.decomposition import TruncatedSVD
         from sklearn.feature_extraction.text import TfidfVectorizer
 
-        signature = hashlib.sha1(
-            (f"{len(docs)}|{dims}|{max_df}|" + "|".join(ids[:: max(1, len(ids) // 500)])).encode("utf-8")
-        ).hexdigest()[:16]
+        # The signature must cover the *text*, not just the ids: rebuilding the store can keep every
+        # product id while changing the columns that feed each document, which changes the fitted
+        # vocabulary.  A cache accepted on id-only evidence then holds components of the old width and
+        # every query dies with "matmul: dimension mismatch" at request time.
+        SEP = bytes([31])
+        h = hashlib.sha1(f"{len(docs)}|{dims}|{max_df}".encode("utf-8"))
+        for t in texts:
+            h.update(t.encode("utf-8", "ignore"))
+            h.update(SEP)  # record separator between documents
+        signature = h.hexdigest()[:16]
 
         # min_df=2 drops hapax noise on a real corpus, but would empty a small one
         min_df = 2 if len(docs) >= 100 else 1
@@ -110,9 +117,16 @@ class VectorIndex:
             if cp.exists():
                 try:
                     z = np.load(cp, allow_pickle=False)
-                    if str(z["signature"]) == signature and int(z["dims"]) == dims:
+                    if (
+                        str(z["signature"]) == signature
+                        and int(z["dims"]) == dims
+                        and z["components"].shape[1] == sparse.shape[1]  # belt and braces: vocabulary width
+                        and z["matrix"].shape[0] == len(docs)
+                    ):
                         matrix, components = z["matrix"], z["components"]
                         cached = True
+                    else:
+                        log.warning("vector cache is stale (corpus changed); rebuilding")
                 except Exception as e:  # noqa: BLE001 - a stale/corrupt cache must never break startup
                     log.warning("vector cache unusable (%s); rebuilding", e)
         if matrix is None:

@@ -27,6 +27,16 @@ RULES = """
 - '최근 N개월' 같은 기간은 데이터 기준일(2026-08-21/22)을 기준으로 계산합니다(예: 최근 6개월 = 2026-02-21 이후).
 - 펀드는 클래스별 행이 많으므로 fund_family 로 묶어 대표 1개(예: 순자산 최대 클래스)를 제시합니다.
 
+## 값 표기 규칙 (여기서 틀리면 SQL 은 성공해도 답이 틀립니다)
+- 금액 단위 환산: 1만=10000, 1억=100000000, 1조=1000000000000. "순자산 1조원 이상" → pd_net_tamt >= 1000000000000.
+- 날짜는 'YYYY-MM-DD' 문자열입니다. **연도만 주어지면 LIKE 를 쓰세요**: "만기가 2027년" → mat_date LIKE '2027%'.
+  mat_date='2027-12-31' 처럼 등호로 쓰면 그 하루만 걸러집니다.
+- 위험등급을 숫자로 비교할 때는 risk_grade(1~6)를 쓰세요. pd_risk_nm 은 '매우높은위험(1등급)' 형태의 라벨이라
+  pd_risk_nm='1등급' 은 항상 0건입니다.
+- "상장·판매중·구매 가능·현재" 조건은 ETF·펀드는 is_on_sale=1, 채권은 is_sellable=1 입니다. 빠뜨리면 상장폐지 상품까지 세게 됩니다.
+  "ETF 몇 개"는 ETN 을 빼기 위해 pd_grp_no='ETF' 도 함께 겁니다.
+- **도구가 돌려준 숫자는 고쳐 쓰지 말고 그대로 옮겨 적으세요.** COUNT 결과가 240 이면 답도 240 입니다.
+
 ## 교차 질의 (2개 이상 상품군을 함께 비교)
 "국내/해외ETF와 공모펀드를 1년 수익률 기준 TOP10" 처럼 여러 상품군을 한 번에 묻는 문항이 출제됩니다.
 UNION ALL 로 상품군을 합치고 공통 컬럼 이름을 맞춘 뒤 정렬하세요. 수익률 단위는 세 테이블 모두 %입니다.
@@ -85,7 +95,36 @@ CORE_COLUMNS = {
 }
 
 
-def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None = None, settings=None) -> str:
+def value_hints(rdb, max_values: int = 12) -> dict[tuple[str, str], list[str]]:
+    """Actual distinct values of the low-cardinality text columns, for the schema cards.
+
+    The ontology only carries allowed values for columns modelled as enumerations, so text columns
+    like ``ovrs_fd_desc`` ("국내/해외 구분") reached the model as a label with no vocabulary — it then
+    omitted the filter entirely, or invented one (``pd_risk_nm='1등급'``, which never matches the real
+    label '매우높은위험(1등급)').  Reading the values from the store costs a few tokens and removes the
+    guessing.
+    """
+    out: dict[tuple[str, str], list[str]] = {}
+    for view, cols in CORE_COLUMNS.items():
+        for col in cols:
+            try:
+                rows = rdb.query(
+                    f"SELECT DISTINCT {col} FROM {view} WHERE {col} IS NOT NULL LIMIT {max_values + 1}"
+                ).rows
+            except Exception:  # noqa: BLE001 - a column we cannot sample simply gets no hint
+                continue
+            vals = [str(r[col]).strip() for r in rows if r.get(col) is not None]
+            vals = [v for v in vals if v]
+            if not (1 < len(vals) <= max_values):
+                continue
+            if any(len(v) > 24 or v.replace(".", "", 1).replace("-", "", 1).isdigit() for v in vals):
+                continue  # long free text or plain numbers: listing them helps nobody
+            out[(view, col)] = sorted(vals)
+    return out
+
+
+def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None = None, settings=None,
+                        hints: dict[tuple[str, str], list[str]] | None = None) -> str:
     budget = getattr(settings, "time_budget_sec", 120)
     rounds = getattr(settings, "max_tool_rounds", 8)
     parts = [
@@ -105,7 +144,17 @@ def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None =
             "여기 없는 컬럼이 필요하면 table_info 도구로 해당 뷰의 전체 정의를 받으세요."
         )
         for view in VIEW_ID_NAME:
-            parts.append(ontology.schema_card(view, columns=CORE_COLUMNS.get(view), compact=True))
+            card = ontology.schema_card(view, columns=CORE_COLUMNS.get(view), compact=True)
+            if hints:
+                lines = []
+                for ln in card.splitlines():
+                    col = ln[2:].split(":", 1)[0] if ln.startswith("- ") else None
+                    vals = hints.get((view, col)) if col else None
+                    if vals and "값:" not in ln:
+                        ln = f"{ln} (값:{'/'.join(vals)})" if "(" not in ln else f"{ln[:-1]}; 값:{'/'.join(vals)})"
+                    lines.append(ln)
+                card = "\n".join(lines)
+            parts.append(card)
     if doc_titles:
         parts.append("\n## 외부 참고 문서\n- " + "\n- ".join(doc_titles))
     return "\n".join(parts)

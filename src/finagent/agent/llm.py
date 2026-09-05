@@ -253,11 +253,17 @@ async def throttle(min_interval: float) -> None:
     _last_call_at["t"] = _t.monotonic()
 
 
-async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None, min_interval: float = 0.0):
-    """429(rate exceeded)만 지수 백오프로 재시도한다.
+async def call_with_rate_limit_retry(
+    make_call, *, retries: int = 4, sleep=None, min_interval: float = 0.0, timeout_retries: int = 2
+):
+    """429(rate exceeded)는 지수 백오프로, 타임아웃·연결 오류는 짧게 재시도한다.
 
     CLOVA Studio 는 테스트앱 기준 요청 빈도 제한이 낮아, 평가처럼 질의를 연속으로 보내면 429 가 난다.
     이때 즉시 오류로 끝내면 그 문항은 '모델이 답하지 못한' 상태가 되므로 반드시 기다렸다 다시 부른다.
+
+    타임아웃도 마찬가지다: 한 번의 40초 타임아웃으로 문항을 포기하면 300초 예산의 대부분을 쓰지 않고
+    버리는 셈이다(G-020 은 84.8초에 미응답으로 끝났다). 오케스트레이터가 예산을 따로 강제하므로
+    여기서는 짧게 두 번만 다시 시도한다.
     """
     import asyncio
 
@@ -265,12 +271,20 @@ async def call_with_rate_limit_retry(make_call, *, retries: int = 4, sleep=None,
 
     sleep = sleep or asyncio.sleep
     last: Exception | None = None
+    timeouts = 0
     for attempt in range(retries + 1):
         try:
             await throttle(min_interval)
             await wait_if_nearly_exhausted()
             return await make_call()
-        except openai.RateLimitError as e:  # 429 만 재시도 대상
+        except (openai.APITimeoutError, openai.APIConnectionError) as e:
+            last = e
+            timeouts += 1
+            if timeouts > timeout_retries:
+                break
+            log.warning("%s; 2초 후 재시도 (%d/%d)", type(e).__name__, timeouts, timeout_retries)
+            await sleep(2.0)
+        except openai.RateLimitError as e:  # 429 만 지수 백오프
             last = e
             if attempt >= retries:
                 break

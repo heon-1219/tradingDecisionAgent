@@ -195,6 +195,27 @@ class ToolRegistry:
         return (f"\n⚠ 위 숫자는 '행 수'입니다. {view} 는 한 상품이 여러 행일 수 있어 "
                 f"실제 {unit} 수는 {n:,}개입니다. 개수를 묻는 질문이라면 {n:,}개로 답하세요.")
 
+    def _zero_warnings(self, sql: str, columns: list[str], rows: list[dict]) -> str:
+        """0 이 답을 오염시키는 두 경우를 결과에 바로 붙인다.
+
+        주최측은 값이 없을 때 0 이나 NULL 을 그대로 두었다고 공지했다. 프롬프트에 '0 을 값으로 쓰지 말라'고
+        적어도 모델은 총보수 0% 상품 3개를 최저 총보수로 답했고(실제 MDY 는 0.24%), 조건 표기가 어긋나
+        COUNT 가 0 으로 나온 것을 그대로 '0개'라고 답했다. 결과가 나온 시점에 경고하는 편이 확실하다.
+        """
+        out = ""
+        if len(rows) == 1 and len(columns) == 1:
+            v = rows[0].get(columns[0])
+            if isinstance(v, (int, float)) and v == 0 and re.search(r"count\s*\(", sql, re.I):
+                out += ("\n⚠ 0건입니다. 조건 값의 표기가 실제 데이터와 다를 수 있으니, 조건을 하나씩 빼서 "
+                        "어느 조건이 0을 만드는지 확인한 뒤 답하세요. 컬럼의 실제 값은 table_info 로 확인합니다.")
+        m = re.search(r"order\s+by\s+([A-Za-z_][A-Za-z0-9_]*)\s*(asc)?\b", sql, re.I)
+        if m and rows:
+            col = m.group(1)
+            if col in columns and sum(1 for r in rows if r.get(col) == 0) and (m.group(2) or "").lower() != "desc":
+                out += (f"\n⚠ 정렬 기준 {col} 에 0 이 섞여 있습니다. 0 은 값이 제공되지 않은 것이므로 순위에 넣으면 안 됩니다. "
+                        f"AND {col} > 0 을 추가해 다시 조회하세요.")
+        return out
+
     def _t_sql_query(self, sql: str, purpose: str = "") -> ToolResult:
         r = self.rdb.query(sql)
         view = next((v for v in VIEW_ID_NAME if v in r.sql), None)
@@ -209,6 +230,7 @@ class ToolRegistry:
         text = rows_to_text(r.columns, r.rows)
         text += f"\n총 {r.row_count}건" + (" (LIMIT로 잘림 — 집계가 필요하면 COUNT/GROUP BY 사용)" if r.truncated else "")
         text += self._unit_warning(r.sql, view)
+        text += self._zero_warnings(r.sql, r.columns, r.rows)
         return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, r.row_count, refs))
 
     def _t_search_products(self, query: str, table: str | None = None, k: int = 10, mode: str = "hybrid") -> ToolResult:
@@ -259,14 +281,28 @@ class ToolRegistry:
     def _t_graph_neighbors(self, entity: str, relation: str | None = None) -> ToolResult:
         if self.kg is None:
             return ToolResult("지식그래프가 로드되지 않았습니다.", True)
-        nb = self.kg.neighbors(entity, relation=relation, limit=60)
+        totals: dict[str, int] = {}
+        nb = self.kg.neighbors(entity, relation=relation, limit=60, totals=totals)
+        note = ""
+        if not nb and relation:
+            # An empty *filtered* result is nearly always the wrong direction, not a missing entity:
+            # 삼성전자 has no hasConstituent but constituentOf has 238.  Returning the relations it does
+            # have — as data, not as advice — answers in this round; a hint alone was ignored and the
+            # model replied "확인할 수 없습니다" while the graph held the answer.
+            totals = {}
+            nb = self.kg.neighbors(entity, limit=60, totals=totals)
+            if nb:
+                note = f"('{relation}' 관계는 없어 이 엔티티의 전체 관계를 대신 보여줍니다)\n"
         if not nb:
             return ToolResult(f"'{entity}' 에 해당하는 노드/관계 없음", False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", 0))
         lines, refs = [], []
         for rel, items in nb.items():
-            lines.append(f"{rel} ({len(items)}): " + ", ".join(x["label"] for x in items[:40]) + (" ..." if len(items) > 40 else ""))
+            # report the untruncated total — the model quotes this number verbatim as its answer
+            total = totals.get(rel, len(items))
+            shown = f"{total}건" + (f", 아래는 상위 {len(items)}건" if total > len(items) else "")
+            lines.append(f"{rel} ({shown}): " + ", ".join(x["label"] for x in items[:40]) + (" ..." if len(items) > 40 else ""))
             refs += [x["label"] for x in items[:10]]
-        return ToolResult("\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(len(v) for v in nb.values()), refs[:30]))
+        return ToolResult(note + "\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(totals.values()) or sum(len(v) for v in nb.values()), refs[:30]))
 
     def _t_graph_query(self, sparql: str) -> ToolResult:
         if self.kg is None:

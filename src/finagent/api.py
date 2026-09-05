@@ -4,14 +4,16 @@ Guarantees: always HTTP 200 with the five string fields; unknown query params ig
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from .agent.answer import fallback_answer
 from .config import get_settings
@@ -43,7 +45,16 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
 
     @app.get("/", response_class=PlainTextResponse)
     async def root():
-        return "금융상품 Agent API — GET /answer?question_id=Q-001&question=..."
+        return "금융상품 Agent API — GET /answer?question_id=Q-001&question=...  ·  테스트 콘솔: /ui"
+
+    @app.get("/ui", response_class=HTMLResponse)
+    async def ui():
+        """Local test console.  Served from the API itself so the page and /answer share an origin —
+        opening the file directly would put it on file:// and the browser would block the call."""
+        page = Path(__file__).resolve().parents[2] / "web" / "console.html"
+        if not page.exists():
+            return HTMLResponse("<p>web/console.html 이 없습니다.</p>", status_code=404)
+        return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.get("/health")
     async def health():
@@ -91,7 +102,56 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
         log.info("answered %s in %.1fs: %s", question_id, time.time() - t0, resp.answer[:80].replace("\n", " "))
         return _json(resp)
 
+    @app.get("/answer/stream")
+    async def answer_stream(request: Request):
+        """Same answer, streamed step by step as Server-Sent Events — development console only.
+
+        Deliberately a separate route: the graded ``/answer`` contract (HTTP 200, five string fields)
+        must not grow a second code path.  The event sink only observes; it never reaches the model.
+        """
+        qp = request.query_params
+        question_id = (qp.get("question_id") or "T-001").strip()
+        question = (qp.get("question") or "").strip()
+
+        async def gen():
+            if not question:
+                yield _sse({"type": "error", "message": "question 파라미터가 필요합니다."})
+                return
+            queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def sink(ev: dict) -> None:
+                loop.call_soon_threadsafe(queue.put_nowait, ev)
+
+            task = asyncio.create_task(
+                app.state.fin.orchestrator.answer(question_id, question, on_event=sink)
+            )
+            while True:
+                if task.done() and queue.empty():
+                    break
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"  # keeps proxies and the browser from closing an idle stream
+                    continue
+                yield _sse(ev)
+            try:
+                await task
+            except Exception as e:  # noqa: BLE001 - report, never 500
+                log.exception("stream answer failed for %s", question_id)
+                yield _sse({"type": "error", "message": f"{type(e).__name__}: {str(e)[:200]}"})
+
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     return app
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
 app = create_app()

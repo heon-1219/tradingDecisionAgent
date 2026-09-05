@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from .agent.llm import LLMClient, make_llm
 from .agent.orchestrator import Orchestrator
-from .agent.prompts import build_system_prompt
+from .agent.prompts import build_system_prompt, value_hints
 from .agent.tools import ToolRegistry
 from .config import Settings
 from .kb.docs import DocStore
@@ -75,7 +75,7 @@ class AppState:
         docs = DocStore.load(settings.docs_dir)
         llm = llm or make_llm(settings)
         tools = ToolRegistry(rdb, index, resolver, kg, docs, ontology, lexicon, settings, vectors=vectors)
-        system_prompt = build_system_prompt(ontology, rdb.meta(), docs.titles(), settings)
+        system_prompt = build_system_prompt(ontology, rdb.meta(), docs.titles(), settings, hints=value_hints(rdb))
         orch = Orchestrator(settings, llm, tools, resolver, ontology, lexicon, system_prompt)
         log.info("app state ready in %.1fs (llm=%s/%s)", time.time() - t0, llm.name, settings.llm_model)
         return cls(settings, rdb, index, resolver, kg, vectors, docs, ontology, lexicon, llm, tools, orch, system_prompt)

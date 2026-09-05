@@ -32,6 +32,60 @@ class PreAnalysis:
 
 
 # 답변이 "그 상품은 없다"는 사실을 인지했는지 판정할 때 쓰는 표현들
+_COUNT_QUESTION = re.compile(r"몇\s*(개|건|종목|가지|곳)|개수|건수|수는\??$|수를\s*알려")
+
+class _Steps(list):
+    """The trace list, with a tap.
+
+    ``answer`` records its progress by appending to ``steps`` in 16 places.  Rather than touch all of
+    them, the list itself forwards every entry to an optional sink so a caller (the dev console) can
+    watch a question being answered live.  The competition endpoint passes no sink and behaves exactly
+    as before — observation must not change what is measured.
+    """
+
+    def __init__(self, sink=None):
+        super().__init__()
+        self._sink = sink
+
+    def _emit(self, item) -> None:
+        if self._sink:
+            try:
+                self._sink({"type": "step", "text": str(item)})
+            except Exception:  # noqa: BLE001 - a broken console must never break an answer
+                self._sink = None
+
+    def append(self, item) -> None:
+        super().append(item)
+        self._emit(item)
+
+    def extend(self, items) -> None:
+        items = list(items)
+        super().extend(items)
+        for i in items:
+            self._emit(i)
+
+    def __iadd__(self, items):
+        self.extend(items)
+        return self
+
+
+def _scalar_of(text: str) -> int | None:
+    """The single number a COUNT-style query returned, or None if the result isn't one number.
+
+    ``rows_to_text`` renders it as ``cnt`` / ``240`` / ``총 1건``.  HCX has been observed running the
+    right SQL, reading 240 and then writing "24개" in the answer, so the server keeps the number the
+    tool actually produced and checks the answer against it.
+    """
+    # The tools append their own advisory lines ("⚠ 위 숫자는 행 수입니다" ...), so match the header /
+    # value / count prefix and ignore whatever follows — an exact 3-line check silently gave up on
+    # every result that carried a warning.
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 3 or "|" in lines[0] or "|" in lines[1] or not lines[2].startswith("총 1건"):
+        return None
+    val = lines[1].replace(",", "").strip()
+    return int(val) if re.fullmatch(r"-?\d+", val) else None
+
+
 _ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "찾을 수 없", "없습니다만", "혹시", "말씀하시", "유사한", "다른 상품")
 
 
@@ -129,14 +183,28 @@ class Orchestrator:
         return PreAnalysis(text, invalid, mentions, steps, unresolved)
 
     # ------------------------------------------------------------ main loop
-    async def answer(self, question_id: str, question: str) -> AnswerResponse:
+    async def answer(self, question_id: str, question: str, on_event=None) -> AnswerResponse:
+        """Answer one question.
+
+        ``on_event`` is an optional sink for progress events (dev console only).  It never changes the
+        answer, the tool results, or a single token sent to the model.
+        """
         t0 = time.monotonic()
         budget = float(self.settings.time_budget_sec)
         deadline = t0 + budget
-        steps: list[str] = []
+        steps = _Steps(on_event)
         evidences: list[Evidence] = []
+        scalars: list[int] = []
         final: dict | None = None
 
+        def emit(kind: str, **data) -> None:
+            if on_event:
+                try:
+                    on_event({"type": kind, **data})
+                except Exception:  # noqa: BLE001
+                    pass
+
+        emit("start", question_id=question_id, question=question, budget=budget)
         try:
             pre = self.pre_analyze(question)
             steps += pre.steps
@@ -144,6 +212,14 @@ class Orchestrator:
             log.exception("pre-analysis failed")
             pre = PreAnalysis("[사전 분석 실패]", [], [], [f"사전분석 오류: {type(e).__name__}"])
             steps += pre.steps
+        emit(
+            "pre_analysis",
+            text=pre.text,
+            mentions=list(pre.mentions),
+            unresolved=[m for m, _ in pre.unresolved],
+            invalid=list(pre.invalid),
+            elapsed=time.monotonic() - t0,
+        )
 
         conv = self.llm.start(self.system_prompt, self.specs, f"질문: {question}\n\n{pre.text}")
         last_text = ""
@@ -183,10 +259,26 @@ class Orchestrator:
                 steps.append(f"라운드 {rnd}: 최대 라운드 초과")
                 break
             # execute all tool calls of this turn concurrently
+            for call in turn.tool_calls:
+                emit("tool_call", round=rnd, name=call.name, args=call.input or {},
+                     elapsed=time.monotonic() - t0)
+            tool_t0 = time.monotonic()
             results = await asyncio.gather(*(self._run_tool(c) for c in turn.tool_calls))
+            tool_sec = time.monotonic() - tool_t0
             packed = []
             for call, res in zip(turn.tool_calls, results):
                 desc = self._describe(call)
+                ev = res.evidence
+                emit(
+                    "tool_result", round=rnd, name=call.name, args=call.input or {},
+                    ok=not res.is_error, content=res.content, seconds=tool_sec,
+                    evidence=None if ev is None else {
+                        "kind": ev.kind, "table": ev.korean_name or ev.table,
+                        "base_date": ev.base_date, "row_count": ev.row_count,
+                        "detail": ev.detail,
+                    },
+                    elapsed=time.monotonic() - t0,
+                )
                 if res.is_error:
                     steps.append(f"라운드 {rnd}: {desc} → 오류: {res.content[:100]}")
                 else:
@@ -194,6 +286,10 @@ class Orchestrator:
                     steps.append(f"라운드 {rnd}: {desc} → 결과 {len(res.content)}자{n}")
                     if res.evidence is not None and res.evidence.kind != "schema":
                         evidences.append(res.evidence)
+                    if call.name == "sql_query":
+                        sv = _scalar_of(res.content)
+                        if sv is not None:
+                            scalars.append(sv)
                 packed.append((call.id, res.content, res.is_error))
             conv.add_tool_results(packed)
             remaining = deadline - time.monotonic()
@@ -235,15 +331,26 @@ class Orchestrator:
             )
             status = "clarify"
             steps.append(f"존재하지 않는 상품({', '.join(names)})을 답변에 사용 → 역질문으로 보정")
+        # A count question whose single COUNT result never appears in the answer means the model
+        # mis-transcribed it.  Only fires when exactly one scalar was produced, so a multi-step
+        # calculation is never "corrected" against an intermediate value.
+        if status == "answered" and _COUNT_QUESTION.search(question) and len(set(scalars)) == 1:
+            want = scalars[0]
+            seen = {int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", answer)}
+            if want not in seen:
+                answer = f"{answer}\n\n(조회 결과 확인: 해당 조건에 맞는 건수는 {want}건입니다.)"
+                steps.append(f"도구가 반환한 {want} 가 답변에 없어 조회 결과를 명시")
         elapsed = time.monotonic() - t0
         steps.append(f"최종: status={status}, 근거 {len(evidences)}건, 소요 {elapsed:.1f}s")
-        return AnswerResponse(
+        resp = AnswerResponse(
             question_id=question_id,
             question=question,
             retrieved_context=format_evidence(evidences, refs),
             think_trace=format_trace(steps),
             answer=answer,
         )
+        emit("done", status=status, elapsed=elapsed, response=resp.model_dump())
+        return resp
 
     async def _run_tool(self, call: ToolCall):
         return await self.tools.execute(call.name, call.input)

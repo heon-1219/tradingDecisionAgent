@@ -1,0 +1,267 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>금융상품 Agent 테스트 콘솔</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --ink:#16181d; --muted:#666e7a; --line:#e3e6ea;
+    --accent:#1a56db; --ok:#0b7a3b; --warn:#a15c00; --bad:#b42318; --code:#f3f4f6;
+    --sql:#0f766e; --graph:#7c3aed; --search:#b45309; --docs:#0369a1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1b1e24; --ink:#e8eaed; --muted:#9aa3ad; --line:#2b3038;
+            --accent:#7aa2f7; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --code:#22262d;
+            --sql:#5eead4; --graph:#c4b5fd; --search:#fcd34d; --docs:#7dd3fc; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.6 -apple-system,"Segoe UI","Malgun Gothic",sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:22px 18px 70px; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:15px; margin-bottom:12px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+  input[type=text], textarea { width:100%; padding:9px 11px; border:1px solid var(--line);
+    border-radius:7px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { resize:vertical; min-height:56px; }
+  .row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-top:10px; }
+  button { padding:9px 16px; border:0; border-radius:7px; background:var(--accent); color:#fff;
+           font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); font-weight:500; }
+  button:disabled { opacity:.5; cursor:default; }
+  .pills { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .pill { font-size:12px; padding:5px 10px; border:1px solid var(--line); border-radius:99px;
+          background:transparent; color:var(--ink); cursor:pointer; font-weight:400; }
+  .pill:hover { border-color:var(--accent); color:var(--accent); }
+
+  /* live bar */
+  .live { display:flex; align-items:center; gap:12px; font-size:13px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--accent); }
+  .dot.run { animation:pulse 1s ease-in-out infinite; }
+  .dot.done { background:var(--ok); }
+  .dot.err { background:var(--bad); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+  .clock { font-variant-numeric:tabular-nums; color:var(--muted); }
+
+  /* timeline */
+  .tl { position:relative; margin:0; padding:0 0 0 22px; list-style:none; }
+  .tl::before { content:""; position:absolute; left:6px; top:6px; bottom:6px; width:2px; background:var(--line); }
+  .tl li { position:relative; margin-bottom:10px; }
+  .tl li::before { content:""; position:absolute; left:-20px; top:7px; width:9px; height:9px;
+                   border-radius:50%; background:var(--line); }
+  .tl li.k-tool::before { background:var(--accent); }
+  .tl li.k-err::before  { background:var(--bad); }
+  .tl li.k-fix::before  { background:var(--warn); }
+  .tl li.k-done::before { background:var(--ok); }
+  .ev { display:flex; gap:8px; align-items:baseline; }
+  .at { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; min-width:44px; }
+  .tool { border:1px solid var(--line); border-radius:8px; padding:9px 11px; background:var(--bg); }
+  .tname { font-weight:700; font-size:12px; letter-spacing:.02em; }
+  .t-sql_query{color:var(--sql)} .t-graph_neighbors,.t-graph_query{color:var(--graph)}
+  .t-search_products,.t-resolve_entity{color:var(--search)}
+  .t-search_documents,.t-table_info{color:var(--docs)} .t-final_answer{color:var(--ok)}
+  pre { background:var(--code); padding:9px 11px; border-radius:7px; overflow-x:auto; margin:7px 0 0;
+        font:12px/1.5 ui-monospace,Consolas,monospace; white-space:pre-wrap; word-break:break-word; }
+  pre.out { max-height:200px; overflow-y:auto; }
+  .meta2 { font-size:11px; color:var(--muted); margin-top:5px; }
+  .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:4px;
+           background:var(--code); color:var(--muted); margin-left:6px; }
+  .badge.bad { color:var(--bad); }
+  .warnline { color:var(--warn); }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+       margin:0 0 8px; font-weight:700; }
+  .answer { white-space:pre-wrap; font-size:15px; line-height:1.7; }
+  .status { display:inline-block; font-size:12px; font-weight:700; padding:3px 9px; border-radius:5px; }
+  .s-answered{background:rgba(11,122,59,.12);color:var(--ok)}
+  .s-cannot_confirm{background:rgba(161,92,0,.14);color:var(--warn)}
+  .s-clarify{background:rgba(26,86,219,.12);color:var(--accent)}
+  .hide { display:none; }
+  details summary { cursor:pointer; font-size:12px; color:var(--muted); }
+</style>
+
+<div class="wrap">
+  <h1>금융상품 Agent 테스트 콘솔</h1>
+  <p class="sub">질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며,
+     화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.</p>
+
+  <div class="card">
+    <label for="q">질문</label>
+    <textarea id="q" placeholder="예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"></textarea>
+    <div class="row">
+      <div style="max-width:150px">
+        <label for="qid">question_id</label>
+        <input type="text" id="qid" value="T-001">
+      </div>
+      <button id="go">질문 보내기</button>
+      <button class="ghost" id="stop" disabled>중단</button>
+      <button class="ghost" id="clear">지우기</button>
+    </div>
+    <div class="pills" id="samples"></div>
+  </div>
+
+  <div class="card hide" id="livecard">
+    <div class="live">
+      <span class="dot run" id="dot"></span>
+      <strong id="phase">시작</strong>
+      <span class="clock" id="clock">0.0초</span>
+      <span class="badge" id="counts"></span>
+    </div>
+  </div>
+
+  <div class="card hide" id="tlcard">
+    <h2>진행 과정</h2>
+    <ul class="tl" id="tl"></ul>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script>
+const SAMPLES = [
+  ["쉬움","현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
+  ["쉬움","삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
+  ["보통","국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
+  ["보통","환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
+  ["어려움","삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
+  ["어려움","국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
+  ["어려움","에코프로 자회사를 편입한 ETF를 알려줘"],
+  ["답변불가","TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
+  ["답변불가","KODEX AI로봇 ETF의 총보수는?"],
+];
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const fmt = t => t.toFixed(1) + "초";
+
+const pills = $("#samples");
+SAMPLES.forEach(([tag, text]) => {
+  const b = document.createElement("button");
+  b.className = "pill";
+  b.textContent = `${tag} · ${text.length > 32 ? text.slice(0,32)+"…" : text}`;
+  b.title = text;
+  b.onclick = () => { $("#q").value = text; };
+  pills.appendChild(b);
+});
+
+let es = null, t0 = 0, timer = null, nTools = 0, nErr = 0, lastRound = 0;
+
+function li(kind, at, html) {
+  const el = document.createElement("li");
+  el.className = "k-" + kind;
+  el.innerHTML = `<div class="ev"><span class="at">${at == null ? "" : fmt(at)}</span><div style="flex:1">${html}</div></div>`;
+  $("#tl").appendChild(el);
+  return el;
+}
+
+function argsHtml(name, args) {
+  if (!args || !Object.keys(args).length) return "";
+  if (args.sql) return `<pre>${esc(args.sql.trim())}</pre>`;
+  if (args.sparql) return `<pre>${esc(args.sparql.trim())}</pre>`;
+  const parts = Object.entries(args)
+    .filter(([k]) => k !== "purpose")
+    .map(([k,v]) => `${esc(k)}=${esc(typeof v === "object" ? JSON.stringify(v) : v)}`);
+  const purpose = args.purpose ? `<div class="meta2">의도: ${esc(args.purpose)}</div>` : "";
+  return `<pre>${parts.join("  ·  ")}</pre>${purpose}`;
+}
+
+function onEvent(e) {
+  const d = JSON.parse(e.data);
+  const at = d.elapsed;
+  if (d.type === "start") {
+    $("#phase").textContent = "사전 분석";
+  } else if (d.type === "pre_analysis") {
+    const bits = [];
+    if (d.mentions?.length)   bits.push(`상품명 후보 <b>${esc(d.mentions.join(", "))}</b>`);
+    if (d.unresolved?.length) bits.push(`<span class="warnline">미해결 ${esc(d.unresolved.join(", "))}</span>`);
+    if (d.invalid?.length)    bits.push(`<span class="warnline">온톨로지 위반 ${esc(d.invalid.join(", "))}</span>`);
+    li("pre", at,
+      `<b>사전 분석</b> — LLM 호출 전에 결정적으로 계산한 것` +
+      (bits.length ? `<div class="meta2">${bits.join(" · ")}</div>` : `<div class="meta2">특별한 신호 없음</div>`) +
+      `<details><summary>프롬프트에 주입된 블록 보기</summary><pre>${esc(d.text)}</pre></details>`);
+    $("#phase").textContent = "LLM 추론";
+  } else if (d.type === "tool_call") {
+    nTools++;
+    if (d.round !== lastRound) { lastRound = d.round; li("round", at, `<b>라운드 ${d.round}</b>`); }
+    li("tool", at, `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
+        <span class="badge">호출</span>${argsHtml(d.name, d.args)}</div>`);
+    $("#phase").textContent = `도구 실행 · ${d.name}`;
+  } else if (d.type === "tool_result") {
+    if (!d.ok) nErr++;
+    const ev = d.evidence;
+    const meta = ev ? `<div class="meta2">근거: ${esc(ev.kind)}${ev.table ? " · " + esc(ev.table) : ""}${ev.base_date ? " · 기준일 " + esc(ev.base_date) : ""}${ev.row_count != null ? " · " + ev.row_count + "건" : ""}</div>` : "";
+    li(d.ok ? "tool" : "err", at,
+      `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
+        <span class="badge ${d.ok ? "" : "bad"}">${d.ok ? "결과" : "오류"}</span>
+        <span class="badge">${d.seconds != null ? d.seconds.toFixed(2)+"s" : ""}</span>
+        <pre class="out">${esc(d.content)}</pre>${meta}</div>`);
+    $("#phase").textContent = "LLM 추론";
+  } else if (d.type === "step") {
+    const t = d.text || "";
+    // tool call/result lines are already rendered richly above; keep the rest
+    if (/^라운드 \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
+    const fix = /보정|명시|경고/.test(t);
+    const err = /오류|초과|거부|실패/.test(t);
+    li(err ? "err" : (fix ? "fix" : "step"), at, `<span class="${err?"":(fix?"warnline":"")}">${esc(t)}</span>`);
+  } else if (d.type === "done") {
+    finish(d);
+  } else if (d.type === "error") {
+    li("err", at, `<span style="color:var(--bad)">${esc(d.message)}</span>`);
+    stop("err");
+  }
+  $("#counts").textContent = `도구 ${nTools}회${nErr ? " · 오류 " + nErr : ""}`;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
+
+function finish(d) {
+  const r = d.response || {};
+  $("#out").innerHTML = `
+    <div class="card">
+      <h2>답변</h2>
+      <div><span class="status s-${esc(d.status)}">${esc(d.status)}</span>
+           <span class="badge">${fmt(d.elapsed)}</span></div>
+      <div class="answer" style="margin-top:9px">${esc(r.answer)}</div>
+    </div>
+    <div class="card">
+      <h2>근거 (retrieved_context)</h2>
+      <pre>${esc(r.retrieved_context || "(없음)")}</pre>
+    </div>
+    <div class="card">
+      <h2>채점 서버가 받는 원본 JSON</h2>
+      <details><summary>펼치기</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
+    </div>`;
+  stop("done");
+}
+
+function stop(state) {
+  if (es) { es.close(); es = null; }
+  clearInterval(timer);
+  $("#dot").className = "dot " + (state || "done");
+  $("#phase").textContent = state === "err" ? "중단됨" : "완료";
+  $("#go").disabled = false;
+  $("#stop").disabled = true;
+}
+
+function ask() {
+  const q = $("#q").value.trim();
+  if (!q) return;
+  const qid = $("#qid").value.trim() || "T-001";
+  $("#go").disabled = true; $("#stop").disabled = false;
+  $("#tl").innerHTML = ""; $("#out").innerHTML = "";
+  $("#livecard").classList.remove("hide"); $("#tlcard").classList.remove("hide");
+  $("#dot").className = "dot run"; $("#phase").textContent = "연결 중";
+  nTools = 0; nErr = 0; lastRound = 0; t0 = performance.now();
+  clearInterval(timer);
+  timer = setInterval(() => { $("#clock").textContent = fmt((performance.now()-t0)/1000); }, 100);
+
+  es = new EventSource(`/answer/stream?question_id=${encodeURIComponent(qid)}&question=${encodeURIComponent(q)}`);
+  es.onmessage = onEvent;
+  es.onerror = () => { if (es) { li("err", null, "스트림 연결이 끊어졌습니다. 서버가 떠 있는지 확인하세요."); stop("err"); } };
+}
+
+$("#go").onclick = ask;
+$("#stop").onclick = () => stop("err");
+$("#clear").onclick = () => { $("#q").value=""; $("#out").innerHTML=""; $("#tl").innerHTML="";
+                              $("#livecard").classList.add("hide"); $("#tlcard").classList.add("hide"); };
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
+</script>
