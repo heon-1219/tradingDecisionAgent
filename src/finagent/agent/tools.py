@@ -200,6 +200,22 @@ class ToolRegistry:
         return (f"\n⚠ 위 숫자는 '행 수'입니다. {view} 는 한 상품이 여러 행일 수 있어 "
                 f"실제 {unit} 수는 {n:,}개입니다. 개수를 묻는 질문이라면 {n:,}개로 답하세요.")
 
+    def _true_total(self, sql: str) -> int | None:
+        """How many rows the query really matches, ignoring the row cap.
+
+        The cap exists to bound query cost, but reporting the capped number as the total is the same
+        mistake the graph made with its 60-neighbour limit: '총 200건' for a filter that matches 15,837
+        products invites the model to answer 200.  A cap may hide rows; it must never change a count.
+        """
+        inner = re.sub(r"\blimit\s+\d+(\s+offset\s+\d+)?\s*$", "", sql.strip().rstrip(";"), flags=re.I).strip()
+        if not inner:
+            return None
+        try:
+            r = self.rdb.query(f"SELECT COUNT(*) AS n FROM ({inner})")
+        except SQLGuardError:
+            return None
+        return int(list(r.rows[0].values())[0]) if r.rows else None
+
     def _zero_warnings(self, sql: str, columns: list[str], rows: list[dict]) -> str:
         """0 이 답을 오염시키는 두 경우를 결과에 바로 붙인다.
 
@@ -233,10 +249,17 @@ class ToolRegistry:
                 if cid or cname:
                     refs.append(f"{cid or ''} {cname or ''}".strip())
         text = rows_to_text(r.columns, r.rows)
-        text += f"\n총 {r.row_count}건" + (" (LIMIT로 잘림 — 집계가 필요하면 COUNT/GROUP BY 사용)" if r.truncated else "")
+        total = self._true_total(r.sql) if r.truncated else r.row_count
+        if r.truncated:
+            text += (f"\n조건에 맞는 행은 총 {total:,}건이며, 위는 그중 {r.row_count}건입니다."
+                     if total is not None else
+                     f"\n총 {r.row_count}건 이상 (행 수 상한에 걸렸습니다 — 정확한 개수는 COUNT 로 확인하세요)")
+            text += " 개수를 묻는 질문이면 이 총계로 답하고, 나열이 필요하면 정렬 기준을 붙여 상위 N개만 뽑으세요."
+        else:
+            text += f"\n총 {r.row_count}건"
         text += self._unit_warning(r.sql, view)
         text += self._zero_warnings(r.sql, r.columns, r.rows)
-        return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, r.row_count, refs))
+        return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, total if total is not None else r.row_count, refs))
 
     def _t_search_products(self, query: str, table: str | None = None, k: int = 10, mode: str = "hybrid") -> ToolResult:
         k = int(k)

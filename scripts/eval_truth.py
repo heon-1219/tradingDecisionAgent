@@ -119,7 +119,7 @@ def main() -> int:
     s = get_settings()
     rdb = RDB(s.store_path)
     needs_graph = any(i.get("truth_kind") for i in items)
-    kg = KG.build(rdb, Lexicon.load(s.enrichment_dir), None, s.constituents_dir, log=lambda *x: None) if needs_graph else None
+    kg = KG.build(rdb, Lexicon.load(s.enrichment_dir), None, log=lambda *x: None) if needs_graph else None
 
     truths = {i["question_id"]: compute_truth(i, rdb, kg) for i in items}
 

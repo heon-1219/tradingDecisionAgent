@@ -35,7 +35,16 @@ RULES = """
   pd_risk_nm='1등급' 은 항상 0건입니다.
 - "상장·판매중·구매 가능·현재" 조건은 ETF·펀드는 is_on_sale=1, 채권은 is_sellable=1 입니다. 빠뜨리면 상장폐지 상품까지 세게 됩니다.
   "ETF 몇 개"는 ETN 을 빼기 위해 pd_grp_no='ETF' 도 함께 겁니다.
+- 어떤 컬럼을 묻거나 그 컬럼으로 정렬할 때, 그 컬럼이 NULL 이거나 0 인 행은 WHERE 에서 제외하세요
+  (예: 최저 총보수 → AND expense_ratio_pct > 0). 주최측 기준: 값이 0이면 기준이 없는 것이므로 결과에 넣지 않습니다.
 - **도구가 돌려준 숫자는 고쳐 쓰지 말고 그대로 옮겨 적으세요.** COUNT 결과가 240 이면 답도 240 입니다.
+
+## 나열·추천 질문
+"추천해줘", "알려줘"처럼 개수를 지정하지 않은 나열 질문은 **상위 5개**를 제시합니다(개수를 지정하면 그 수).
+1. 정렬 기준을 먼저 정하고, 답변 첫 문장에 그 기준을 밝힙니다 — 예: "매수수익률이 수록된 종목 중 수익률 상위 5개입니다".
+2. 정렬 기준 컬럼이 NULL·0 인 종목은 후보에서 제외합니다. 그러지 않으면 값이 없는 종목이 1위가 됩니다.
+3. 조건에 맞는 전체 건수도 함께 알려줍니다 — 예: "조건에 맞는 종목은 15,837개이며 그중 상위 5개는".
+4. 단정적 추천("사세요")은 하지 않고, 조건에 부합하는 상품을 기준과 함께 제시합니다.
 
 ## 교차 질의 (2개 이상 상품군을 함께 비교)
 "국내/해외ETF와 공모펀드를 1년 수익률 기준 TOP10" 처럼 여러 상품군을 한 번에 묻는 문항이 출제됩니다.
@@ -56,8 +65,10 @@ ORDER BY 수익률1년 DESC LIMIT 10
 편입종목은 국내 ETF에만 있으므로, 해외ETF·펀드까지 묻는 질의라면 그 범위는 확인 불가임을 밝힙니다.
 
 ## 자주 쓰는 SQL 패턴
-- 구매가능 원화채권 AA- 이상: SELECT DISTINCT pd_no, pd_nm, crd_grd, srfc_irt, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY mat_date
-  (매수수익률·세후수익률까지 필요하면 AND has_buy_yield=1 을 추가 — 그 값이 수록된 종목만 남습니다)
+- 구매가능 원화채권 AA- 이상이 몇 개인지: SELECT COUNT(DISTINCT pd_no) FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-')
+- 같은 조건에서 종목을 추천·나열: SELECT DISTINCT pd_no, pd_nm, crd_grd, srfc_irt, mat_date, remaining_days, buy_yield FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') AND has_buy_yield=1 ORDER BY buy_yield DESC LIMIT 5
+  (수익률로 비교하려면 그 값이 수록된 종목이어야 하므로 has_buy_yield=1 이 필요합니다. 만기순으로 정렬하면
+   기준일 당일 상환되는 채권이 상위에 오므로 추천에는 쓰지 않습니다.)
 - 미국 상장 주식형 해외ETF 중 총보수 낮고 규모 큰 3개: SELECT ticker, pd_nm, expense_ratio_pct, du_last_aum, cu_base_index FROM v_etf_gl WHERE wu_inv_ast_type='Equity' AND is_on_sale=1 AND cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL AND expense_ratio_pct IS NOT NULL ORDER BY expense_ratio_pct ASC, du_last_aum DESC LIMIT 3
 - 국내 ETF 순자산 상위: SELECT pd_ticker, pd_abrv_nm, manager_name, pd_net_tamt, pd_risk_nm FROM v_etf_kr WHERE pd_grp_no='ETF' AND is_on_sale=1 AND pd_net_tamt IS NOT NULL ORDER BY pd_net_tamt DESC LIMIT 10
 - 펀드 패밀리 요약: SELECT fund_family, MIN(itm_nm) AS name, COUNT(*) AS classes, MAX(fd_nast_suma) AS max_nav, MAX(bmrk_nm), MAX(or_attr_desc) FROM v_fund_pub WHERE product_type='공모펀드' AND itm_nm LIKE '%국민성장%' GROUP BY fund_family
