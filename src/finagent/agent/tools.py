@@ -83,6 +83,12 @@ GRAPH_LABELS_SHOWN = 8
 # 8라운드를 돌고 119초에 죽었다.  완전한 목록을 주면 그 탐색이 아예 일어나지 않는다.
 GRAPH_LABELS_FULL_UNDER = 25
 # 이름 옆에 함께 주는 식별자 개수.  코드는 라벨보다 짧고(12자 안팎) SQL 에 바로 들어가므로 더 많이 준다.
+# 목록이 이 수 이하면 ID 를 전부 준다.  60 으로 자르면 출력에 '전체 100건 중 60개' 가 붙는데,
+# 모델은 그 문구를 보면 목록이 불완전하다고 판단해 통째로 버린다 — 우주항공(100건)이 그랬다:
+# ID 를 60개 받고도 무시하고 편입종목 회사명에서 '우주항공' 을 LIKE 로 뒤져 0건을 받았다.
+# 2차전지(57건)는 전부 받았고 그대로 사용했다.  잘렸다고 알리는 목록은 안 쓰이므로, 흔한
+# 테마 크기(100건 안팎)까지는 완전한 목록을 준다.  그보다 큰 관계는 종전대로 60개만 준다.
+GRAPH_IDS_FULL_UNDER = 120
 GRAPH_IDS_SHOWN = 60
 # 대상이 '상품'인 관계 — 이 관계들의 ID 는 v_etf_kr.pd_itm_no 로 조인된다.
 _PRODUCT_RELATIONS = {"hasTheme_inverse", "manages", "tracksIndex_inverse", "constituentOf",
@@ -523,7 +529,7 @@ class ToolRegistry:
         if self.kg is None:
             return ToolResult("지식그래프가 로드되지 않았습니다.", True)
         totals: dict[str, int] = {}
-        nb = self.kg.neighbors(entity, relation=relation, limit=60, totals=totals)
+        nb = self.kg.neighbors(entity, relation=relation, limit=GRAPH_IDS_FULL_UNDER, totals=totals)
         note = ""
         if not nb and relation in ("hasSubsidiary", "subsidiaryOf_inverse"):
             # 주최측 예시가 '자회사'라는 단어를 쓴다. 지분 기준 자회사 엣지는 손으로 확인한 4건뿐이라
@@ -566,7 +572,7 @@ class ToolRegistry:
             # (...) 한 번으로 순자산·수익률·총보수를 붙일 수 있다.  사전분석이 회사 코드를 넘겨주자
             # 캠브리콘·네이버·TSMC 가 풀린 것과 같은 처방이다.
             ids = [x["iri"].rsplit("/", 1)[-1] for x in items if x.get("iri")]
-            ids = [i for i in ids if i][:GRAPH_IDS_SHOWN]
+            ids = [i for i in ids if i][: (GRAPH_IDS_FULL_UNDER if total <= GRAPH_IDS_FULL_UNDER else GRAPH_IDS_SHOWN)]
             if ids and rel in _PRODUCT_RELATIONS:
                 lines.append(
                     f"  └ 위 상품의 조회용 ID {len(ids)}개"
