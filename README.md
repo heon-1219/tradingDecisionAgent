@@ -1,7 +1,25 @@
 # 금융상품 Agent — Financial Product Analyst API
 
-제10회 2026 미래에셋증권 AI Festival · 금융상품 Agent 과제 제출물.
+제10회 2026 미래에셋증권 AI Festival · 금융상품 Agent 과제 제출물. 팀명 **Wolves of Walnut Street**.
 국내채권·국내ETF·해외ETF·공모펀드 4종 상품 마스터(정형 데이터)를 Agent가 스스로 탐색·연산하고, 온톨로지로 검증된 근거를 붙여 답하는 `GET /answer` API입니다.
+
+## 0. 평가용 API End-point
+
+```
+http://<TBD>/answer
+```
+
+> ⚠ **배포 후 이 주소를 확정 기입해야 합니다.** 주최측 공지: "API End-point 주소는 README.md 파일에 명시합니다(필수)."
+
+호출 예시 (인증 헤더 없음, 경로는 `/answer` 고정):
+
+```bash
+curl -G "http://<TBD>/answer" \
+  --data-urlencode "question_id=Q-001" \
+  --data-urlencode "question=평가 질의"
+```
+
+응답은 `application/json`, 다섯 필드 모두 문자열입니다 — `question_id` · `question` · `retrieved_context` · `think_trace` · `answer`. 확인 불가 질의도 200 OK 로 동일 스키마를 유지합니다. 상세는 [`docs/api_spec.md`](docs/api_spec.md).
 
 ## 1. 아키텍처
 
