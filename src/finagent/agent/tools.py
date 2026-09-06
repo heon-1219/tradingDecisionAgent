@@ -218,16 +218,24 @@ class ToolRegistry:
             return ""
         if not self._COUNT_STAR.search(sql) or "distinct" in sql.lower():
             return ""
+        # Only a query whose whole result is one count can be restated as a different count.  A
+        # GROUP BY returns one row per group with the dimension in the first column, and rewriting it
+        # produced ValueError("Cannot specify ',' with 's'") when the group key hit the f-string's
+        # thousands separator — breaking the very "펀드 패밀리 요약" pattern the prompt teaches.
+        if re.search(r"\bgroup\s+by\b", sql, re.I):
+            return ""
         key, unit = self.ROW_UNIT[view]
         try:
             alt = self.rdb.query(self._COUNT_STAR.sub(f"COUNT(DISTINCT {key})", sql))
         except SQLGuardError:
             return ""
-        if not alt.rows:
+        if not alt.rows or len(alt.rows) != 1 or len(alt.columns) != 1:
             return ""
         n = list(alt.rows[0].values())[0]
+        if not isinstance(n, (int, float)) or isinstance(n, bool):
+            return ""
         return (f"\n⚠ 위 숫자는 '행 수'입니다. {view} 는 한 상품이 여러 행일 수 있어 "
-                f"실제 {unit} 수는 {n:,}개입니다. 개수를 묻는 질문이라면 {n:,}개로 답하세요.")
+                f"실제 {unit} 수는 {int(n):,}개입니다. 개수를 묻는 질문이라면 {int(n):,}개로 답하세요.")
 
     def _true_total(self, sql: str) -> int | None:
         """How many rows the query really matches, ignoring the row cap.
