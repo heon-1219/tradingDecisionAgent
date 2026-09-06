@@ -77,6 +77,11 @@ _UNITS = ((10**12, "조"), (10**8, "억"), (10**4, "만"))
 # 셋이고, 개수를 명시한 평가 문항의 최대치는 5개다.  8은 그 위의 여유다.
 # 편입종목은 이제 v_etf_constituent(SQL)에 있어서 목록 자체를 그래프에서 길게 받을 이유도 없다.
 GRAPH_LABELS_SHOWN = 8
+# 목록이 이 수 이하면 자르지 않고 전부 보여준다.  8 로 자르는 것은 삼성전자(229건)처럼 큰 목록의
+# 지연을 막으려던 것인데, 작은 목록에는 해가 됐다: '캠브리콘이 편입된 중국 반도체 ETF' 는 그래프가
+# 15건을 정확히 찾아놓고 8개만 보여주자, 모델이 목록이 불완전하다고 보고 이름으로 다시 좁히려다
+# 8라운드를 돌고 119초에 죽었다.  완전한 목록을 주면 그 탐색이 아예 일어나지 않는다.
+GRAPH_LABELS_FULL_UNDER = 25
 
 
 def korean_magnitude(v: float) -> str:
@@ -543,7 +548,7 @@ class ToolRegistry:
         for rel, items in nb.items():
             # report the untruncated total — the model quotes this number verbatim as its answer
             total = totals.get(rel, len(items))
-            head = items[:GRAPH_LABELS_SHOWN]
+            head = items if total <= GRAPH_LABELS_FULL_UNDER else items[:GRAPH_LABELS_SHOWN]
             more = total > len(head)
             # "상위"가 아니라 "예시": 이 목록에는 순서가 없다. 순자산·수익률 상위는 SQL 로만 나온다.
             shown = f"{total}건" + (f", 예시 {len(head)}건" if more else "")

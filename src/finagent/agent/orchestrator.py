@@ -770,14 +770,12 @@ class Orchestrator:
             if self.tools.kg is not None:
                 n = len(self.tools.kg.neighbors(f"d:theme/{t.id}", relation="hasTheme_inverse", limit=10000).get("hasTheme_inverse", []))
                 cnt = f", 그래프 태깅 상품 {n}건 (graph_neighbors('{t.label_ko}','hasTheme_inverse'))"
-            # 동의어만 주면 모델은 여전히 질문의 한글 단어를 이름 LIKE 에 건다.  실제로 '캠브리콘이
-            # 편입된 중국 반도체 ETF' 에서 회사 코드는 맞게 쓰고도 cu_base_index LIKE '%중국%' AND
-            # LIKE '%반도체%' 를 덧붙여 0건을 받았다 — 그 상품의 이름은 'TIGER 차이나반도체FACTSET'
-            # 이다.  그래서 동의어가 아니라 '이름으로 좁히면 비어 있다'는 결과를 사실로 적는다.
-            lines.append(f"- 테마 '{t.label_ko}' ({t.label_en}; 동의어 {', '.join(t.synonyms[:6])}){cnt}"
-                         f" — 상품명·기초지수 표기는 동의어 중 어느 것이든 될 수 있으므로"
-                         f" 이름 LIKE '%{t.label_ko}%' 로 테마를 좁히면 0건이 나올 수 있습니다."
-                         f" 테마 판정은 위 그래프 결과를 쓰고, SQL 은 상품코드로 좁히세요.")
+            # 여기에 "이름 LIKE 로 테마를 좁히면 0건이 나온다"는 경고를 넣어 봤다가 뺐다.  캠브리콘에는
+            # 효과가 없었고(모델은 여전히 이름 LIKE 를 먼저 시도했다), 국민성장펀드를 깨뜨렸다 —
+            # 그 질문이 성공하던 경로가 바로 fund_family LIKE '%국민성장%' 였는데 경고가 그 길을
+            # 막았다.  테마 이름으로 좁히는 것이 맞는 질문과 틀린 질문이 섞여 있으므로, 어느 쪽도
+            # 미리 금지하지 않고 동의어와 그래프 건수라는 사실만 준다.
+            lines.append(f"- 테마 '{t.label_ko}' ({t.label_en}; 동의어 {', '.join(t.synonyms[:6])}){cnt}")
         mgrs = self.lexicon.match_managers(question)
         if mgrs:
             lines.append("- 운용사: " + ", ".join(f"{m.canonical}(manager_name='{m.canonical}')" for m in mgrs))
@@ -994,6 +992,7 @@ class Orchestrator:
         # (이 프로젝트의 측정: 사용 시점의 사실 5/5 준수, 사전 규칙 4/4 무시).
         # 실패하거나 예산을 넘기면 아무것도 싣지 않고 기존 도구 루프가 그대로 이어진다.
         prefetch_block = ""
+        prefetch_ran = 0
         try:
             pf = await route_prefetch(
                 question, self.tools, resolver=self.resolver, lexicon=self.lexicon,
@@ -1003,6 +1002,7 @@ class Orchestrator:
             )
             steps += pf.steps
             prefetch_block = pf.block
+            prefetch_ran = int(pf.ran or 0)   # 라운드 0 이 실제로 실행한 조회 수
             # 라운드 0 근거는 retrieved_context 에 넣지 않는다: 도구 루프가 같은 조회를 다시 하는
             # 경우가 대부분이라 [근거] 가 중복으로 찍힌다(근거 개수를 세는 기존 테스트가 이를 잡는다).
             # 라운드 0 이 무엇을 왜 조회했는지는 think_trace 의 '라운드 0' 줄이 그대로 보여준다.
@@ -1022,6 +1022,11 @@ class Orchestrator:
         repeat_nudged = False
         # 이번 질의에서 실제로 "실행된" 데이터 조회 호출 수. 같은 턴에 final_answer 와 섞여 나와
         # 실행되지 않은 호출은 세지 않는다 — 결과를 못 봤으면 근거가 없는 것과 같다.
+        # 라운드 0 사전검색이 실제로 실행한 조회도 여기 포함한다.  제외했더니 게이트가 역효과를 냈다:
+        # '국민성장펀드의 구조와 투자전략' 은 라운드 0 이 문서 2건을 가져와 제대로 답했는데, 게이트가
+        # "조회 0회"라며 되돌려보내자 모델이 조회를 더 하는 대신 맞는 답을 철회하고 "데이터 조회 도구를
+        # 사용하지 않았음을 확인했습니다" 라고 사과했다.  사전검색은 서버가 결정론적으로 실행한 진짜
+        # 조회이므로 근거가 없는 것이 아니다.
         lookups = 0
         forced_lookup = False                 # 강제 재시도는 질문당 한 번뿐(무한 루프 금지)
         rejected_final: dict | None = None    # 되돌린 답변. 재시도가 빈손으로 끝나면 이것을 쓴다.
@@ -1054,7 +1059,7 @@ class Orchestrator:
                 others = [c for c in turn.tool_calls if c.name != "final_answer"]
                 steps.append(f"라운드 {rnd}: final_answer(status={final.get('status', '?')})" + (f" + 무시된 도구 {len(others)}개" if others else ""))
                 remaining = deadline - time.monotonic()
-                if lookups == 0 and not forced_lookup:
+                if lookups == 0 and prefetch_ran == 0 and not forced_lookup:
                     # 되돌릴 여유가 있는지 라운드와 시간을 모두 본다. 재시도가 쓸모 있으려면
                     # 도구를 실행할 라운드가 최소 하나 남아 있어야 한다(rnd+1 <= max_tool_rounds).
                     if rnd >= self.settings.max_tool_rounds or remaining < FORCED_LOOKUP_MIN_REMAINING_SEC:
@@ -1239,8 +1244,17 @@ class Orchestrator:
         else:
             reason = "시간 초과" if time.monotonic() >= deadline else "LLM 응답 없음"
             status, answer, refs = "cannot_confirm", fallback_answer(reason), []
-        if pre.invalid and status == "answered" and not any(k in answer for k in ("확인할 수 없", "존재하지 않")):
-            answer = f"{CANNOT_PREFIX} {' '.join(pre.invalid)}\n\n(참고) {answer}"
+        # 예전 조건은 답변에 "존재하지 않"이 들어 있으면 보정을 통째로 건너뛰었다.  그런데 모델은
+        # "존재하지 않습니다" 라고 쓴 다음 대체 상품을 나열한다 — 'AAAA 채권' 질문에 채권 5종목이
+        # 코드·수익률까지 달려 나갔고, status 가 answered 로 남아 normalize_answer 의 대체목록 절단도
+        # 돌지 않았다.  주최측은 답변 불가 문항에 답을 생성하면 감점한다(과제설명 p7).  값 도메인
+        # 위반이 확인되면 문구와 무관하게 확인불가로 낮춰, 절단이 반드시 걸리게 한다.
+        if pre.invalid and status == "answered":
+            # 모델 텍스트는 버린다.  거절 문구를 앞에 붙이고 뒤를 남겨 두면 모델은 "존재하지 않습니다"
+            # 라고 쓴 다음 대체 상품을 나열한다 — 'AAAA 채권' 질문에 채권 2~5종목이 발행기관·표면
+            # 이자율·만기일까지 달려 나갔다.  절단 규칙(행 3개 이상)으로도 두 종목짜리는 못 잡는다.
+            # pre.invalid 는 위반 사실과 유효값 목록을 이미 담고 있어 잃는 정보도 없다.
+            answer = f"{CANNOT_PREFIX} {' '.join(pre.invalid)}"
             status = "cannot_confirm"
             steps.append("온톨로지 위반 조건이 있어 답변을 확인불가로 보정")
         # 존재하지 않는 상품명을 물었는데 모델이 유사 상품으로 그냥 답해버린 경우를 잡는다.
