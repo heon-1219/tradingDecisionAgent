@@ -395,10 +395,9 @@ async def run_plan(plan: RoutePlan, tools, *, total_budget: float = TOTAL_BUDGET
     """Execute the plan against the tool registry.  Never raises; never blocks past the budget."""
     out = Prefetch()
     if not plan.calls:
-        # "사전검색 없음 — 그래프=생략 / 벡터=생략 / 문서=생략" 만 적으면 이 줄만 읽는 사람에게는
-        # 아무 저장소도 쓰지 않은 것처럼 보인다.  실제로는 라운드 0 에서 미리 부를 것이 없다는 뜻이고,
-        # 정형 집계·정렬 질의는 그다음 라운드에서 RDB(sql_query)가 처리한다.  think_trace 는 채점
-        # 항목이므로("사고·추론·도구 사용 과정") 라우팅 판단을 그대로 읽히게 적는다.
+        # 이 줄만 읽으면 "아무 저장소도 안 썼다"로 보인다.  실제로는 라운드 0 에서 미리 부를 것이
+        # 없다는 뜻이고, 정형 집계·정렬은 다음 라운드에서 RDB 가 처리한다.  think_trace 는
+        # 채점 항목("도구 사용 과정")이므로 라우팅 판단을 그대로 읽히게 적는다.
         out.steps.append("라운드 0 라우팅: 사전 검색 대상 없음 → 이 질문은 RDB(sql_query)로 처리합니다 — "
                          + plan.summary())
         return out

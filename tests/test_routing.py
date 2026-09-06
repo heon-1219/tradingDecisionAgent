@@ -250,8 +250,6 @@ def test_the_routing_decision_is_traced_for_every_store():
 def test_a_question_with_no_plan_still_records_why_nothing_ran():
     pf = run(routing.plan_retrieval(sig("국내 ETF 중 순자산 상위 3개는?")), _Tools({}))
     assert pf.block == ""
-    # 문구를 "사전 검색 대상 없음 → 이 질문은 RDB(sql_query)로 처리합니다" 로 바꿨다.
-    # think_trace 는 채점 항목이라, 이 줄만 읽고 "아무 저장소도 안 썼다"로 보이면 안 된다.
     assert pf.steps and "사전 검색 대상 없음" in pf.steps[0] and "sql_query" in pf.steps[0]
 
 
