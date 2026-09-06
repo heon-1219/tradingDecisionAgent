@@ -156,6 +156,10 @@ section.cont{ page-break-before:auto; break-before:auto; }
   .cover-title{ font-size:27pt }
   a{ color:var(--key) }
 }
+
+/* 본문 양쪽 정렬 — 한국어는 어절 단위로 끊는다(keep-all). 표·코드·캡션 숫자는 제외. */
+p, li, .lead { text-align: justify; text-justify: inter-word; word-break: keep-all; }
+td, th, code, pre, .stat, figcaption b { text-align: inherit; word-break: keep-all; }
 </style>
 </head>
 <body>
@@ -943,7 +947,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <text class="t-tiny" x="702" y="456">확인 불가는 명시적으로 거절</text>
 
   <!-- 온톨로지 관통 -->
-  <path class="ln-d" d="M116,479 L846,479" stroke="#b5651d" stroke-width="1.6"/>
+  <path class="ln-d" d="M116,479 L770,479" stroke="#b5651d" stroke-width="1.6"/>
   <path class="ln-d" d="M116,479 L116,472 M336,479 L336,474 M556,479 L556,472 M770,479 L770,472" stroke="#b5651d" stroke-width="1.6"/>
 </svg>
 <figcaption><b>그림 6.</b> 주황색 점선은 온톨로지가 <em>네 단계를 모두 관통</em>한다는 뜻입니다 — 같은 TTL이 적재의 파생 정의, 색인의 추론 규칙, 검색의 스키마 카드, 생성의 값 검증기가 됩니다.</figcaption>
