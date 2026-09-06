@@ -160,6 +160,29 @@ section.cont{ page-break-before:auto; break-before:auto; }
 /* 본문 양쪽 정렬 — 한국어는 어절 단위로 끊는다(keep-all). 표·코드·캡션 숫자는 제외. */
 p, li, .lead { text-align: justify; text-justify: inter-word; word-break: keep-all; }
 td, th, code, pre, .stat, figcaption b { text-align: inherit; word-break: keep-all; }
+
+/* ── 표지: 가운데로 모으고 빈 공간을 줄인다 ─────────────────────────────
+   부제·주장 문단·수치 카드를 덜어내면서 요소 사이가 크게 벌어졌다.  세로 가운데
+   정렬로 모으고, 제목·엔드포인트·메타표의 간격을 같은 리듬으로 맞춘다. */
+.cover{ display:flex; flex-direction:column; justify-content:center; text-align:center;
+        min-height:236mm; gap:22px; }
+.cover-top{ padding-top:10px; }
+.cover-title{ margin:6px 0 0; }
+.endpoint{ margin:0 auto; max-width:80%; text-align:center; }
+.cover-meta{ margin-top:0; }
+.cover-meta table{ text-align:left; }
+
+/* ── 섹션 간격: 최소 거리는 두되 그 이상 벌어지지 않게 ─────────────────
+   빽빽하지도 듬성듬성하지도 않도록 제목·그림·표의 위아래 여백을 한 리듬으로 통일한다. */
+section{ margin-top:1.6em; }
+section:first-of-type{ margin-top:0; }
+h2{ margin:1.4em 0 .55em; }
+h3{ margin:1.15em 0 .45em; }
+h2 + h3, h2 + p, h3 + p, h3 + table, h3 + figure{ margin-top:.35em; }
+figure{ margin:.95em 0 1em; }
+figure + p, figure + h3, table + p, table + h3{ margin-top:.85em; }
+table{ margin:.45em 0 .3em; }
+p{ margin:.5em 0; }
 </style>
 </head>
 <body>
