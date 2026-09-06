@@ -33,7 +33,7 @@ flowchart LR
     RT --> A
     A[LLM Agent<br/>도구 호출 루프 · 120초 예산 · 최대 8라운드]
     A -->|sql_query / table_info| R[(RDB · SQLite<br/>5 테이블 + 5 뷰 · 215 컬럼)]
-    A -->|graph_neighbors / graph_query| G[(Knowledge Graph · rdflib<br/>약 107만 트리플 · 술어 73종)]
+    A -->|graph_neighbors / graph_query| G[(Knowledge Graph · rdflib<br/>1,082,874 트리플 · 술어 73종)]
     A -->|search_products / resolve_entity| V[(Lexical Index · BM25<br/>75,089 문서)]
     A -->|search_products mode=vector| E[(Vector Index · TF-IDF+LSA<br/>75,089 문서 · 384차원)]
     A -->|search_documents| D[(외부 문서<br/>Markdown chunks)]
@@ -48,13 +48,16 @@ flowchart LR
 |---|---|---|
 | ETL | Excel 마스터 + 편입종목 CSV → SQLite(`data/store/products.db`). 날짜 ISO 변환, 판매가능 플래그, 펀드 패밀리 키, 운용사 정규화(기관코드 유래), **뷰 5개 · 215 컬럼 전량 노출** | `src/finagent/etl/` |
 | Ontology | `ontology/*.ttl`(TBox)을 런타임에 로드해 **스키마 카드**(컬럼 ↔ 한글 의미·단위·허용값)와 **검증기**(신용등급·위험등급 값 도메인)를 생성 | `src/finagent/ontology/loader.py` |
-| Knowledge Graph | SQLite(`etf_constituent` 포함) + 사전(운용사·테마·기업)으로 ABox를 구축하고, **온톨로지 TBox를 병합해 추론**(상위 클래스·역관계·domain/range)까지 물질화 — 약 **1,074,824 트리플 · 술어 73종**. 편입종목은 그래프가 아니라 SQLite 테이블에서 생성되므로 SQL 결과와 그래프 결과가 갈라지지 않는다. SPARQL·이웃 조회 | `src/finagent/kb/graph.py` |
+| Knowledge Graph | SQLite(`etf_constituent` 포함) + 사전(운용사·테마·기업)으로 ABox를 구축하고, **온톨로지 TBox를 병합해 추론**(상위 클래스·역관계·domain/range)까지 물질화 — **1,082,874 트리플**(주장 965,823 + 추론 117,051) **· 술어 73종**. 그룹주 ETF 편입종목에서 `affiliateOf`(계열사) 관계도 도출한다. 편입종목은 그래프가 아니라 SQLite 테이블에서 생성되므로 SQL 결과와 그래프 결과가 갈라지지 않는다. SPARQL·이웃 조회 | `src/finagent/kb/graph.py` |
 | Vector Index | 상품 텍스트의 밀집 벡터(의미) 검색. 기본 백엔드는 TF-IDF(단어+한글 bigram) → Truncated SVD 384차원 → 코사인 유사도로, **임베딩 API 키 없이 결정적으로 동작**. `VECTOR_BACKEND=openai`로 임베딩 API 전환 가능 | `src/finagent/kb/vector.py` |
 | Lexical Index | BM25 + 한글 음절 bigram, 정확 상품명 부스트. 엔티티 해석기(정확 일치/유사 후보/기업 관계) | `src/finagent/kb/search.py`, `entity.py`, `lexicon.py` |
 | Hybrid Retrieval | `search_products`가 어휘(BM25) + 의미(벡터)를 결합(`mode=hybrid`가 기본, `lexical`/`vector` 선택 가능) | `src/finagent/kb/vector.py` |
 | Docs | 비정형 문서(PDF→Markdown) 청킹·검색. 출처·기준일 표기 | `src/finagent/kb/docs.py`, `scripts/parse_docs.py` |
 | Retrieval Routing | **라운드 0의 검색 실행 계획.** 사전 분석 결과로 그래프·벡터·문서 중 *그 질문에 필요한 것만* 골라 미리 실행하고, 결과 행을 첫 프롬프트에 사실로 주입한다. 모든 저장소를 항상 두드리지 않는다 — 54문항 기준 그래프 6건·벡터 7건·문서 0건이 켜지고 **41건은 아무것도 켜지 않는다**(순수 집계·정렬 질문). 계획 수립 중앙값 0.8ms, 59문항 중 42문항은 실행 시간 추가가 0ms. 어느 저장소를 왜 골랐는지는 `think_trace` 에 남는다 | `src/finagent/agent/routing.py` |
 | Agent | 도구 호출 LLM 루프(Anthropic 기본, OpenAI 호환 대체), 시간 예산, 근거·추적 수집, 답변 정책. **조회를 한 번도 하지 않은 답변은 제출을 거부하고 되돌려보낸다** — 모델이 도구 없이 답하면 사전학습 지식으로 지어내기 때문이다(실측: 같은 질문 5회 중 도구를 부른 실행은 전부 정답, 안 부른 실행은 전부 오답) | `src/finagent/agent/` |
+| 식별자 전달 | 해소한 식별자를 SQL까지 넘긴다. 사전 한글명과 원천 표기가 다른 기업 **32개**(캠브리콘→`한무기`, 네이버→`NAVER`, TSMC→`TSMC ADR`)는 질문의 이름으로 `WHERE company_name LIKE` 를 쓰면 0행이 나오므로, 스토어의 실제 `company_code` 를 프롬프트에 주입한다. 그래프 결과에도 조회용 ID 목록(`pd_itm_no IN ('…')`)을 동봉해 이름만으로 SQL을 짜지 않게 한다 | `agent/orchestrator.py`(`_load_constituent_keys`·`_constituent_key_note`) · `agent/tools.py` |
+| 뷰 시맨틱스 | 뷰마다 **판별 컬럼을 못박아** 전달한다 — 인버스 `cu_inverse_short_yn='Y'`, 월배당 `pd_dvid_cycl='M'`, 채권형 ETF `wu_inv_ast_type='채권'`, ETF/ETN 구분 `pd_grp_no='ETF'`, 펀드 개수 `COUNT(DISTINCT fund_family)`, 그리고 편입종목 뷰가 가진 컬럼 8개와 상품 속성을 얻는 조인(그 뷰에 없는 컬럼을 쓰는 것은 데이터 부재가 아니라 조인 누락이다) | `agent/tools.py` (SEMANTICS) |
+| Answer 형식 | 답변은 **줄글만**(마크다운 제거), **거절은 거절로 끝난다** — 확인 불가 뒤에 대체 상품 목록을 붙이지 않는다(답할 수 없는 질문에 답하면 감점 대상) | `agent/answer.py` |
 | API | FastAPI `GET /answer`, `GET /health`. 항상 200 + 5개 필드 | `src/finagent/api.py` |
 
 ### 과제 필수 구성요소 대응
@@ -62,7 +65,7 @@ flowchart LR
 | 과제 요구 | 구현 |
 |---|---|
 | ① 정형·비정형 분석/정제 + 상품 도메인 특화 Ontology ([Parsing] pdf·ppt → Markdown) | `etl/`(정형 4종 + 편입종목) · `scripts/parse_docs.py`(PDF/PPTX → Markdown, front-matter에 출처·기준일) · `ontology/*.ttl` **6종** |
-| ② 금융상품 KnowledgeBase **RDB + Vector + Graph** ([Extraction]·[EntityResolution]) | RDB=SQLite **5뷰 · 215컬럼** · Vector=`kb/vector.py`(TF-IDF+LSA 384차원) · Graph=`kb/graph.py`(약 107만 트리플, 추론 포함) · Entity Resolution=`kb/entity.py` + `data/enrichment/*.yaml`. 어휘·벡터 색인은 **75,089 문서** |
+| ② 금융상품 KnowledgeBase **RDB + Vector + Graph** ([Extraction]·[EntityResolution]) | RDB=SQLite **5뷰 · 215컬럼** · Vector=`kb/vector.py`(TF-IDF+LSA 384차원) · Graph=`kb/graph.py`(**1,082,874 트리플**, 추론 포함) · Entity Resolution=`kb/entity.py` + `data/enrichment/*.yaml`. 어휘·벡터 색인은 **75,089 문서**(주최측 4종 마스터 53,375 + 국내ETF 편입종목 21,714) |
 | ③ Intent Analysis & Retrieval Engine ([NL2SQL]·[Retrieval]) | 사전 분석(의도·엔티티·온톨로지 검증)이 **검색 실행 계획**이 되어 라운드 0에서 그래프/벡터/문서 중 필요한 것만 결정론적으로 실행 → 그 결과를 사실로 쥐고 LLM이 `sql_query`(NL2SQL)로 집계·정렬을 마무리. 저장소 선택을 모델의 변덕에 맡기지 않는 것이 핵심 |
 | ④ Answer Generator (근거 기반·환각 방지) | `final_answer` 3상태 강제 + `retrieved_context` 근거 블록 + 확인불가/역질문 정책 |
 
@@ -162,7 +165,7 @@ erDiagram
 
 ### 온톨로지 추론 (기술세션 01-4 대응)
 
-기동 시 TBox(`ontology/*.ttl`)를 ABox와 같은 그래프에 병합하고 세 가지 규칙을 물질화합니다: **상위 클래스 상속**(`x a fp:DomesticETF` → `x a fp:ETF`, `fp:Product`), **역관계**(`owl:inverseOf` 선언에 따라 `fp:managedBy` ↔ `fp:manages` 등), **domain/range 타입 추론**. 그 결과 `?p a fp:Product`·`?am fp:manages ?p` 같은 질의가 별도 적재 없이 동작합니다. 현재 그래프는 약 **1,074,824 트리플 · 술어 73종**이며, 명시/추론 트리플 수는 `/health`가 `kg_asserted`/`kg_inferred`로 보고합니다.
+기동 시 TBox(`ontology/*.ttl`)를 ABox와 같은 그래프에 병합하고 세 가지 규칙을 물질화합니다: **상위 클래스 상속**(`x a fp:DomesticETF` → `x a fp:ETF`, `fp:Product`), **역관계**(`owl:inverseOf` 선언에 따라 `fp:managedBy` ↔ `fp:manages` 등), **domain/range 타입 추론**. 그 결과 `?p a fp:Product`·`?am fp:manages ?p` 같은 질의가 별도 적재 없이 동작합니다. 현재 그래프는 **1,082,874 트리플 · 술어 73종**이며, 그중 **주장(ABox) 965,823 · 추론 117,051** 입니다 — `/health`가 `kg_asserted`/`kg_inferred`로 보고합니다.
 
 > 이전에는 술어가 **5,082종**이었습니다. 편입 비중을 `weight_<기업명>`처럼 기업마다 다른 술어로 적었기 때문인데, 편입종목이 SQLite 테이블로 내려오면서 비중은 컬럼이 되었고 술어는 73종으로 정리됐습니다.
 
@@ -253,7 +256,7 @@ curl -s http://127.0.0.1/health
 
 `docker-compose.yml` 이 컨테이너 8000번을 호스트 **80번**에 매핑하므로 `http://<공인IP>/answer` 로 바로 열립니다. 주최측 공지가 HTTP 기본·표준 포트를 명시하고 있어 인증서·리버스 프록시를 두지 않았습니다(`--profile https` 로 Caddy + Let's Encrypt 구성도 가능하지만 도메인이 필요합니다).
 
-`restart: unless-stopped` 로 컨테이너 크래시·서버 재부팅 시 자동 복구됩니다. 기동 후 지식그래프 구축에 약 3분이 걸리므로 `HEALTHCHECK` 의 `start-period` 를 420초로 두었습니다 — 재기동했다면 `/health` 가 200을 줄 때까지 기다린 뒤 호출하십시오.
+`restart: unless-stopped` 로 컨테이너 크래시·서버 재부팅 시 자동 복구됩니다. 기동 후 지식그래프 구축에 약 3분이 걸리므로 `HEALTHCHECK` 의 `start-period` 를 420초로 두었습니다 — 재기동했다면 `/health` 가 200을 줄 때까지 기다린 뒤 호출하십시오. (위 기동 시간 수치는 편입종목 테이블 추가·그래프 재구축 **이전** 측정값이며 이후 재측정하지 않았습니다. `start-period` 420초는 그 여유를 감안한 값입니다.)
 
 `.env` 는 `.dockerignore` 에 있어 이미지에 포함되지 않습니다(API 키 보호). 런타임에 `env_file: .env` 로 읽으므로 **서버의 프로젝트 디렉터리에 `.env` 파일이 있어야 합니다.**
 
@@ -271,7 +274,7 @@ curl -s http://127.0.0.1/health
 
 | 파일 | 내용 |
 |---|---|
-| `common.ttl` | 공통 상위 클래스 `fp:Product`, 상장 상품 구분 `fp:DomesticListedProduct` / `fp:ForeignListedProduct`, 운용사·발행사·기업·테마·지수·펀드패밀리, 위험등급(1~6)·자산군·투자지역·분배주기 열거형, 공통 관계(`managedBy`, `hasConstituent`, `subsidiaryOf`, `hasTheme`, `tracksIndex` …), SHACL 제약 |
+| `common.ttl` | 공통 상위 클래스 `fp:Product`, 상장 상품 구분 `fp:DomesticListedProduct` / `fp:ForeignListedProduct`, 운용사·발행사·기업·테마·지수·펀드패밀리, 위험등급(1~6)·자산군·투자지역·분배주기 열거형, 공통 관계(`managedBy`, `hasConstituent`, `affiliateOf`(계열사·대칭), `subsidiaryOf`, `hasTheme`, `tracksIndex` …), SHACL 제약 |
 | `bond_kr.ttl` | `fp:DomesticBond` — 신용등급 체계(AAA~D, 서열), 채권 분류·금리·이자지급 열거형, 수익률/듀레이션 등 속성 |
 | `etf_kr.ttl` | `fp:DomesticETF` / `fp:DomesticETN` — 전략(실물/합성/액티브), 배수, 기간 수익률·변동성, 분배 정보 |
 | `etf_gl.ttl` | `fp:ForeignETF` / `fp:ForeignETN` — 총보수, AUM, 거래소, 복제방법, 인버스/레버리지 |
@@ -301,11 +304,19 @@ python scripts/explore.py pre "신용등급 AAAA인 채권 찾아줘"
 > **정답 기준에 대하여** — 주최측은 평가 질의와 정답을 공개하지 않았습니다(과제설명서: "예시질문(참고용 질의set)은 본 자료에 포함되지 않습니다").
 > 따라서 `data/eval/groundtruth.jsonl`은 **제공 데이터에서 SQL·그래프로 정답이 계산되는 질문 54개**(하 10 · 중 16 · 상 9 · 답변불가 19)로 구성했습니다.
 > 정답 키는 채점 시점에 데이터에서 다시 계산되므로, 데이터가 갱신되면 정답도 함께 갱신됩니다.
->
-> **정답률은 아직 측정하지 않았습니다.** 정답 키를 20 → 54문항으로 늘리면서 키 자체의 오류(ETF를 묻는 문항에서 ETN을 센 것, 동률 답을 하나로 고정한 것,
-> 반올림 정수를 허용해 0.65가 "1"로도 통과하던 것)를 함께 고쳤기 때문에 이전 채점 결과는 폐기했고, 새 세트로는 아직 실행하지 않았습니다.
 
-테스트:
+**실측 정답률 (2026-09-06 · `LLM_PROVIDER=clova` · `HCX-005`)**
+
+| 구분 | 결과 |
+|---|---|
+| 자체 정답 키 54문항 | **47/54 (87%)** |
+| 난이도별 | 하 8/10 · 중 14/16 · 상 6/9 · **답변불가 19/19** |
+| 응답 시간 | 평균 **20.6초**, 최장 87.4초 — **300초 초과 0건** |
+| 주최측 과제설명 p12 예시 8문항 | **7/8** (난이도 5문항 중 4문항 정답, 답변불가 3문항 전부 정답) |
+
+문항별 판정·소요시간·근거·추적 전문은 `data/eval/truth_results.jsonl`에 그대로 있습니다. 이 수치는 정답 키를 20 → 54문항으로 늘리고 **키 자체의 오류**(ETF를 묻는 문항에서 ETN을 센 것, 최저 총보수 0.01%에 4개가 동률인데 하나만 정답으로 고정한 것, 반올림 정수를 허용해 0.65가 "1"로도 통과하던 것, "…상품은 없습니다"를 거절로 인식하지 못하던 채점기)를 고친 **새 세트 기준**이며, 그 이전 채점 결과는 폐기했습니다.
+
+테스트 — **194개 통과**:
 
 ```bash
 python -m pytest -q                 # 단위·계약 테스트 (stub LLM, 소형 스토어)
@@ -332,5 +343,6 @@ python -m pytest -q -m slow         # 전체 ETL 검증 (약 2분)
 - **그룹주 ETF에서 뽑히는 계열사는 상장사 일부입니다.** 비상장 계열사는 보이지 않고, 현대차그룹은 2개사만 잡힙니다 — `TIGER 현대차그룹플러스` 가 HD현대(별개 기업집단)를 섞고 있어 토큰을 '현대차'로 좁게 잡았기 때문입니다. 넓히면 recall 이 오르지만 오탐이 들어옵니다. SK그룹은 해당 ETF에 편입종목 행이 없어 커버되지 않습니다.
 - **벡터 색인의 순기여는 테마형 질의의 recall@10 +3.5%p 입니다**(질의 1,313개 실측, 1절 참조). 상위 순위는 어휘 검색이 결정하며, 벡터는 하위 슬롯만 채웁니다. 필수 구성요소로서 존재하고 동작하지만, 이 코퍼스에서 의미 검색이 어휘 검색을 이기는 구간은 좁다는 사실을 감추지 않습니다.
 - **외부 문서는 3개 파일 39청크뿐입니다.** ETF 용어·지표 해설, ETF 위험요인 일반, 국민성장펀드 개요. 서술형 질의 전반을 덮지 못하며, 마스터에 없는 배경 지식이 필요한 질문은 확인 불가로 답합니다.
-- 벡터 검색은 외부 임베딩 API 키 없이도 평가가 재현되도록 TF-IDF+LSA(384차원)를 기본값으로 씁니다. 상용 임베딩으로 바꾸면 의미 검색 품질이 더 오를 여지가 있으며, `VECTOR_BACKEND=openai`와 `VECTOR_EMBED_MODEL`로 전환할 수 있습니다(코드 변경 불필요).
+- 벡터 검색은 외부 임베딩 API 키 없이도 평가가 재현되도록 TF-IDF+LSA(384차원)를 기본값으로 씁니다. 상용 임베딩으로 바꾸면 의미 검색 품질이 더 오를 여지가 있으며, `VECTOR_BACKEND=openai`와 `VECTOR_EMBED_MODEL`로 전환할 수 있습니다(코드 변경 불필요). **다만 그 전환 효과는 측정하지 않았습니다.**
+- **측정하지 않은 것** — 컨테이너 기동 시간(편입종목 테이블 추가·그래프 재구축 이후 재측정 필요), 동시 요청 처리량(주최측이 순차 호출을 공지해 부하 시험을 하지 않았습니다), 상용 임베딩 전환 효과. 이 세 가지에는 이 문서에 숫자를 쓰지 않습니다.
 - **제공 데이터가 과제설명 PDF의 기재와 다릅니다.** PDF는 4종 합계 약 14.5만 건·기준일 2026-07-11로 안내하지만, 실제 배포된 파일(`ai-festival2026_..._DtataSet260824.zip`)은 합계 53,375건이고 기준일이 2026-08-21(해외ETF 2026-08-22)입니다. 본 구현은 **실제 제공 파일**을 기준으로 하며, 평가용 데이터가 갱신되면 `python scripts/build_store.py` 재실행만으로 반영됩니다(스키마는 동일 가정).

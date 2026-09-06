@@ -10,7 +10,7 @@
 | 응답 시간 | 주최측 기준: **300초 초과 시 미응답 처리**, 그 안이면 늦어도 채점(점수 차등). 서버 내부 예산 120초, 초과 시 확보된 근거로 즉시 답변 |
 | 답변 생성 LLM | NCP HyperCLOVA X (`HCX-005`, CLOVA Studio OpenAI 호환 엔드포인트) — 대회 규정 |
 | 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (안내 문구) |
-| 참조 데이터 | SQLite 뷰 5개(`v_bond_kr` · `v_etf_kr` · `v_etf_gl` · `v_fund_pub` · `v_etf_constituent`) · 상품 53,375행 + 편입종목 22,599행 · 지식그래프 약 107만 트리플 |
+| 참조 데이터 | SQLite 뷰 5개(`v_bond_kr` · `v_etf_kr` · `v_etf_gl` · `v_fund_pub` · `v_etf_constituent`) · 상품 53,375행 + 편입종목 22,599행 · 지식그래프 1,082,874 트리플 |
 
 ## Request (Query String)
 
