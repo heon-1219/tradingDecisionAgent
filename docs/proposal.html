@@ -215,16 +215,16 @@ section.cont{ page-break-before:auto; break-before:auto; }
   </ol>
 
   <h3 style="margin-top:2em">먼저 읽을 세 가지</h3>
-  <div class="lead" style="margin-bottom:.9em">
-    <p style="margin-bottom:.5em"><strong>① 무엇을 만들었는가.</strong>
+  <div class="lead lead-num" style="margin-bottom:.9em">
+    <p style="margin-bottom:.5em;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">①</span><span><strong>무엇을 만들었는가.</strong>
     하나의 질문이 RDB · 지식그래프 · 어휘색인 · 벡터색인 · 문서저장소 다섯 경로로 갈라졌다가 하나의 답으로 합쳐지는
-    연합 검색 에이전트입니다. 다섯 경로가 <strong>같은 온톨로지 한 벌</strong>을 참조하므로 서로의 답을 검증할 수 있습니다.</p>
-    <p style="margin-bottom:.5em"><strong>② 무엇이 다른가.</strong>
+    연합 검색 에이전트입니다. 다섯 경로가 <strong>같은 온톨로지 한 벌</strong>을 참조하므로 서로의 답을 검증할 수 있습니다.</span></p>
+    <p style="margin-bottom:.5em;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">②</span><span><strong>무엇이 다른가.</strong>
     온톨로지를 <strong>기동 시 스키마 카드와 값 검증기를 만들어내는 실행 계층</strong>으로 씁니다.
-    그리고 SQL이 낸 수를 그래프로 다시 세어 대조하는 것을 절차로 삼았습니다.</p>
-    <p style="margin-bottom:0"><strong>③ 무엇을 측정했는가.</strong>
+    그리고 SQL이 낸 수를 그래프로 다시 세어 대조하는 것을 절차로 삼았습니다.</span></p>
+    <p style="margin-bottom:0;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">③</span><span><strong>무엇을 측정했는가.</strong>
     정답률 47/54, 평균 20.6초, 벡터 레그의 순기여 +3.5%p, 라운드 한계비용 +11.2초.
-    <strong>모두 실측입니다.</strong> 벡터 레그의 기여가 작다는 사실을 포함해, 유리하지 않은 측정 결과도 그대로 적었습니다(06-D).</p>
+    <strong>모두 실측입니다.</strong> 벡터 레그의 기여가 작다는 사실을 포함해, 유리하지 않은 측정 결과도 그대로 적었습니다(06-D).</span></p>
   </div>
 
   <table>
@@ -258,7 +258,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 이 네 가지는 SQL을 잘 쓰는 것으로 풀리지 않습니다. <strong>무엇을 세고 있는지에 대한 합의된 정의</strong>가 먼저 필요합니다.
 </div>
 
-<h3>1-1. 제공 데이터의 실제 모습</h3>
+<h3>01-1. 제공 데이터의 실제 모습</h3>
 
 <table>
   <caption>표 1. 주최측 제공 4종 마스터 — 적재 후 실측 (기준일 2026-08-21, 해외ETF 2026-08-22)</caption>
@@ -349,7 +349,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 <figcaption><b>그림 1.</b> 난점 ①③은 <em>정의</em>의 문제, ②는 <em>관계 부재</em>의 문제, ④는 <em>침묵하는 오류</em>의 문제입니다. ②는 SQL만으로는 첫 단계부터 불가능하므로 지식그래프가 필요하고, ①③④는 “무엇을 세는가”를 온톨로지에 명시해야 반복 가능해집니다.</figcaption>
 </figure>
 
-<h3>1-2. 가장 어려운 난점 — 정답을 확인할 방법이 없다</h3>
+<h3>01-2. 가장 어려운 난점 — 정답을 확인할 방법이 없다</h3>
 
 <p>주최측은 평가 질의와 정답을 공개하지 않습니다(과제설명서: 참고용 질의set 미포함).
 그래서 <strong>정답 키를 우리가 만들어야</strong> 합니다. 여기에 함정이 있습니다.
