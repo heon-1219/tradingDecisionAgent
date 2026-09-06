@@ -7,11 +7,13 @@
     --bg:#f6f7f9; --card:#fff; --ink:#16181d; --muted:#666e7a; --line:#e3e6ea;
     --accent:#1a56db; --ok:#0b7a3b; --warn:#a15c00; --bad:#b42318; --code:#f3f4f6;
     --sql:#0f766e; --graph:#7c3aed; --search:#b45309; --docs:#0369a1;
+    --rowhover:#f0f3f8;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#14161a; --card:#1b1e24; --ink:#e8eaed; --muted:#9aa3ad; --line:#2b3038;
             --accent:#7aa2f7; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --code:#22262d;
-            --sql:#5eead4; --graph:#c4b5fd; --search:#fcd34d; --docs:#7dd3fc; }
+            --sql:#5eead4; --graph:#c4b5fd; --search:#fcd34d; --docs:#7dd3fc;
+            --rowhover:#23272f; }
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
@@ -35,9 +37,25 @@
           background:transparent; color:var(--ink); cursor:pointer; font-weight:400; }
   .pill:hover { border-color:var(--accent); color:var(--accent); }
 
+  /* header + language toggle */
+  .head { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
+  .head > .headtext { flex:1 1 320px; min-width:0; }
+  .lang { display:flex; border:1px solid var(--line); border-radius:99px; overflow:hidden; flex:0 0 auto; }
+  .lang button { background:transparent; color:var(--muted); border:0; border-radius:0;
+                 padding:5px 13px; font-size:12px; font-weight:700; letter-spacing:.03em; }
+  .lang button[aria-pressed="true"] { background:var(--accent); color:#fff; }
+  .langnote { font-size:12px; color:var(--muted); border-left:3px solid var(--line);
+              padding:2px 0 2px 10px; margin:0 0 14px; }
+
+  /* tabs */
+  .tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin:0 0 14px; flex-wrap:wrap; }
+  .tabs button { background:transparent; color:var(--muted); border:0; border-bottom:2px solid transparent;
+                 border-radius:0; padding:9px 14px; font-weight:600; }
+  .tabs button[aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); }
+
   /* live bar */
-  .live { display:flex; align-items:center; gap:12px; font-size:13px; }
-  .dot { width:9px; height:9px; border-radius:50%; background:var(--accent); }
+  .live { display:flex; align-items:center; gap:12px; font-size:13px; flex-wrap:wrap; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--accent); flex:0 0 auto; }
   .dot.run { animation:pulse 1s ease-in-out infinite; }
   .dot.done { background:var(--ok); }
   .dot.err { background:var(--bad); }
@@ -76,74 +94,383 @@
   .s-answered{background:rgba(11,122,59,.12);color:var(--ok)}
   .s-cannot_confirm{background:rgba(161,92,0,.14);color:var(--warn)}
   .s-clarify{background:rgba(26,86,219,.12);color:var(--accent)}
+  .s-error{background:rgba(180,35,24,.14);color:var(--bad)}
+  .s-pending,.s-skipped{background:var(--code);color:var(--muted)}
+  .s-running{background:rgba(26,86,219,.12);color:var(--accent)}
   .hide { display:none; }
   details summary { cursor:pointer; font-size:12px; color:var(--muted); }
+
+  /* batch */
+  .bar { height:8px; border-radius:99px; background:var(--code); overflow:hidden; margin-top:9px; }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .25s ease; }
+  .stats { display:flex; flex-wrap:wrap; gap:8px; margin-top:2px; }
+  .stat { border:1px solid var(--line); border-radius:8px; padding:8px 12px; min-width:96px; background:var(--bg); }
+  .stat b { display:block; font-size:17px; font-variant-numeric:tabular-nums; }
+  .stat span { font-size:11px; color:var(--muted); }
+  .stat.alarm b { color:var(--bad); }
+  .tscroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:4px; }
+  table.res { border-collapse:collapse; width:100%; min-width:760px; font-size:13px; }
+  table.res th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+                 color:var(--muted); font-weight:700; padding:7px 9px; border-bottom:1px solid var(--line);
+                 white-space:nowrap; }
+  table.res td { padding:8px 9px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.res tr.rrow { cursor:pointer; }
+  table.res tr.rrow:hover td { background:var(--rowhover); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  td.num.slow { color:var(--bad); font-weight:700; }
+  td.qid { font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--muted); }
+  td.qtext { min-width:200px; max-width:320px; }
+  td.atext { min-width:200px; max-width:340px; color:var(--muted); }
+  .det { background:var(--bg); }
+  .det h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted);
+            margin:12px 0 0; font-weight:700; }
+  .det h3:first-child { margin-top:0; }
+  .caret { color:var(--muted); font-size:11px; }
+  .runline { font-size:13px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .runline .now { color:var(--muted); }
 </style>
 
 <div class="wrap">
-  <h1>금융상품 Agent 테스트 콘솔</h1>
-  <p class="sub">질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며,
-     화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.</p>
+  <div class="head">
+    <div class="headtext">
+      <h1 data-i18n="title">금융상품 Agent 테스트 콘솔</h1>
+      <p class="sub" data-i18n="sub">질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며, 화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.</p>
+    </div>
+    <div class="lang" role="group" aria-label="Language">
+      <button id="lang-ko" aria-pressed="true">KO</button>
+      <button id="lang-en" aria-pressed="false">EN</button>
+    </div>
+  </div>
 
-  <div class="card">
-    <label for="q">질문</label>
-    <textarea id="q" placeholder="예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"></textarea>
-    <div class="row">
-      <div style="max-width:150px">
-        <label for="qid">question_id</label>
-        <input type="text" id="qid" value="T-001">
+  <p class="langnote hide" id="langnote">Answers are generated in Korean by design — this API is judged on Korean queries. Only the interface is translated.</p>
+
+  <div class="tabs" role="tablist">
+    <button id="tab-single" role="tab" aria-selected="true" data-i18n="tab_single">단건 실행</button>
+    <button id="tab-batch" role="tab" aria-selected="false" data-i18n="tab_batch">일괄 검사</button>
+  </div>
+
+  <!-- ───────────────────────── single ───────────────────────── -->
+  <div id="panel-single">
+    <div class="card">
+      <label for="q" data-i18n="lbl_question">질문</label>
+      <textarea id="q" data-i18n-ph="ph_question" placeholder="예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"></textarea>
+      <div class="row">
+        <div style="max-width:150px">
+          <label for="qid">question_id</label>
+          <input type="text" id="qid" value="T-001">
+        </div>
+        <button id="go" data-i18n="btn_go">질문 보내기</button>
+        <button class="ghost" id="stop" disabled data-i18n="btn_stop">중단</button>
+        <button class="ghost" id="clear" data-i18n="btn_clear">지우기</button>
       </div>
-      <button id="go">질문 보내기</button>
-      <button class="ghost" id="stop" disabled>중단</button>
-      <button class="ghost" id="clear">지우기</button>
+      <div class="pills" id="samples"></div>
     </div>
-    <div class="pills" id="samples"></div>
+
+    <div class="card hide" id="livecard">
+      <div class="live">
+        <span class="dot run" id="dot"></span>
+        <strong id="phase">시작</strong>
+        <span class="clock" id="clock">0.0초</span>
+        <span class="badge" id="counts"></span>
+      </div>
+    </div>
+
+    <div class="card hide" id="tlcard">
+      <h2 data-i18n="h_progress">진행 과정</h2>
+      <ul class="tl" id="tl"></ul>
+    </div>
+
+    <div id="out"></div>
   </div>
 
-  <div class="card hide" id="livecard">
-    <div class="live">
-      <span class="dot run" id="dot"></span>
-      <strong id="phase">시작</strong>
-      <span class="clock" id="clock">0.0초</span>
-      <span class="badge" id="counts"></span>
+  <!-- ───────────────────────── batch ───────────────────────── -->
+  <div id="panel-batch" class="hide">
+    <div class="card">
+      <label for="bq" data-i18n="lbl_batch_input">질문 목록 — 한 줄에 하나. <code>ID | 질문</code> 형식이면 그 ID를 씁니다.</label>
+      <textarea id="bq" rows="7" data-i18n-ph="ph_batch" placeholder="G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"></textarea>
+      <div class="row">
+        <button class="ghost" id="load-gt" data-i18n="btn_load_gt">평가셋 54문항 불러오기</button>
+        <button class="ghost" id="load-p12" data-i18n="btn_load_p12">주최측 예시 8문항 불러오기</button>
+        <button class="ghost" id="clear-list" data-i18n="btn_clear_list">목록 비우기</button>
+      </div>
+      <div class="row">
+        <button id="brun" data-i18n="btn_run_batch">일괄 실행</button>
+        <button class="ghost" id="bstop" disabled data-i18n="btn_stop_batch">중단</button>
+        <span class="clock" id="bcount"></span>
+      </div>
+      <p class="meta2" data-i18n="batch_help">문항은 채점 조건과 같게 <b>하나씩 순차로</b> 실행합니다. 한 문항이 실패해도 나머지는 계속 실행됩니다.</p>
+    </div>
+
+    <div class="card hide" id="bprogcard">
+      <div class="runline">
+        <span class="dot" id="bdot"></span>
+        <strong id="bphase"></strong>
+        <span class="now" id="bnow"></span>
+        <span class="clock" id="bclock"></span>
+      </div>
+      <div class="bar"><i id="bfill"></i></div>
+    </div>
+
+    <div class="card hide" id="bstatcard">
+      <h2 data-i18n="h_summary">요약 통계</h2>
+      <div class="stats" id="bstats"></div>
+    </div>
+
+    <div class="card hide" id="brescard">
+      <div class="row" style="margin:0 0 8px; justify-content:space-between">
+        <h2 style="margin:0" data-i18n="h_results">결과</h2>
+        <div style="display:flex; gap:8px">
+          <button class="ghost" id="exp-json" data-i18n="btn_export_json">JSON 내려받기</button>
+          <button class="ghost" id="exp-csv" data-i18n="btn_export_csv">CSV 내려받기</button>
+        </div>
+      </div>
+      <div class="tscroll">
+        <table class="res">
+          <thead><tr>
+            <th data-i18n="th_id">문항ID</th>
+            <th data-i18n="th_question">질문</th>
+            <th data-i18n="th_time">소요</th>
+            <th data-i18n="th_status">status</th>
+            <th data-i18n="th_tools">도구</th>
+            <th data-i18n="th_answer">답변 요약</th>
+          </tr></thead>
+          <tbody id="btbody"></tbody>
+        </table>
+      </div>
+      <p class="meta2" data-i18n="row_hint">행을 클릭하면 answer · retrieved_context · think_trace 전문이 펼쳐집니다.</p>
     </div>
   </div>
-
-  <div class="card hide" id="tlcard">
-    <h2>진행 과정</h2>
-    <ul class="tl" id="tl"></ul>
-  </div>
-
-  <div id="out"></div>
 </div>
 
 <script>
-const SAMPLES = [
-  ["쉬움","현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
-  ["쉬움","삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
-  ["보통","국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
-  ["보통","환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
-  ["어려움","삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
-  ["어려움","국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
-  ["어려움","에코프로 자회사를 편입한 ETF를 알려줘"],
-  ["답변불가","TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
-  ["답변불가","KODEX AI로봇 ETF의 총보수는?"],
-];
+"use strict";
+
+/* ─────────────────────────── i18n ─────────────────────────── */
+const I18N = {
+  ko: {
+    title: "금융상품 Agent 테스트 콘솔",
+    sub: '질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며, 화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.',
+    tab_single: "단건 실행", tab_batch: "일괄 검사",
+    lbl_question: "질문",
+    ph_question: "예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
+    btn_go: "질문 보내기", btn_stop: "중단", btn_clear: "지우기",
+    h_progress: "진행 과정", h_answer: "답변", h_context: "근거 (retrieved_context)",
+    h_raw: "채점 서버가 받는 원본 JSON", sum_expand: "펼치기",
+    sum_prompt: "프롬프트에 주입된 블록 보기",
+    lbl_batch_input: '질문 목록 — 한 줄에 하나. <code>ID | 질문</code> 형식이면 그 ID를 씁니다.',
+    ph_batch: "G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
+    btn_load_gt: "평가셋 54문항 불러오기", btn_load_p12: "주최측 예시 8문항 불러오기",
+    btn_clear_list: "목록 비우기", btn_run_batch: "일괄 실행", btn_stop_batch: "중단",
+    batch_help: "문항은 채점 조건과 같게 <b>하나씩 순차로</b> 실행합니다. 한 문항이 실패해도 나머지는 계속 실행됩니다.",
+    h_summary: "요약 통계", h_results: "결과",
+    btn_export_json: "JSON 내려받기", btn_export_csv: "CSV 내려받기",
+    th_id: "문항ID", th_question: "질문", th_time: "소요", th_status: "status",
+    th_tools: "도구", th_answer: "답변 요약",
+    row_hint: "행을 클릭하면 answer · retrieved_context · think_trace 전문이 펼쳐집니다.",
+    st_total: "전체", st_done: "완료", st_avg: "평균 소요", st_max: "최대 소요", st_over60: "60초 초과",
+    n_items: n => `${n}개 문항`,
+    running: "실행 중", finished: "완료", stopped: "중단됨", waiting: "대기",
+    of: (i, n) => `${i} / ${n}`,
+    sec: t => t.toFixed(1) + "초",
+    phase_start: "시작", phase_conn: "연결 중", phase_pre: "사전 분석", phase_llm: "LLM 추론",
+    phase_tool: n => `도구 실행 · ${n}`,
+    tools_n: (t, e) => `도구 ${t}회` + (e ? ` · 오류 ${e}` : ""),
+    pre_title: "사전 분석", pre_desc: "LLM 호출 전에 결정적으로 계산한 것",
+    pre_none: "특별한 신호 없음",
+    pre_mentions: "상품명 후보", pre_unresolved: "미해결", pre_invalid: "온톨로지 위반",
+    b_called: "호출", b_result: "결과", b_error: "오류",
+    evidence: "근거",
+    stream_lost: "스트림 연결이 끊어졌습니다. 서버가 떠 있는지 확인하세요.",
+    no_context: "(없음)",
+    tag_easy: "쉬움", tag_med: "보통", tag_hard: "어려움", tag_no: "답변불가",
+    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace",
+    empty_list: "실행할 질문이 없습니다.",
+    round: r => `라운드 ${r}`,
+  },
+  en: {
+    title: "Financial Product Agent — Test Console",
+    sub: 'Shows every step a question takes on its way to an answer. Same pipeline as the graded <code>/answer</code>; the display is observed only through <code>/answer/stream</code> — nothing reaching the model changes.',
+    tab_single: "Single run", tab_batch: "Batch run",
+    lbl_question: "Question",
+    ph_question: "e.g. Which 3 domestic ETFs holding Samsung Electronics have the largest net assets?",
+    btn_go: "Send question", btn_stop: "Stop", btn_clear: "Clear",
+    h_progress: "Progress", h_answer: "Answer", h_context: "Evidence (retrieved_context)",
+    h_raw: "Raw JSON the grading server receives", sum_expand: "Expand",
+    sum_prompt: "Show the block injected into the prompt",
+    lbl_batch_input: 'Questions — one per line. Use <code>ID | question</code> to set the id.',
+    ph_batch: "G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
+    btn_load_gt: "Load eval set (54)", btn_load_p12: "Load organizer examples (8)",
+    btn_clear_list: "Clear list", btn_run_batch: "Run batch", btn_stop_batch: "Stop",
+    batch_help: "Questions run <b>strictly one at a time</b>, matching the grading conditions. A failing question does not stop the rest.",
+    h_summary: "Summary", h_results: "Results",
+    btn_export_json: "Download JSON", btn_export_csv: "Download CSV",
+    th_id: "ID", th_question: "Question", th_time: "Time", th_status: "Status",
+    th_tools: "Tools", th_answer: "Answer summary",
+    row_hint: "Click a row to expand the full answer, retrieved_context and think_trace.",
+    st_total: "Total", st_done: "Done", st_avg: "Avg time", st_max: "Max time", st_over60: "Over 60s",
+    n_items: n => `${n} question${n === 1 ? "" : "s"}`,
+    running: "Running", finished: "Finished", stopped: "Stopped", waiting: "Waiting",
+    of: (i, n) => `${i} / ${n}`,
+    sec: t => t.toFixed(1) + "s",
+    phase_start: "Starting", phase_conn: "Connecting", phase_pre: "Pre-analysis", phase_llm: "LLM reasoning",
+    phase_tool: n => `Running tool · ${n}`,
+    tools_n: (t, e) => `${t} tool call${t === 1 ? "" : "s"}` + (e ? ` · ${e} error${e === 1 ? "" : "s"}` : ""),
+    pre_title: "Pre-analysis", pre_desc: "computed deterministically before the LLM is called",
+    pre_none: "no notable signal",
+    pre_mentions: "product-name candidates", pre_unresolved: "unresolved", pre_invalid: "ontology violation",
+    b_called: "call", b_result: "result", b_error: "error",
+    evidence: "evidence",
+    stream_lost: "The stream was dropped. Check that the server is still running.",
+    no_context: "(none)",
+    tag_easy: "Easy", tag_med: "Medium", tag_hard: "Hard", tag_no: "Unanswerable",
+    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace",
+    empty_list: "No questions to run.",
+    round: r => `Round ${r}`,
+  },
+};
+
+let LANG = "ko";
+const T = k => (I18N[LANG][k] !== undefined ? I18N[LANG][k] : I18N.ko[k]);
+
+function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
 
 const $ = s => document.querySelector(s);
-const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const fmt = t => t.toFixed(1) + "초";
+const $$ = s => Array.prototype.slice.call(document.querySelectorAll(s));
+const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const fmt = t => T("sec")(Number(t) || 0);
+
+function applyLang(lang) {
+  LANG = (lang === "en") ? "en" : "ko";
+  lsSet("finagent.lang", LANG);
+  document.documentElement.lang = LANG;
+  document.title = I18N[LANG].title;
+  $$("[data-i18n]").forEach(el => {
+    const v = I18N[LANG][el.getAttribute("data-i18n")];
+    if (typeof v === "string") el.innerHTML = v;
+  });
+  $$("[data-i18n-ph]").forEach(el => {
+    const v = I18N[LANG][el.getAttribute("data-i18n-ph")];
+    if (typeof v === "string") el.placeholder = v;
+  });
+  $("#lang-ko").setAttribute("aria-pressed", String(LANG === "ko"));
+  $("#lang-en").setAttribute("aria-pressed", String(LANG === "en"));
+  $("#langnote").classList.toggle("hide", LANG !== "en");
+  renderSamples();
+  renderBatchCount();
+  renderStats();
+  renderTable();
+}
+
+/* ─────────────────────────── question sets ─────────────────────────── */
+const SAMPLES = [
+  ["tag_easy", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
+  ["tag_easy", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
+  ["tag_med", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
+  ["tag_med", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
+  ["tag_hard", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
+  ["tag_hard", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
+  ["tag_hard", "에코프로 자회사를 편입한 ETF를 알려줘"],
+  ["tag_no", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
+  ["tag_no", "KODEX AI로봇 ETF의 총보수는?"],
+];
+
+/* Organizer's task description, p12 — 5 difficulty examples + 3 unanswerable examples. */
+const SET_P12 = [
+  ["P-001", "현재 판매 가능한 원화채권 중 AA- 이상 종목 알려줘"],
+  ["P-002", "국민성장펀드의 구조와 투자전략 동향 등 찾아서 알려줘"],
+  ["P-003", "캠브리콘이 편입된 중국 반도체 ETF를 알려줘"],
+  ["P-004", "최근 6개월 동안 우주항공 테마와 연결 이력이 있는 관련 ETF를 정리해줘"],
+  ["P-005", "에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘"],
+  ["P-006", "신용등급 AAAA인 채권 찾아줘"],
+  ["P-007", "Kimi 관련 투자 상품 있어?"],
+  ["P-008", "KODEX AI로봇 ETF 정보 알려줘"],
+];
+
+/* Snapshot of data/eval/groundtruth.jsonl (question_id + question), embedded on purpose:
+   the grading server must not grow a route that reads evaluation files at runtime. */
+const SET_GT = [
+  ["G-001", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
+  ["G-002", "구매 가능한 원화채권 중 신용등급 AAA이고 만기가 2027년인 종목 수를 알려줘"],
+  ["G-003", "매수수익률이 실제로 수록된 채권 중 세후 운용수익률이 가장 높은 종목의 이름과 수익률은?"],
+  ["G-004", "국내 상장 ETF 중 순자산이 가장 큰 상품 3개의 이름을 알려줘"],
+  ["G-005", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
+  ["G-006", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
+  ["G-007", "미국 증시에 상장된 주식형 ETF 중 총보수가 가장 낮은 상품을 모두 알려줘"],
+  ["G-008", "VanEck China Semiconductor ETF의 총보수는 몇 퍼센트인가요?"],
+  ["G-009", "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"],
+  ["G-010", "판매중인 공모 주식형 펀드 중 1년 수익률이 가장 높은 펀드의 이름은?"],
+  ["G-011", "국민성장펀드는 몇 개의 클래스로 판매되고 있나요?"],
+  ["G-012", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
+  ["G-013", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
+  ["G-014", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?"],
+  ["G-015", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
+  ["G-016", "신용등급 AAAA인 채권을 찾아줘"],
+  ["G-017", "위험등급 8등급인 국내 ETF를 알려줘"],
+  ["G-018", "Kimi 관련 투자상품이 있나요?"],
+  ["G-019", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
+  ["G-020", "삼성전자를 보유한 공모펀드를 알려줘"],
+  ["G-021", "KODEX AI로봇 ETF 정보 알려줘"],
+  ["G-022", "TIGER 양자컴퓨팅커버드콜 ETF의 순자산을 알려줘"],
+  ["G-023", "해외 ETF 중 인버스나 숏 전략을 사용하는 상품은 몇 개인가요?"],
+  ["G-024", "구매 가능한 원화채권 가운데 신용등급이 A0인 채권은 서로 다른 종목(종목코드) 기준으로 몇 개인가요?"],
+  ["G-025", "미래에셋미국배당커버드콜액티브증권자투자신탁(주식)은 환헤지형(H)과 환노출형(UH)을 합쳐 몇 개 클래스가 판매되고 있나요?"],
+  ["G-026", "국내 ETF 중 분배금을 매월 지급하는 월배당 상품은 몇 개인가요?"],
+  ["G-027", "판매중인 공모펀드 중 위험등급이 1등급인 상품은 몇 개인가요?"],
+  ["G-028", "구매 가능한 원화채권 중 표면금리가 가장 낮은 종목의 이름은 무엇인가요? 표면금리가 0%로 기재된 종목은 금리 근거가 없는 것이므로 제외하고 알려주세요."],
+  ["G-029", "국내 ETF 중 총보수가 가장 낮은 상품 3개를 알려줘. 총보수가 0이거나 기재되지 않은 상품은 제외해줘."],
+  ["G-030", "국내 ETF 중 분배금 수익률(분배율)이 가장 높은 상품 3개의 이름을 알려줘"],
+  ["G-031", "판매중인 공모펀드 중 순자산 규모가 가장 큰 상품 3개의 이름을 알려줘"],
+  ["G-032", "해외 ETF 중 채권형 상품만 놓고 볼 때 운용규모(AUM)가 가장 큰 3개는 무엇인가요?"],
+  ["G-033", "TIGER 미국나스닥100을 운용하는 자산운용사는 어디인가요?"],
+  ["G-034", "Invesco QQQ Trust, Series 1의 운용사 이름을 알려줘"],
+  ["G-035", "한국도로공사고속도로건설채권 634(변)의 신용등급은 무엇인가요?"],
+  ["G-036", "신한글로벌탄소중립솔루션증권투자신탁(H)[주식](종류A-e)의 벤치마크 지수는 무엇인가요?"],
+  ["G-037", "SK하이닉스를 편입하고 있는 국내 ETF는 몇 개인가요?"],
+  ["G-038", "두산에너빌리티를 보유한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
+  ["G-039", "국내 ETF 가운데 삼성전자 비중이 가장 높은 상품은 무엇인가요?"],
+  ["G-040", "엔비디아를 편입한 해외 ETF를 알려줘"],
+  ["G-041", "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?"],
+  ["G-042", "판매중인 국내 ETF와 판매중인 공모펀드는 각각 몇 개인가요?"],
+  ["G-043", "판매중인 국내 ETF와 공모펀드를 통틀어 위험등급 1등급으로 분류된 상품은 모두 몇 개인가요?"],
+  ["G-044", "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?"],
+  ["G-045", "KODEX 200의 2027년 말 예상 순자산 규모는 얼마인가요?"],
+  ["G-046", "판매중인 공모펀드 중 내년에 수익률이 가장 높을 것으로 예상되는 펀드는 무엇인가요?"],
+  ["G-047", "구매 가능한 원화채권의 6개월 뒤 예상 매수수익률을 알려줘"],
+  ["G-048", "KODEX 우주항공레버리지 ETF의 순자산을 알려줘"],
+  ["G-049", "미래에셋탄소중립그린뉴딜증권자투자신탁의 최근 1년 수익률을 알려줘"],
+  ["G-050", "신용등급이 A1인 원화채권은 몇 개인가요?"],
+  ["G-051", "위험등급 0등급인 공모펀드를 알려줘"],
+  ["G-052", "쿠팡을 편입한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
+  ["G-053", "야놀자를 보유한 국내 ETF가 있나요?"],
+  ["G-054", "TIGER 미국양자컴퓨팅TOP10의 총보수를 알려줘"],
+];
 
 const pills = $("#samples");
-SAMPLES.forEach(([tag, text]) => {
-  const b = document.createElement("button");
-  b.className = "pill";
-  b.textContent = `${tag} · ${text.length > 32 ? text.slice(0,32)+"…" : text}`;
-  b.title = text;
-  b.onclick = () => { $("#q").value = text; };
-  pills.appendChild(b);
-});
+function renderSamples() {
+  pills.innerHTML = "";
+  SAMPLES.forEach(([tag, text]) => {
+    const b = document.createElement("button");
+    b.className = "pill";
+    b.textContent = T(tag) + " · " + (text.length > 32 ? text.slice(0, 32) + "…" : text);
+    b.title = text;
+    b.onclick = () => { $("#q").value = text; };
+    pills.appendChild(b);
+  });
+}
 
+/* ─────────────────────────── tabs ─────────────────────────── */
+function selectTab(which) {
+  const single = which === "single";
+  $("#tab-single").setAttribute("aria-selected", String(single));
+  $("#tab-batch").setAttribute("aria-selected", String(!single));
+  $("#panel-single").classList.toggle("hide", !single);
+  $("#panel-batch").classList.toggle("hide", single);
+}
+$("#tab-single").onclick = () => selectTab("single");
+$("#tab-batch").onclick = () => selectTab("batch");
+
+/* ═══════════════════════════ single run (EventSource) ═══════════════════════════ */
 let es = null, t0 = 0, timer = null, nTools = 0, nErr = 0, lastRound = 0;
 
 function li(kind, at, html) {
@@ -160,8 +487,8 @@ function argsHtml(name, args) {
   if (args.sparql) return `<pre>${esc(args.sparql.trim())}</pre>`;
   const parts = Object.entries(args)
     .filter(([k]) => k !== "purpose")
-    .map(([k,v]) => `${esc(k)}=${esc(typeof v === "object" ? JSON.stringify(v) : v)}`);
-  const purpose = args.purpose ? `<div class="meta2">의도: ${esc(args.purpose)}</div>` : "";
+    .map(([k, v]) => `${esc(k)}=${esc(typeof v === "object" ? JSON.stringify(v) : v)}`);
+  const purpose = args.purpose ? `<div class="meta2">${LANG === "en" ? "intent" : "의도"}: ${esc(args.purpose)}</div>` : "";
   return `<pre>${parts.join("  ·  ")}</pre>${purpose}`;
 }
 
@@ -169,47 +496,47 @@ function onEvent(e) {
   const d = JSON.parse(e.data);
   const at = d.elapsed;
   if (d.type === "start") {
-    $("#phase").textContent = "사전 분석";
+    $("#phase").textContent = T("phase_pre");
   } else if (d.type === "pre_analysis") {
     const bits = [];
-    if (d.mentions?.length)   bits.push(`상품명 후보 <b>${esc(d.mentions.join(", "))}</b>`);
-    if (d.unresolved?.length) bits.push(`<span class="warnline">미해결 ${esc(d.unresolved.join(", "))}</span>`);
-    if (d.invalid?.length)    bits.push(`<span class="warnline">온톨로지 위반 ${esc(d.invalid.join(", "))}</span>`);
+    if (d.mentions && d.mentions.length) bits.push(`${T("pre_mentions")} <b>${esc(d.mentions.join(", "))}</b>`);
+    if (d.unresolved && d.unresolved.length) bits.push(`<span class="warnline">${T("pre_unresolved")} ${esc(d.unresolved.join(", "))}</span>`);
+    if (d.invalid && d.invalid.length) bits.push(`<span class="warnline">${T("pre_invalid")} ${esc(d.invalid.join(", "))}</span>`);
     li("pre", at,
-      `<b>사전 분석</b> — LLM 호출 전에 결정적으로 계산한 것` +
-      (bits.length ? `<div class="meta2">${bits.join(" · ")}</div>` : `<div class="meta2">특별한 신호 없음</div>`) +
-      `<details><summary>프롬프트에 주입된 블록 보기</summary><pre>${esc(d.text)}</pre></details>`);
-    $("#phase").textContent = "LLM 추론";
+      `<b>${T("pre_title")}</b> — ${T("pre_desc")}` +
+      (bits.length ? `<div class="meta2">${bits.join(" · ")}</div>` : `<div class="meta2">${T("pre_none")}</div>`) +
+      `<details><summary>${T("sum_prompt")}</summary><pre>${esc(d.text)}</pre></details>`);
+    $("#phase").textContent = T("phase_llm");
   } else if (d.type === "tool_call") {
     nTools++;
-    if (d.round !== lastRound) { lastRound = d.round; li("round", at, `<b>라운드 ${d.round}</b>`); }
+    if (d.round !== lastRound) { lastRound = d.round; li("round", at, `<b>${T("round")(d.round)}</b>`); }
     li("tool", at, `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
-        <span class="badge">호출</span>${argsHtml(d.name, d.args)}</div>`);
-    $("#phase").textContent = `도구 실행 · ${d.name}`;
+        <span class="badge">${T("b_called")}</span>${argsHtml(d.name, d.args)}</div>`);
+    $("#phase").textContent = T("phase_tool")(d.name);
   } else if (d.type === "tool_result") {
     if (!d.ok) nErr++;
     const ev = d.evidence;
-    const meta = ev ? `<div class="meta2">근거: ${esc(ev.kind)}${ev.table ? " · " + esc(ev.table) : ""}${ev.base_date ? " · 기준일 " + esc(ev.base_date) : ""}${ev.row_count != null ? " · " + ev.row_count + "건" : ""}</div>` : "";
+    const meta = ev ? `<div class="meta2">${T("evidence")}: ${esc(ev.kind)}${ev.table ? " · " + esc(ev.table) : ""}${ev.base_date ? " · " + (LANG === "en" ? "as of " : "기준일 ") + esc(ev.base_date) : ""}${ev.row_count != null ? " · " + ev.row_count + (LANG === "en" ? " rows" : "건") : ""}</div>` : "";
     li(d.ok ? "tool" : "err", at,
       `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
-        <span class="badge ${d.ok ? "" : "bad"}">${d.ok ? "결과" : "오류"}</span>
-        <span class="badge">${d.seconds != null ? d.seconds.toFixed(2)+"s" : ""}</span>
+        <span class="badge ${d.ok ? "" : "bad"}">${d.ok ? T("b_result") : T("b_error")}</span>
+        <span class="badge">${d.seconds != null ? d.seconds.toFixed(2) + "s" : ""}</span>
         <pre class="out">${esc(d.content)}</pre>${meta}</div>`);
-    $("#phase").textContent = "LLM 추론";
+    $("#phase").textContent = T("phase_llm");
   } else if (d.type === "step") {
     const t = d.text || "";
     // tool call/result lines are already rendered richly above; keep the rest
     if (/^라운드 \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
     const fix = /보정|명시|경고/.test(t);
     const err = /오류|초과|거부|실패/.test(t);
-    li(err ? "err" : (fix ? "fix" : "step"), at, `<span class="${err?"":(fix?"warnline":"")}">${esc(t)}</span>`);
+    li(err ? "err" : (fix ? "fix" : "step"), at, `<span class="${err ? "" : (fix ? "warnline" : "")}">${esc(t)}</span>`);
   } else if (d.type === "done") {
     finish(d);
   } else if (d.type === "error") {
     li("err", at, `<span style="color:var(--bad)">${esc(d.message)}</span>`);
     stop("err");
   }
-  $("#counts").textContent = `도구 ${nTools}회${nErr ? " · 오류 " + nErr : ""}`;
+  $("#counts").textContent = T("tools_n")(nTools, nErr);
   window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
 }
 
@@ -217,18 +544,18 @@ function finish(d) {
   const r = d.response || {};
   $("#out").innerHTML = `
     <div class="card">
-      <h2>답변</h2>
+      <h2>${T("h_answer")}</h2>
       <div><span class="status s-${esc(d.status)}">${esc(d.status)}</span>
            <span class="badge">${fmt(d.elapsed)}</span></div>
       <div class="answer" style="margin-top:9px">${esc(r.answer)}</div>
     </div>
     <div class="card">
-      <h2>근거 (retrieved_context)</h2>
-      <pre>${esc(r.retrieved_context || "(없음)")}</pre>
+      <h2>${T("h_context")}</h2>
+      <pre>${esc(r.retrieved_context || T("no_context"))}</pre>
     </div>
     <div class="card">
-      <h2>채점 서버가 받는 원본 JSON</h2>
-      <details><summary>펼치기</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
+      <h2>${T("h_raw")}</h2>
+      <details><summary>${T("sum_expand")}</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
     </div>`;
   stop("done");
 }
@@ -237,7 +564,7 @@ function stop(state) {
   if (es) { es.close(); es = null; }
   clearInterval(timer);
   $("#dot").className = "dot " + (state || "done");
-  $("#phase").textContent = state === "err" ? "중단됨" : "완료";
+  $("#phase").textContent = state === "err" ? T("stopped") : T("finished");
   $("#go").disabled = false;
   $("#stop").disabled = true;
 }
@@ -249,19 +576,282 @@ function ask() {
   $("#go").disabled = true; $("#stop").disabled = false;
   $("#tl").innerHTML = ""; $("#out").innerHTML = "";
   $("#livecard").classList.remove("hide"); $("#tlcard").classList.remove("hide");
-  $("#dot").className = "dot run"; $("#phase").textContent = "연결 중";
+  $("#dot").className = "dot run"; $("#phase").textContent = T("phase_conn");
   nTools = 0; nErr = 0; lastRound = 0; t0 = performance.now();
   clearInterval(timer);
-  timer = setInterval(() => { $("#clock").textContent = fmt((performance.now()-t0)/1000); }, 100);
+  timer = setInterval(() => { $("#clock").textContent = fmt((performance.now() - t0) / 1000); }, 100);
 
   es = new EventSource(`/answer/stream?question_id=${encodeURIComponent(qid)}&question=${encodeURIComponent(q)}`);
   es.onmessage = onEvent;
-  es.onerror = () => { if (es) { li("err", null, "스트림 연결이 끊어졌습니다. 서버가 떠 있는지 확인하세요."); stop("err"); } };
+  es.onerror = () => { if (es) { li("err", null, T("stream_lost")); stop("err"); } };
 }
 
 $("#go").onclick = ask;
 $("#stop").onclick = () => stop("err");
-$("#clear").onclick = () => { $("#q").value=""; $("#out").innerHTML=""; $("#tl").innerHTML="";
-                              $("#livecard").classList.add("hide"); $("#tlcard").classList.add("hide"); };
+$("#clear").onclick = () => {
+  $("#q").value = ""; $("#out").innerHTML = ""; $("#tl").innerHTML = "";
+  $("#livecard").classList.add("hide"); $("#tlcard").classList.add("hide");
+};
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); });
+
+/* ═══════════════════════════ batch run (fetch + SSE) ═══════════════════════════ */
+let RESULTS = [];          // one entry per parsed question
+let batchAbort = null;     // AbortController for the in-flight question
+let batchRunning = false;
+let batchStopped = false;
+let btimer = null, bt0 = 0;
+
+function setList(rows) {
+  $("#bq").value = rows.map(([id, q]) => `${id} | ${q}`).join("\n");
+  renderBatchCount();
+}
+$("#load-gt").onclick = () => setList(SET_GT);
+$("#load-p12").onclick = () => setList(SET_P12);
+$("#clear-list").onclick = () => { $("#bq").value = ""; renderBatchCount(); };
+$("#bq").addEventListener("input", renderBatchCount);
+
+function parseList() {
+  const out = [];
+  const lines = $("#bq").value.split(/\r?\n/);
+  let auto = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^([A-Za-z][A-Za-z0-9_.-]{0,23})\s*[|\t]\s*(.+)$/);
+    if (m && m[2].trim()) out.push({ id: m[1], q: m[2].trim() });
+    else out.push({ id: "B-" + String(++auto).padStart(3, "0"), q: line });
+  }
+  return out;
+}
+
+function renderBatchCount() {
+  $("#bcount").textContent = T("n_items")(parseList().length);
+}
+
+/* Reads one /answer/stream response to completion.  Rejects only on network/abort. */
+async function runOne(item, signal) {
+  const url = `/answer/stream?question_id=${encodeURIComponent(item.id)}&question=${encodeURIComponent(item.q)}`;
+  const res = await fetch(url, { signal, headers: { Accept: "text/event-stream" } });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder("utf-8");
+  let buf = "", tools = 0, toolErrors = 0, status = null, response = null, streamError = null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let cut;
+      while ((cut = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        const data = frame.split("\n")
+          .filter(l => l.slice(0, 5) === "data:")
+          .map(l => l.slice(5).trim())
+          .join("\n");
+        if (!data) continue;               // ": keep-alive" comment frames
+        let d;
+        try { d = JSON.parse(data); } catch (e) { continue; }
+        if (d.type === "tool_call") tools++;
+        else if (d.type === "tool_result") { if (!d.ok) toolErrors++; }
+        else if (d.type === "done") { status = d.status; response = d.response || null; }
+        else if (d.type === "error") streamError = d.message || "stream error";
+      }
+    }
+  } finally {
+    // cancel() returns a promise; on an aborted body it rejects, so swallow it asynchronously
+    // or it surfaces as an uncaught rejection in the console.
+    try { const p = reader.cancel(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* already closed */ }
+  }
+  return { tools, toolErrors, status, response, streamError };
+}
+
+async function runBatch() {
+  const items = parseList();
+  if (!items.length) { alert(T("empty_list")); return; }
+
+  batchRunning = true; batchStopped = false;
+  RESULTS = items.map(it => ({
+    question_id: it.id, question: it.q, status: "pending", seconds: null,
+    tool_calls: 0, tool_errors: 0, answer: "", retrieved_context: "", think_trace: "", error: "",
+  }));
+
+  $("#brun").disabled = true; $("#bstop").disabled = false;
+  $("#bprogcard").classList.remove("hide");
+  $("#bstatcard").classList.remove("hide");
+  $("#brescard").classList.remove("hide");
+  $("#bdot").className = "dot run";
+  renderStats(); renderTable();
+
+  for (let i = 0; i < items.length; i++) {
+    if (batchStopped) break;
+    const it = items[i], row = RESULTS[i];
+    row.status = "running";
+    $("#bphase").textContent = T("running");
+    $("#bnow").textContent = T("of")(i + 1, items.length) + " · " + it.id;
+    $("#bfill").style.width = (i / items.length * 100).toFixed(1) + "%";
+    bt0 = performance.now();
+    clearInterval(btimer);
+    btimer = setInterval(() => { $("#bclock").textContent = fmt((performance.now() - bt0) / 1000); }, 100);
+    renderTable();
+
+    batchAbort = new AbortController();
+    const t = performance.now();
+    try {
+      const r = await runOne(it, batchAbort.signal);
+      row.seconds = (performance.now() - t) / 1000;
+      row.tool_calls = r.tools;
+      row.tool_errors = r.toolErrors;
+      if (r.response) {
+        row.answer = r.response.answer || "";
+        row.retrieved_context = r.response.retrieved_context || "";
+        row.think_trace = r.response.think_trace || "";
+      }
+      if (r.status) row.status = r.status;
+      else { row.status = "error"; row.error = r.streamError || "no done event"; }
+      if (r.streamError && r.status) row.error = r.streamError;
+    } catch (err) {
+      // One failure must never stop the run.
+      row.seconds = (performance.now() - t) / 1000;
+      if (batchStopped || (err && err.name === "AbortError")) { row.status = "skipped"; row.error = T("stopped"); }
+      else { row.status = "error"; row.error = String((err && err.message) || err); }
+    } finally {
+      batchAbort = null;
+    }
+    clearInterval(btimer);
+    $("#bclock").textContent = "";
+    renderStats(); renderTable();
+    // Sequential by design: a short gap keeps us clear of the CLOVA rate limit.
+    if (!batchStopped && i < items.length - 1) await new Promise(r => setTimeout(r, 400));
+  }
+
+  if (batchStopped) RESULTS.forEach(r => { if (r.status === "pending" || r.status === "running") r.status = "skipped"; });
+  $("#bfill").style.width = "100%";
+  $("#bdot").className = "dot " + (batchStopped ? "err" : "done");
+  $("#bphase").textContent = batchStopped ? T("stopped") : T("finished");
+  $("#bnow").textContent = T("of")(RESULTS.filter(r => r.status !== "pending" && r.status !== "skipped").length, RESULTS.length);
+  $("#brun").disabled = false; $("#bstop").disabled = true;
+  batchRunning = false;
+  clearInterval(btimer); $("#bclock").textContent = "";
+  renderStats(); renderTable();
+}
+
+function stopBatch() {
+  if (!batchRunning) return;
+  batchStopped = true;
+  $("#bstop").disabled = true;
+  if (batchAbort) { try { batchAbort.abort(); } catch (e) { /* noop */ } }
+}
+$("#brun").onclick = () => { runBatch().catch(e => { console.error(e); alert(String(e)); }); };
+$("#bstop").onclick = stopBatch;
+
+/* ─────────────────────────── batch rendering ─────────────────────────── */
+const DONE_STATES = ["answered", "cannot_confirm", "clarify", "error"];
+
+function renderStats() {
+  if (!RESULTS.length) { $("#bstats").innerHTML = ""; return; }
+  const done = RESULTS.filter(r => DONE_STATES.indexOf(r.status) >= 0);
+  const timed = done.filter(r => typeof r.seconds === "number");
+  const avg = timed.length ? timed.reduce((a, r) => a + r.seconds, 0) / timed.length : 0;
+  const max = timed.length ? Math.max.apply(null, timed.map(r => r.seconds)) : 0;
+  const over = timed.filter(r => r.seconds > 60).length;
+  const dist = {};
+  RESULTS.forEach(r => { dist[r.status] = (dist[r.status] || 0) + 1; });
+
+  const cell = (label, value, alarm) =>
+    `<div class="stat${alarm ? " alarm" : ""}"><b>${esc(value)}</b><span>${esc(label)}</span></div>`;
+  let html =
+    cell(T("st_total"), RESULTS.length) +
+    cell(T("st_done"), done.length) +
+    cell(T("st_avg"), timed.length ? fmt(avg) : "—") +
+    cell(T("st_max"), timed.length ? fmt(max) : "—") +
+    cell(T("st_over60"), over, over > 0);
+  ["answered", "cannot_confirm", "clarify", "error", "skipped", "pending"].forEach(s => {
+    if (dist[s]) html += cell(s, dist[s]);
+  });
+  $("#bstats").innerHTML = html;
+}
+
+const clip = (s, n) => { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n) + "…" : s; };
+
+function renderTable() {
+  const tb = $("#btbody");
+  tb.innerHTML = "";
+  RESULTS.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    tr.className = "rrow";
+    const slow = typeof r.seconds === "number" && r.seconds > 60;
+    tr.innerHTML =
+      `<td class="qid">${esc(r.question_id)}</td>` +
+      `<td class="qtext"><span class="caret">▸</span> ${esc(clip(r.question, 70))}</td>` +
+      `<td class="num${slow ? " slow" : ""}">${typeof r.seconds === "number" ? fmt(r.seconds) : "—"}</td>` +
+      `<td><span class="status s-${esc(r.status)}">${esc(r.status)}</span></td>` +
+      `<td class="num">${r.tool_calls || 0}${r.tool_errors ? ` <span class="badge bad">${r.tool_errors}</span>` : ""}</td>` +
+      `<td class="atext">${esc(clip(r.error || r.answer, 90))}</td>`;
+    const det = document.createElement("tr");
+    det.className = "det hide";
+    det.innerHTML = `<td colspan="6">
+        <h3>${T("th_question")}</h3><pre>${esc(r.question)}</pre>
+        ${r.error ? `<h3>error</h3><pre>${esc(r.error)}</pre>` : ""}
+        <h3>${T("d_answer")}</h3><pre>${esc(r.answer || T("no_context"))}</pre>
+        <h3>${T("d_context")}</h3><pre class="out">${esc(r.retrieved_context || T("no_context"))}</pre>
+        <h3>${T("d_trace")}</h3><pre class="out">${esc(r.think_trace || T("no_context"))}</pre>
+      </td>`;
+    tr.onclick = () => {
+      const open = det.classList.toggle("hide");
+      tr.querySelector(".caret").textContent = open ? "▸" : "▾";
+    };
+    tb.appendChild(tr);
+    tb.appendChild(det);
+  });
+}
+
+/* ─────────────────────────── export ─────────────────────────── */
+const EXPORT_COLS = ["question_id", "question", "seconds", "status", "tool_calls", "tool_errors",
+                     "answer", "retrieved_context", "think_trace", "error"];
+
+function download(name, mime, text) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function stamp() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+$("#exp-json").onclick = () => {
+  const payload = {
+    generated_at: new Date().toISOString(),
+    count: RESULTS.length,
+    over_60s: RESULTS.filter(r => typeof r.seconds === "number" && r.seconds > 60).length,
+    results: RESULTS.map(r => {
+      const o = {};
+      EXPORT_COLS.forEach(c => { o[c] = (c === "seconds" && typeof r[c] === "number") ? Number(r[c].toFixed(2)) : r[c]; });
+      return o;
+    }),
+  };
+  download(`finagent-batch-${stamp()}.json`, "application/json;charset=utf-8",
+           JSON.stringify(payload, null, 2));
+};
+
+$("#exp-csv").onclick = () => {
+  const q = v => '"' + String(v === null || v === undefined ? "" : v).replace(/"/g, '""') + '"';
+  const rows = [EXPORT_COLS.map(q).join(",")];
+  RESULTS.forEach(r => rows.push(EXPORT_COLS.map(c =>
+    q(c === "seconds" && typeof r[c] === "number" ? r[c].toFixed(2) : r[c])).join(",")));
+  // BOM so Excel opens the Korean text as UTF-8.
+  download(`finagent-batch-${stamp()}.csv`, "text/csv;charset=utf-8", "﻿" + rows.join("\r\n"));
+};
+
+/* ─────────────────────────── boot ─────────────────────────── */
+$("#lang-ko").onclick = () => applyLang("ko");
+$("#lang-en").onclick = () => applyLang("en");
+applyLang(lsGet("finagent.lang") === "en" ? "en" : "ko");
 </script>

@@ -26,7 +26,12 @@ curl -G "http://223.130.161.217/answer" \
 ```mermaid
 flowchart LR
     Q[GET /answer<br/>question_id, question] --> P[사전 분석<br/>상품명 추출·엔티티 해석·온톨로지 검증]
-    P --> A[LLM Agent<br/>도구 호출 루프 · 120초 예산 · 최대 8라운드]
+    P --> RT{라운드 0<br/>검색 실행 계획}
+    RT -->|관계를 묻는가| G
+    RT -->|서술형을 묻는가| D
+    RT -->|이름으로 지목했는가| V
+    RT --> A
+    A[LLM Agent<br/>도구 호출 루프 · 120초 예산 · 최대 8라운드]
     A -->|sql_query / table_info| R[(RDB · SQLite<br/>5 테이블 + 5 뷰 · 215 컬럼)]
     A -->|graph_neighbors / graph_query| G[(Knowledge Graph · rdflib<br/>약 107만 트리플 · 술어 73종)]
     A -->|search_products / resolve_entity| V[(Lexical Index · BM25<br/>75,089 문서)]
@@ -48,7 +53,8 @@ flowchart LR
 | Lexical Index | BM25 + 한글 음절 bigram, 정확 상품명 부스트. 엔티티 해석기(정확 일치/유사 후보/기업 관계) | `src/finagent/kb/search.py`, `entity.py`, `lexicon.py` |
 | Hybrid Retrieval | `search_products`가 어휘(BM25) + 의미(벡터)를 결합(`mode=hybrid`가 기본, `lexical`/`vector` 선택 가능) | `src/finagent/kb/vector.py` |
 | Docs | 비정형 문서(PDF→Markdown) 청킹·검색. 출처·기준일 표기 | `src/finagent/kb/docs.py`, `scripts/parse_docs.py` |
-| Agent | 도구 호출 LLM 루프(Anthropic 기본, OpenAI 호환 대체), 시간 예산, 근거·추적 수집, 답변 정책 | `src/finagent/agent/` |
+| Retrieval Routing | **라운드 0의 검색 실행 계획.** 사전 분석 결과로 그래프·벡터·문서 중 *그 질문에 필요한 것만* 골라 미리 실행하고, 결과 행을 첫 프롬프트에 사실로 주입한다. 모든 저장소를 항상 두드리지 않는다 — 54문항 기준 그래프 6건·벡터 7건·문서 0건이 켜지고 **41건은 아무것도 켜지 않는다**(순수 집계·정렬 질문). 계획 수립 중앙값 0.8ms, 59문항 중 42문항은 실행 시간 추가가 0ms. 어느 저장소를 왜 골랐는지는 `think_trace` 에 남는다 | `src/finagent/agent/routing.py` |
+| Agent | 도구 호출 LLM 루프(Anthropic 기본, OpenAI 호환 대체), 시간 예산, 근거·추적 수집, 답변 정책. **조회를 한 번도 하지 않은 답변은 제출을 거부하고 되돌려보낸다** — 모델이 도구 없이 답하면 사전학습 지식으로 지어내기 때문이다(실측: 같은 질문 5회 중 도구를 부른 실행은 전부 정답, 안 부른 실행은 전부 오답) | `src/finagent/agent/` |
 | API | FastAPI `GET /answer`, `GET /health`. 항상 200 + 5개 필드 | `src/finagent/api.py` |
 
 ### 과제 필수 구성요소 대응
@@ -57,7 +63,7 @@ flowchart LR
 |---|---|
 | ① 정형·비정형 분석/정제 + 상품 도메인 특화 Ontology ([Parsing] pdf·ppt → Markdown) | `etl/`(정형 4종 + 편입종목) · `scripts/parse_docs.py`(PDF/PPTX → Markdown, front-matter에 출처·기준일) · `ontology/*.ttl` **6종** |
 | ② 금융상품 KnowledgeBase **RDB + Vector + Graph** ([Extraction]·[EntityResolution]) | RDB=SQLite **5뷰 · 215컬럼** · Vector=`kb/vector.py`(TF-IDF+LSA 384차원) · Graph=`kb/graph.py`(약 107만 트리플, 추론 포함) · Entity Resolution=`kb/entity.py` + `data/enrichment/*.yaml`. 어휘·벡터 색인은 **75,089 문서** |
-| ③ Intent Analysis & Retrieval Engine ([NL2SQL]·[Retrieval]) | 사전 분석(의도·엔티티·온톨로지 검증) → LLM이 `sql_query`(NL2SQL)·그래프·하이브리드 검색을 우선순위대로 호출 |
+| ③ Intent Analysis & Retrieval Engine ([NL2SQL]·[Retrieval]) | 사전 분석(의도·엔티티·온톨로지 검증)이 **검색 실행 계획**이 되어 라운드 0에서 그래프/벡터/문서 중 필요한 것만 결정론적으로 실행 → 그 결과를 사실로 쥐고 LLM이 `sql_query`(NL2SQL)로 집계·정렬을 마무리. 저장소 선택을 모델의 변덕에 맡기지 않는 것이 핵심 |
 | ④ Answer Generator (근거 기반·환각 방지) | `final_answer` 3상태 강제 + `retrieved_context` 근거 블록 + 확인불가/역질문 정책 |
 
 ### 검색 방법론 — 측정으로 결정한 부분
@@ -68,6 +74,19 @@ flowchart LR
 - 최상위 후보가 틀리면 답변 생성이 오염되므로, 최종 구조는 **어휘 결과가 리스트의 머리(head)를 차지하고, 하위 약 30% 슬롯을 "의미 검색만 찾아낸" 문서에 할당**하는 방식입니다. 어휘 검색이 강한 질의에서 하이브리드는 어휘 검색보다 나빠질 수 없고(구조적 보장), 의미 검색은 recall 보강 역할을 합니다.
 - 벡터 품질 자체도 측정으로 조정했습니다. 한글 상품명에는 `증권투자신탁·사모·파생형·상장지수` 같은 보일러플레이트가 많아 LSA 공간이 그 축에 지배되었고, 문서빈도 상위 토큰을 잘라내는 `max_df=0.005`로 바꾸자 7개 프로브 중 1개만 맞던 결과가 6개로 개선되었습니다(예: `space exploration satellite` → Procure Space ETF, `China semiconductor ETF` → 국내 반도체 ETF까지 recall).
 - 크로스링구얼(한글 질의 ↔ 영문 해외ETF)은 벡터가 아니라 **테마 사전**(한/영 동의어)과 그래프 태깅으로 처리합니다.
+
+**그리고 그 이득의 크기까지 측정했습니다.** 데이터에서 자동 생성한 질의 **1,313개**(4개 상품군 · 정식명칭/코드/약칭/편입종목명/테마어/오타/유의어 7유형)로 세 모드를 각각 재면:
+
+| 유형 | 어휘 recall@10 | 벡터 recall@10 | 결합 recall@10 |
+|---|---|---|---|
+| 정식명칭 | 100.0% | 60.0% | 100.0% |
+| 코드·티커 | 49.4% | 1.9% | 49.4% |
+| 오타 | 93.1% | 45.0% | 93.1% |
+| 테마어 | 87.0% | 55.8% | **90.5%** |
+
+결합의 recall@1·@5는 **전 유형에서 어휘 단독과 완전히 동일**합니다. 위에 적은 "어휘가 head를 차지한다"는 설계가 지켜지고 있다는 뜻이고, 동시에 **벡터의 순기여가 테마형 recall@10 +3.5%p에 국한된다**는 뜻이기도 합니다(1,313건 중 구제 22건, 손실 6건, 전부 8~10위 꼬리 슬롯).
+
+그래서 이 문서는 "의미 검색이 오타·유의어를 흡수한다"고 쓰지 않습니다. **오타 내성은 BM25의 한글 bigram이 제공합니다**(어휘 93.1% 대 벡터 45.0%). TF-IDF+LSA는 의미 임베딩이 아니라 어휘 공기(co-occurrence) 기반이므로 이 정도가 이 방식의 상한입니다. 벡터가 단독으로 이기는 사례는 실재하지만(`space exploration satellite` → Procure Space ETF, 어휘 top-5 부재) 그 구간은 좁습니다. 재현: `python scripts/audit_vector.py --sections BC` (LLM 미호출, 시드 고정).
 
 ### 데이터 모델 (뷰 5개)
 
@@ -225,13 +244,18 @@ python -m finagent.api
 curl -G "http://127.0.0.1:8000/answer" --data-urlencode "question_id=Q-001" --data-urlencode "question=현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘"
 ```
 
-Docker (NCP VM 등):
+Docker — 실제 평가 서버가 이 방식으로 떠 있습니다 (네이버 클라우드 VPC · Ubuntu 24.04 · 4 vCPU / 16GB):
 
 ```bash
-docker compose up -d --build          # http://<host>/answer
-# HTTPS가 필요하면 .env 에 DOMAIN=api.example.com 추가 후
-docker compose --profile https up -d  # Caddy 가 Let's Encrypt 인증서를 자동 발급
+docker compose up -d --build   # 이미지 빌드 시점에 스토어 적재 + 벡터 캐시 워밍까지 수행
+curl -s http://127.0.0.1/health
 ```
+
+`docker-compose.yml` 이 컨테이너 8000번을 호스트 **80번**에 매핑하므로 `http://<공인IP>/answer` 로 바로 열립니다. 주최측 공지가 HTTP 기본·표준 포트를 명시하고 있어 인증서·리버스 프록시를 두지 않았습니다(`--profile https` 로 Caddy + Let's Encrypt 구성도 가능하지만 도메인이 필요합니다).
+
+`restart: unless-stopped` 로 컨테이너 크래시·서버 재부팅 시 자동 복구됩니다. 기동 후 지식그래프 구축에 약 3분이 걸리므로 `HEALTHCHECK` 의 `start-period` 를 420초로 두었습니다 — 재기동했다면 `/health` 가 200을 줄 때까지 기다린 뒤 호출하십시오.
+
+`.env` 는 `.dockerignore` 에 있어 이미지에 포함되지 않습니다(API 키 보호). 런타임에 `env_file: .env` 로 읽으므로 **서버의 프로젝트 디렉터리에 `.env` 파일이 있어야 합니다.**
 
 ## 5. API 명세
 
@@ -304,6 +328,9 @@ python -m pytest -q -m slow         # 전체 ETL 검증 (약 2분)
 - 해외ETF·펀드의 편입종목 데이터는 없습니다. 편입종목은 국내 ETF에만 있습니다(1,235개 중 1,162개 수집).
 - 편입종목의 기준일(`as_of` 2026-09-05)이 상품 마스터 기준일(2026-08-21/22)과 다릅니다. 두 소스를 섞어 답할 때는 시점 차이를 함께 밝힙니다.
 - 펀드 운용사는 91.2% 채워져 있고 **2,084행은 여전히 NULL**입니다(기관코드가 특정 표기로 수렴하지 않는 경우). 운용사 개명 대응표는 만들지 않았습니다 — 펀드 설정일이 없어 어느 표기가 현재 이름인지 판정할 수 없기 때문입니다.
-- `subsidiaryOf` 관계는 엣지 4개입니다(에코프로 계열 3 · SK이노베이션 1).
+- **회사 간 관계는 `계열사`이지 `자회사`가 아닙니다.** 그룹주 ETF(`PLUS 한화그룹주`, `TIGER 삼성그룹` 등)의 편입종목이 곧 그 그룹의 구성사이므로 거기서 `affiliateOf` 를 도출했습니다 — 8개 그룹 65개사 608엣지, 오탐 0건. 다만 이것은 **같은 기업집단**이라는 사실이지 **지분 소유**가 아닙니다. 한화시스템·한화오션은 한화에어로스페이스의 자회사지만 한화생명은 (주)한화의 자회사이며, 데이터에 지분율이 없어 그 층위를 구분할 수 없습니다. 그래서 답변에도 "계열사"로 표기합니다. 손으로 적은 `subsidiaryOf` 는 엣지 4개 그대로입니다(에코프로 계열 3 · SK이노베이션 1).
+- **그룹주 ETF에서 뽑히는 계열사는 상장사 일부입니다.** 비상장 계열사는 보이지 않고, 현대차그룹은 2개사만 잡힙니다 — `TIGER 현대차그룹플러스` 가 HD현대(별개 기업집단)를 섞고 있어 토큰을 '현대차'로 좁게 잡았기 때문입니다. 넓히면 recall 이 오르지만 오탐이 들어옵니다. SK그룹은 해당 ETF에 편입종목 행이 없어 커버되지 않습니다.
+- **벡터 색인의 순기여는 테마형 질의의 recall@10 +3.5%p 입니다**(질의 1,313개 실측, 1절 참조). 상위 순위는 어휘 검색이 결정하며, 벡터는 하위 슬롯만 채웁니다. 필수 구성요소로서 존재하고 동작하지만, 이 코퍼스에서 의미 검색이 어휘 검색을 이기는 구간은 좁다는 사실을 감추지 않습니다.
+- **외부 문서는 3개 파일 39청크뿐입니다.** ETF 용어·지표 해설, ETF 위험요인 일반, 국민성장펀드 개요. 서술형 질의 전반을 덮지 못하며, 마스터에 없는 배경 지식이 필요한 질문은 확인 불가로 답합니다.
 - 벡터 검색은 외부 임베딩 API 키 없이도 평가가 재현되도록 TF-IDF+LSA(384차원)를 기본값으로 씁니다. 상용 임베딩으로 바꾸면 의미 검색 품질이 더 오를 여지가 있으며, `VECTOR_BACKEND=openai`와 `VECTOR_EMBED_MODEL`로 전환할 수 있습니다(코드 변경 불필요).
 - **제공 데이터가 과제설명 PDF의 기재와 다릅니다.** PDF는 4종 합계 약 14.5만 건·기준일 2026-07-11로 안내하지만, 실제 배포된 파일(`ai-festival2026_..._DtataSet260824.zip`)은 합계 53,375건이고 기준일이 2026-08-21(해외ETF 2026-08-22)입니다. 본 구현은 **실제 제공 파일**을 기준으로 하며, 평가용 데이터가 갱신되면 `python scripts/build_store.py` 재실행만으로 반영됩니다(스키마는 동일 가정).

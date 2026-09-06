@@ -1255,3 +1255,256 @@ async def test_rejected_answer_is_kept_if_the_retry_round_produces_nothing(tiny_
     assert "제출 거부" in resp.think_trace
     assert "처음 제출된 답변을 사용" in resp.think_trace
     assert "삼성입니다" in resp.answer
+
+
+# ======================================================================= final_answer 게이트
+# 도구 루프가 final_answer 없이 끝나면 마지막에 흘린 텍스트가 그대로 답변이 된다.
+# 54문항 중 7문항이 이 경로를 탔고 그중 4문항이 오답이었다(비카운트 실패 2건도 전부 여기).
+from finagent.agent.orchestrator import unwrap_final_answer_json  # noqa: E402
+
+# 실제 사고 문자열 3개. 재현 테스트는 이 문자열들을 그대로 쓴다.
+#
+# G-007: final_answer 인자 JSON 원문이 answer 필드로 나가 채점자 화면에 그대로 보였다.
+#        max_tokens 로 문장 중간에서 끊겨 있어 json.loads 로는 열리지 않는다.
+_G007_TEXT = (
+    '{\n'
+    '"answer": "미국 증시에 상장된 주식형 ETF 중 총보수가 가장 낮은 상품을...\\n'
+    '1. JPMorgan Alerian MLP Index ETN (AMJB)\\n'
+    '2. ARK '
+)
+# G-009: SQL 3건을 이미 받아 놓고 확인불가를 흘렸다.
+_G009_TEXT = "제공된 데이터로는 확인할 수 없습니다."
+# G-025: 한 답변 안에서 확인불가와 집계 결과를 동시에 주장했다.
+_G025_TEXT = "제공된 데이터로는 확인할 수 없습니다. 조회 결과 총 5개의 클래스가 판매되고 있습니다."
+
+
+def _text(t):
+    return Turn(t, [], "end_turn")
+
+
+# ------------------------------------------------------------------ A. 되돌리기(재제출 지시)
+
+async def test_missing_final_answer_is_sent_back_once(tiny_store, tmp_path):
+    """final_answer 없이 끝나려 하면 한 번 되돌려 보낸다 — 그리고 정확히 한 번만."""
+    script = [_text("1차 텍스트"), _text("2차 텍스트"), _text("3차 텍스트"), _text("4차 텍스트")]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-009a", _ASK)
+
+    assert sum(1 for m in llm.user_msgs if "[답변 미확정]" in m) == 1
+    assert "재제출 지시" in resp.think_trace
+    assert "재제출에도 final_answer 미호출" in resp.think_trace
+    # 되돌리기 뒤에 라운드가 더 붙지 않는다(무한 루프 금지) — 4번째 대본은 소비되지 않는다.
+    assert "4차 텍스트" not in resp.answer
+
+
+async def test_retry_final_answer_is_adopted(tiny_store, tmp_path):
+    """되돌린 라운드에서 final_answer 를 부르면 그 답이 쓰인다."""
+    script = [
+        _text("1차 텍스트"),
+        _text(_G009_TEXT),
+        Turn("", [ToolCall("f1", "final_answer",
+                           {"status": "answered", "answer": "순자산 상위 3개는 A, B, C 입니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-009b", _ASK)
+
+    assert "재제출: final_answer(status=answered) → 채택" in resp.think_trace
+    assert "순자산 상위 3개는 A, B, C 입니다." in resp.answer
+    assert not resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")   # 흘린 텍스트를 쓰지 않았다
+
+
+async def test_retry_directive_states_the_lookups_already_made(tiny_store, tmp_path):
+    """G-009 모양: SQL 을 이미 받아 놓고 확인불가를 흘린 경우.
+
+    지시는 '사용 시점의 사실'로 준다 — 이 프로젝트에서 미리 준 규칙은 4/4 무시됐고 그 순간의
+    사실로 준 지시는 5/5 지켜졌다. 조회를 이미 했다는 사실이 지시문에 실려야 한다.
+    """
+    script = [
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        _text(_G009_TEXT),
+        _text(_G009_TEXT),
+        Turn("", [ToolCall("f1", "final_answer",
+                           {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-009c", _ASK)
+
+    directive = next(m for m in llm.user_msgs if "[답변 미확정]" in m)
+    assert "데이터 조회를 1회 실행했고" in directive
+    assert "근거로 기록됐습니다" in directive
+    assert "final_answer(status, answer)" in directive
+    assert "한 번도 부르지 않았습니다" not in directive          # 조회가 있었으므로 이 문장은 틀린 사실이다
+    assert "삼성자산운용" in resp.answer
+
+
+async def test_retry_directive_when_no_lookup_ran(tiny_store, tmp_path):
+    """조회가 0회면 지시문도 그 사실을 그대로 말한다."""
+    script = [_text("1차"), _text("2차"), _text("3차")]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    await s.orchestrator.answer("G-009d", _ASK)
+
+    directive = next(m for m in llm.user_msgs if "[답변 미확정]" in m)
+    assert "한 번도 부르지 않았습니다" in directive
+    assert "데이터 조회를" not in directive.split("[답변 미확정]")[1].split("지금 할 일")[0].replace(
+        "데이터 조회 도구도 한 번도 부르지 않았습니다.", "")
+
+
+async def test_no_retry_when_the_time_budget_is_short(tiny_store, tmp_path):
+    """예산이 부족하면 되돌리지 않는다 — 라운드 추가 비용은 실측 ≈11초다.
+
+    ``_state`` 의 기본 예산은 20초라 FORCED_LOOKUP_MIN_REMAINING_SEC(33초)에 못 미친다.
+    기존 165개 테스트가 이 변경의 영향을 받지 않는 이유이기도 하다.
+    """
+    script = [_text("1차 텍스트"), _text("2차 텍스트"), _text("이턴은오면안된다")]
+    llm = _FullTap(script)
+    s = _state(tiny_store, llm, tmp_path)                       # 예산 20초, 재예산 없음
+    resp = await s.orchestrator.answer("G-009e", _ASK)
+
+    assert "재제출 지시 생략" in resp.think_trace and "예산 부족" in resp.think_trace
+    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
+    assert "이턴은오면안된다" not in resp.answer
+
+
+async def test_no_retry_after_an_llm_error(tiny_store, tmp_path):
+    """대화가 성립하지 않은 상태(LLM 오류)에서는 되돌려 봐야 같은 실패를 반복한다."""
+    llm = _FullTap([Turn("boom", [], "error"), _text("이턴은오면안된다")])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-009f", _ASK)
+
+    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
+    assert "LLM 오류" in resp.think_trace and "이턴은오면안된다" not in resp.answer
+
+
+async def test_no_retry_when_the_lookup_gate_already_used_its_round(tiny_store, tmp_path):
+    """조회 0회 게이트가 이미 한 라운드를 썼으면 이 게이트는 걸지 않는다(총 +1 라운드 상한)."""
+    llm = _FullTap([
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        _text("되돌린 뒤에도 도구를 안 불렀다"),
+    ])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-009g", _ASK)
+
+    assert "제출 거부" in resp.think_trace
+    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
+    assert "삼성입니다" in resp.answer                          # 되돌린 답변이 그대로 복구된다
+
+
+async def test_retry_answers_every_pending_tool_call(tiny_store, tmp_path):
+    """최대 라운드 초과로 실행하지 못한 호출에도 결과를 채운 뒤에 되돌린다.
+
+    OpenAI/CLOVA 는 assistant 의 tool_call 마다 결과를 요구한다 — 하나라도 비면 다음 요청이 400 이다.
+    """
+    llm = _FullTap([
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        Turn("", [ToolCall("c2", "sql_query", {"sql": _SQL + " LIMIT 1"})], "tool_use"),   # 라운드 초과로 미실행
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
+    ])
+    s = _rebudget(_state(tiny_store, llm, tmp_path), max_tool_rounds=1)
+    resp = await s.orchestrator.answer("G-009h", _ASK)
+
+    by_id = {i: c for i, c, _ in llm.tool_results}
+    assert "c2" in by_id and "실행되지 않았습니다" in by_id["c2"]
+    assert "삼성자산운용" in resp.answer
+
+
+# ------------------------------------------------------------------ B. 폴백 텍스트의 JSON 풀기
+
+def test_unwrap_plain_final_answer_json():
+    assert unwrap_final_answer_json('{"status": "answered", "answer": "총 5개입니다."}') == ("answered", "총 5개입니다.")
+    assert unwrap_final_answer_json('{"answer": "총 5개입니다.", "status": "cannot_confirm"}') == (
+        "cannot_confirm", "총 5개입니다.")
+
+
+def test_unwrap_code_fenced_and_prose_wrapped_json():
+    fenced = '```json\n{"answer": "총 5개입니다.", "status": "answered"}\n```'
+    assert unwrap_final_answer_json(fenced) == ("answered", "총 5개입니다.")
+    prose = '아래와 같이 답변을 제출합니다.\n{"answer": "총 5개입니다.", "status": "answered"}\n이상입니다.'
+    assert unwrap_final_answer_json(prose) == ("answered", "총 5개입니다.")
+
+
+def test_unwrap_decodes_escaped_newlines_and_quotes():
+    raw = '{"answer": "1행\\n2행\\t끝 \\"인용\\" \\uac00", "status": "answered"}'
+    status, answer = unwrap_final_answer_json(raw)
+    assert status == "answered"
+    assert answer == '1행\n2행\t끝 "인용" 가'
+
+
+def test_unwrap_survives_a_truncated_json_block():
+    """G-007 의 실제 사고 문자열 — max_tokens 로 끊겨 json.loads 로는 열리지 않는다."""
+    got = unwrap_final_answer_json(_G007_TEXT)
+    assert got is not None
+    status, answer = got
+    assert status == ""                                        # status 키까지 도달하기 전에 잘렸다
+    assert answer.startswith("미국 증시에 상장된 주식형 ETF")
+    assert "JPMorgan Alerian MLP Index ETN (AMJB)" in answer
+    assert "\\n" not in answer and "\n" in answer              # 이스케이프가 실제 줄바꿈으로 풀렸다
+    assert '"answer"' not in answer
+
+
+def test_unwrap_returns_none_for_ordinary_text():
+    """평범한 답변은 건드리지 않는다 — 풀지 못하면 지금 동작 그대로다."""
+    assert unwrap_final_answer_json(_G009_TEXT) is None
+    assert unwrap_final_answer_json(_G025_TEXT) is None
+    assert unwrap_final_answer_json("") is None
+    assert unwrap_final_answer_json("final_answer 도구는 \"answer\" 와 \"status\" 를 받습니다.") is None
+    assert unwrap_final_answer_json('{"answer": null, "status": "answered"}') is None
+    assert unwrap_final_answer_json('{"answer": "   ", "status": "answered"}') is None
+
+
+async def test_fallback_unwraps_a_tool_call_json_answer(tiny_store, tmp_path):
+    """되돌려도 final_answer 를 안 부르면 폴백하되, JSON 이면 풀어서 쓴다(G-007)."""
+    llm = _FullTap([
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        _text("작업을 마치겠습니다."),
+        _text("작업을 마치겠습니다."),
+        _text(_G007_TEXT),                                     # 되돌린 라운드도 JSON 원문을 흘린다
+    ])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-007", "미국 증시 주식형 ETF 중 총보수가 가장 낮은 상품")
+
+    assert "final_answer 인자 JSON" in resp.think_trace
+    assert '"answer"' not in resp.answer and '{' not in resp.answer
+    assert "JPMorgan Alerian MLP Index ETN (AMJB)" in resp.answer
+
+
+async def test_fallback_json_status_overrides_the_evidence_heuristic(tiny_store, tmp_path):
+    """JSON 안의 status 가 유효값이면 그것을 따른다."""
+    blob = '```json\n{"answer": "해당 조건의 상품을 찾지 못했습니다.", "status": "cannot_confirm"}\n```'
+    llm = _FullTap([
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),   # 근거가 생겨 기본 판정은 answered
+        _text(blob), _text(blob), _text(blob),
+    ])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-007b", _ASK)
+
+    assert "status=cannot_confirm 로 해석" in resp.think_trace
+    assert resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")
+
+
+async def test_fallback_keeps_the_existing_status_when_json_status_is_invalid(tiny_store, tmp_path):
+    """status 가 유효값이 아니면 기존 판정 로직을 따른다."""
+    blob = '{"answer": "순자산 상위 3개는 A, B, C 입니다.", "status": "done"}'
+    llm = _FullTap([
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        _text(blob), _text(blob), _text(blob),
+    ])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-007c", _ASK)
+
+    assert "answer 만 해석(status 는 기존 판정)" in resp.think_trace
+    assert "순자산 상위 3개는 A, B, C 입니다." in resp.answer   # 근거가 있으므로 answered 그대로
+
+
+async def test_fallback_leaves_plain_text_untouched(tiny_store, tmp_path):
+    """JSON 이 아니면 아무것도 바꾸지 않는다 — G-025 의 자기모순 문장도 예외를 던지지 않는다."""
+    llm = _FullTap([_text(_G025_TEXT), _text(_G025_TEXT), _text(_G025_TEXT)])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-025", _ASK)
+
+    assert "final_answer 인자 JSON" not in resp.think_trace
+    assert "final_answer 미호출 → 마지막 텍스트를 답변으로 사용" in resp.think_trace
+    assert "확인할 수 없습니다" in resp.answer

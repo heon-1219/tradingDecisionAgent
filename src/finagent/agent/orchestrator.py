@@ -429,6 +429,117 @@ _NO_LOOKUP_RETRY = (
 )
 
 
+# ---------------------------------------------------------------- final_answer 게이트
+# 도구 루프가 final_answer 없이 끝나면 오케스트레이터는 모델이 마지막에 흘린 텍스트를 그대로
+# 답변으로 채택한다. 54문항 중 7문항이 이 경로를 탔고 그중 4문항이 오답이었다(G-007/G-009/G-025).
+# G-009 는 SQL 3건을 이미 받아 놓고 "제공된 데이터로는 확인할 수 없습니다" 를 흘렸다.
+#
+# 지시문은 조회 0회 게이트(_NO_LOOKUP_RETRY)와 같은 방식으로 '사용 시점의 사실'만 담는다 —
+# 이 프로젝트의 측정에서 미리 준 프롬프트 규칙은 4/4 무시됐고, 그 순간의 사실로 준 지시는
+# 5/5 지켜졌다. 마지막 문단은 G-025 형태(같은 답변 안에서 확인불가와 집계 결과를 동시에
+# 주장하는 자기모순)를 겨냥한 것이다.
+_NO_FINAL_RETRY_HEAD = (
+    "[답변 미확정] 아직 final_answer 를 호출하지 않았습니다. 지금까지의 텍스트 응답은 답변으로 "
+    "확정되지 않습니다 — 답변은 final_answer 도구로만 제출됩니다.\n"
+)
+_NO_FINAL_RETRY_TAIL = (
+    "지금 할 일: 추가 조회 없이, 지금까지 확보한 결과만으로 final_answer(status, answer) 를 "
+    "한 번 호출하세요.\n"
+    "answer 에는 완성된 한국어 문장을 넣으세요. JSON·코드펜스·도구 호출 구문을 answer 문자열 "
+    "안에 다시 쓰지 마세요 — 그대로 채점자에게 보입니다.\n"
+    "status 는 근거를 확보했으면 answered, 조회했지만 근거를 찾지 못했으면 cannot_confirm, "
+    "질문 자체가 모호하면 clarify 입니다. 하나만 고르세요 — '확인할 수 없습니다' 로 시작해 놓고 "
+    "같은 답변에 조회 결과를 단정해 붙이면 서로 모순됩니다."
+)
+
+
+def _no_final_retry(lookups: int, evidence_count: int) -> str:
+    """final_answer 미호출 재제출 지시문. 두 인자는 '사용 시점의 사실'이다."""
+    if lookups <= 0:
+        fact = "이번 질문에서는 데이터 조회 도구도 한 번도 부르지 않았습니다."
+    else:
+        fact = f"이번 질문에서 데이터 조회를 {lookups}회 실행했고, 그 결과는 위 대화에 그대로 남아 있습니다."
+        if evidence_count:
+            fact += f" 그중 {evidence_count}건이 근거로 기록됐습니다."
+    return _NO_FINAL_RETRY_HEAD + fact + "\n" + _NO_FINAL_RETRY_TAIL
+
+
+# ------------------------------------------- 폴백 텍스트에 섞여 나온 final_answer 인자 JSON
+# G-007 은 answer 필드에 {"answer": "...", "status": ...} 원문이 그대로 실려 채점자 화면에 보였다.
+# answer.strip_tool_call_syntax 는 `final_answer(answer="…")` 형태의 누출만 벗기므로 이 모양은
+# 그대로 통과한다. 여기서 따로 푼다.
+_FINAL_JSON_KEYS = re.compile(r'"(answer|status)"\s*:\s*')
+_JSON_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", '"': '"', "\\": "\\", "/": "/"}
+
+
+def _json_string_at(text: str, i: int) -> str | None:
+    """text[i] 가 여는 큰따옴표이면 그 JSON 문자열의 값을 돌려준다(아니면 None).
+
+    json.loads 를 쓰지 않는 이유는 실제 사고가 **잘린** JSON 이었기 때문이다 — G-007 은
+    max_tokens 로 문장 중간에서 끊겨 있어 json.loads 로는 열리지 않는다. 닫는 따옴표가 없으면
+    끝까지 읽어 있는 만큼이라도 건진다.
+    """
+    if i >= len(text) or text[i] != '"':
+        return None
+    buf: list[str] = []
+    j = i + 1
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            esc = text[j + 1: j + 2]
+            if not esc:
+                break                                    # 이스케이프 도중에 잘렸다
+            if esc == "u":
+                hexs = text[j + 2: j + 6]
+                if len(hexs) == 4:
+                    try:
+                        buf.append(chr(int(hexs, 16)))
+                        j += 6
+                        continue
+                    except ValueError:
+                        pass
+                j += 2
+                continue
+            buf.append(_JSON_ESCAPES.get(esc, esc))
+            j += 2
+            continue
+        if ch == '"':
+            break
+        buf.append(ch)
+        j += 1
+    return "".join(buf)
+
+
+def unwrap_final_answer_json(text: str) -> tuple[str, str] | None:
+    """final_answer 인자 JSON 이 통째로 답변 자리에 온 경우 (status, answer) 로 푼다.
+
+    받는 변형: 순수 JSON, 코드펜스로 감싼 것, 앞뒤에 설명 문장이 붙은 것, 줄바꿈이 역슬래시-n 으로
+    이스케이프된 것, 그리고 중간에서 잘린 것. 풀지 못하면 None 을 돌려주고 호출부는 지금 동작
+    그대로 간다 — **예외를 던지지 않는다.** status 를 찾지 못하면 빈 문자열을 돌려주고 상태 판정은
+    호출부의 기존 로직에 맡긴다.
+    """
+    try:
+        if not text or '"answer"' not in text:
+            return None
+        answer: str | None = None
+        status: str | None = None
+        for m in _FINAL_JSON_KEYS.finditer(text):
+            val = _json_string_at(text, m.end())
+            if val is None:
+                continue                                 # 문자열이 아닌 값(null 등)은 무시한다
+            if m.group(1) == "answer":
+                if answer is None:
+                    answer = val
+            elif status is None:
+                status = val
+        if answer is None or not answer.strip():
+            return None
+        return (status or ""), answer
+    except Exception:                                    # noqa: BLE001 - 폴백 경로는 죽으면 안 된다
+        log.exception("final_answer JSON unwrap failed")
+        return None
+
+
 def _call_key(call: ToolCall):
     """'같은 호출'의 정의 = 도구 이름 + (purpose 를 뺀) 인자들의 정규화 형태.
 
@@ -808,6 +919,9 @@ class Orchestrator:
         lookups = 0
         forced_lookup = False                 # 강제 재시도는 질문당 한 번뿐(무한 루프 금지)
         rejected_final: dict | None = None    # 되돌린 답변. 재시도가 빈손으로 끝나면 이것을 쓴다.
+        # 아래 final_answer 게이트가 보는 상태.
+        last_turn_ok = False                  # 정상 응답(오류·거부·타임아웃이 아닌)을 한 번이라도 받았는가
+        pending_calls: list[ToolCall] = []    # 아직 결과를 돌려주지 않은 호출(프로토콜상 반드시 채워야 한다)
         for rnd in range(1, self.settings.max_tool_rounds + 2):
             remaining = deadline - time.monotonic()
             if remaining < 3:
@@ -824,6 +938,8 @@ class Orchestrator:
             if turn.stop_reason == "refusal":
                 steps.append(f"라운드 {rnd}: 모델 응답 거부")
                 break
+            last_turn_ok = True
+            pending_calls = list(turn.tool_calls)
             if turn.text:
                 last_text = turn.text
             fa = next((c for c in turn.tool_calls if c.name == "final_answer"), None)
@@ -847,6 +963,7 @@ class Orchestrator:
                         [(fa.id, _NO_LOOKUP_TOOL_RESULT, True)]
                         + [(c.id, _UNRUN_TOOL_RESULT, True) for c in others]
                     )
+                    pending_calls = []
                     conv.add_user(_NO_LOOKUP_RETRY)
                     steps.append(f"라운드 {rnd}: 데이터 조회 0회 상태의 final_answer → 제출 거부, 조회 후 재제출 지시")
                     emit("forced_lookup_retry", round=rnd,
@@ -923,6 +1040,7 @@ class Orchestrator:
                             scalars.append(sv)
                 packed.append((call.id, res.content, res.is_error))
             conv.add_tool_results(packed)
+            pending_calls = []
             # 3번째 동일 호출이면 마무리를 유도한다. 강제 종료가 아니라 안내인 이유:
             # (1) 2번째에 붙인 경고를 보고 방향을 트는 경우가 있고, (2) 키 정규화가 오탐했을 때
             # 문항 하나를 통째로 날리지 않기 위해서다. 질문당 한 번만 보낸다.
@@ -939,6 +1057,51 @@ class Orchestrator:
                 conv.add_user("[시간 예산 임박] 추가 도구 호출 없이 지금까지 확보한 근거로 즉시 final_answer 를 호출하세요.")
                 steps.append(f"라운드 {rnd}: 시간 예산 임박 안내 (잔여 {remaining:.0f}s)")
 
+        # ---- final_answer 게이트: 루프가 final_answer 없이 끝나려 하면 한 번만 되돌려 보낸다.
+        # 되돌리기는 질문당 최대 1회다(무한 루프 금지) — 두 번째에도 final_answer 가 없으면 아래
+        # 폴백이 그대로 받는다. 예산 판정은 조회 0회 게이트의 것을 그대로 쓴다: 이 되돌리기는 LLM
+        # 라운드 1회(실측 ≈11초)를 더 쓰고, 근거 없는 답 하나보다 응답시간(주최측 권장 60초)을
+        # 넘겨 문항을 통째로 잃는 쪽이 나쁘다.
+        #
+        # rejected_final 이 있으면 걸지 않는다 — 그때는 조회 0회 게이트가 이미 한 라운드를 썼고,
+        # 되돌린 답변이 바로 아래에서 final 로 복구되므로 폴백 경로 자체를 타지 않는다.
+        # last_turn_ok 가 False 면(LLM 오류·거부·첫 응답 전 타임아웃) 걸지 않는다 — 대화가 성립하지
+        # 않은 상태에서 한 라운드를 더 태워 봐야 같은 실패를 반복할 뿐이다.
+        if final is None and rejected_final is None and last_turn_ok:
+            remaining = deadline - time.monotonic()
+            if remaining < FORCED_LOOKUP_MIN_REMAINING_SEC:
+                steps.append(f"final_answer 미호출이지만 예산 부족(잔여 {remaining:.0f}s) → 재제출 지시 생략")
+            else:
+                # OpenAI/CLOVA 는 assistant 의 tool_call 마다 결과를 요구한다. 최대 라운드 초과로
+                # 실행하지 못한 호출이 남아 있으면 먼저 채운다(비우면 다음 요청이 400 이다).
+                if pending_calls:
+                    conv.add_tool_results([(c.id, _UNRUN_TOOL_RESULT, True) for c in pending_calls])
+                    pending_calls = []
+                conv.add_user(_no_final_retry(lookups, len(evidences)))
+                steps.append(
+                    f"final_answer 미호출 → 지금까지의 결과로 재제출 지시(조회 {lookups}회, 근거 {len(evidences)}건)"
+                )
+                emit("forced_final_retry", lookups=lookups, evidence=len(evidences),
+                     elapsed=time.monotonic() - t0)
+                try:
+                    rturn = await asyncio.wait_for(conv.step(), timeout=max(3.0, remaining - 1.0))
+                except asyncio.TimeoutError:
+                    rturn = None
+                    steps.append("재제출: LLM 응답 대기 시간 초과")
+                if rturn is not None and rturn.stop_reason in ("error", "refusal"):
+                    steps.append(f"재제출: LLM {rturn.stop_reason} — {rturn.text[:120]}")
+                elif rturn is not None:
+                    # 재제출에서 나온 텍스트가 더 최신이다. G-009 의 사고는 '이미 조회한 결과를
+                    # 손에 쥐고 확인불가를 흘린' 것이라, 조회 사실을 알려 준 뒤의 응답으로 바꾸는
+                    # 편이 낫다고 판단했다.
+                    if rturn.text:
+                        last_text = rturn.text
+                    rfa = next((c for c in rturn.tool_calls if c.name == "final_answer"), None)
+                    if rfa is not None:
+                        final = rfa.input or {}
+                        steps.append(f"재제출: final_answer(status={final.get('status', '?')}) → 채택")
+                    else:
+                        steps.append("재제출에도 final_answer 미호출 → 마지막 텍스트로 폴백")
         # 되돌린 답변을 잃지 않는다. 재시도 라운드가 LLM 오류·시간 초과·라운드 소진으로 아무것도
         # 내놓지 못하면, 근거는 없어도 원래 있던 답이 빈손보다 낫다.
         if final is None and rejected_final is not None:
@@ -953,9 +1116,20 @@ class Orchestrator:
             refs = [str(x) for x in (final.get("evidence_refs") or [])]
         elif last_text.strip():
             status = "answered" if evidences else "cannot_confirm"
-            answer = normalize_answer(status, last_text)
             refs = []
             steps.append("final_answer 미호출 → 마지막 텍스트를 답변으로 사용")
+            # 그 텍스트가 final_answer 인자 JSON 이면(G-007) 원문 그대로 내보내지 말고 풀어서 쓴다.
+            # 풀지 못하면 아무것도 바꾸지 않는다. 어느 쪽이든 normalize_answer 를 거쳐 나간다.
+            body = last_text
+            unwrapped = unwrap_final_answer_json(last_text)
+            if unwrapped is not None:
+                js, body = unwrapped
+                if js in ("answered", "cannot_confirm", "clarify"):
+                    status = js
+                    steps.append(f"마지막 텍스트가 final_answer 인자 JSON → answer/status={js} 로 해석")
+                else:
+                    steps.append("마지막 텍스트가 final_answer 인자 JSON → answer 만 해석(status 는 기존 판정)")
+            answer = normalize_answer(status, body)
         else:
             reason = "시간 초과" if time.monotonic() >= deadline else "LLM 응답 없음"
             status, answer, refs = "cannot_confirm", fallback_answer(reason), []
