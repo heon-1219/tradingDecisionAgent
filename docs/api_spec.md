@@ -10,6 +10,7 @@
 | 응답 시간 | 주최측 기준: **300초 초과 시 미응답 처리**, 그 안이면 늦어도 채점(점수 차등). 서버 내부 예산 120초, 초과 시 확보된 근거로 즉시 답변 |
 | 답변 생성 LLM | NCP HyperCLOVA X (`HCX-005`, CLOVA Studio OpenAI 호환 엔드포인트) — 대회 규정 |
 | 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (안내 문구) |
+| 참조 데이터 | SQLite 뷰 5개(`v_bond_kr` · `v_etf_kr` · `v_etf_gl` · `v_fund_pub` · `v_etf_constituent`) · 상품 53,375행 + 편입종목 22,599행 · 지식그래프 약 107만 트리플 |
 
 ## Request (Query String)
 
@@ -38,7 +39,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 |---|---|---|---|
 | `question_id` | string | 필수 | 요청값 그대로 |
 | `question` | string | 필수 | 요청값 그대로 |
-| `retrieved_context` | string | 필수 | 답변 근거. `[근거 n]` 블록마다 참조 테이블(한글명·뷰명)·데이터 기준일·건수·실행한 SQL/SPARQL/검색어·참조 상품코드와 상품명. 외부 문서를 쓴 경우 문서 제목·출처 |
+| `retrieved_context` | string | 필수 | 답변 근거. `[근거 n]` 블록마다 참조 테이블(한글명·뷰명)·데이터 기준일·**건수**·실행한 SQL/SPARQL/검색어·참조 상품코드와 상품명. 외부 문서를 쓴 경우 문서 제목·출처.<br>건수는 **필터에 걸린 전체 건수**이며, 표시 행이 200행 상한에 잘린 경우 "전체 N건 (표시 200건)"으로 구분해 적습니다 |
 | `think_trace` | string | 필수 | 번호가 매겨진 처리 과정: 사전분석(엔티티·테마·온톨로지 검증) → 각 라운드의 도구 호출과 결과 크기 → 최종 상태·소요 시간 |
 | `answer` | string | 필수 | 최종 답변(한국어). 확인 불가 시 "제공된 데이터로는 확인할 수 없습니다"로 시작, 조건 모호 시 역질문(물음표로 끝남) |
 
@@ -64,9 +65,9 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {
   "question_id": "Q-001",
   "question": "현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘",
-  "retrieved_context": "[근거 1] 국내채권마스터(v_bond_kr) · 기준일 2026-08-21 · 78건\n  sql: SELECT DISTINCT pd_no, pd_nm, crd_grd, buy_yield, after_tax_yield, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY buy_yield DESC LIMIT 200\n  참조: KR350801G954 한국가스공사 394 | KR6056554B20 SK이노베이션10-4 | ...",
-  "think_trace": "1. 사전분석: 상품언급 없음; 신용등급 'AA-' 유효 → crd_grd IN ('AAA','AA+','AA0','AA-')\n2. 라운드 1: sql_query(...) → 결과 3120자, 78건\n3. 라운드 2: final_answer(status=answered)\n4. 최종: status=answered, 근거 1건, 소요 14.2s",
-  "answer": "현재 매수 가능한 원화 채권 중 신용등급 AA- 이상 종목은 총 78건입니다 (국내채권마스터, 기준일 2026-08-21). 매수수익률 상위 종목: ... (근거: 국내채권마스터 · 2026-08-21)"
+  "retrieved_context": "[근거 1] 국내채권마스터(v_bond_kr) · 기준일 2026-08-21 · 전체 15,837건 (표시 200건)\n  sql: SELECT DISTINCT pd_no, pd_nm, crd_grd, buy_yield, after_tax_yield, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY buy_yield DESC LIMIT 200\n  참조: KR350801G954 한국가스공사 394 | KR6056554B20 SK이노베이션10-4 | ...",
+  "think_trace": "1. 사전분석: 상품언급 없음; 신용등급 'AA-' 유효 → crd_grd IN ('AAA','AA+','AA0','AA-')\n2. 라운드 1: sql_query(...) → 결과 3120자, 전체 15,837건 중 200건 표시\n3. 라운드 2: final_answer(status=answered)\n4. 최종: status=answered, 근거 1건, 소요 14.2s",
+  "answer": "현재 구매 가능한 원화 채권 중 신용등급 AA- 이상 종목은 총 15,837건입니다 (국내채권마스터, 기준일 2026-08-21). 매수수익률이 수록된 종목(has_buy_yield=1) 기준 상위: ... (근거: 국내채권마스터 · 2026-08-21)"
 }
 ```
 

@@ -42,7 +42,9 @@ _COUNT_QUESTION = re.compile(r"몇\s*(개|건|종목|가지|곳)|개수|건수|�
 # 스키마상 답이 존재하지 않는 질문이다 — 이것이 이 가드의 근거다.
 # (사고 사례 G-019: "내년 예상 수익률" 에 과거 1년 수익률 du_er_1y=260.41 을 예측치로 제시)
 _FORECAST_WORD = r"예상|전망|예측|추정"
-_VALUE_WORD = r"수익률|수익|가격|주가|시세|배당|성과"
+# '순자산·규모'를 값 표현에 넣은 근거: 이 둘도 기준일 스냅샷 값이라 미래 시점 값은 존재하지 않는다.
+# 목록에 없어서 G-045("2027년 말 예상 순자산 규모")가 가드를 그대로 통과했다.
+_VALUE_WORD = r"수익률|수익|가격|주가|시세|배당|성과|순자산|규모"
 # '미래' 뒤에 한글이 붙으면 미래 시점이 아니라 이름이다 — 상품명 9,816건이 '미래'로 시작하고
 # (미래에셋…, BNK 미래전략기술액티브 …) 운용사 이름 자체가 미래에셋이다. 접미 한글을 배제한다.
 # '연말'은 과거일 수도 있어("작년 연말 수익률") 넣지 않는다. 미래를 뜻하는 '올해 말'만 받는다.
@@ -69,10 +71,64 @@ _FORWARD_LOOKING = re.compile(
 # 판정 전에 지워서 값 표현·미래 표현으로 세지 않게 한다.
 _FORWARD_EXEMPT = re.compile(r"(?:만기\s*)?보장\s*수익률|배당\s*주기|분배\s*주기|미래\s*에셋")
 
+# ---- 네 자리 연도로 적은 미래 시점
+# 미래를 '내년·향후'가 아니라 연도로만 적으면 _FUTURE_WORD 목록에 걸리지 않는다. 실제로 G-045
+# ("KODEX 200의 2027년 말 예상 순자산 규모")가 그렇게 빠져나가 현재 순자산을 예측치로 냈다.
+# 데이터 기준일의 연도보다 큰 연도는 미래 시점으로 보고 _FUTURE_WORD 자리에 치환한다.
+#
+# 함정: "만기가 2027년인 채권"(G-002)도 미래 연도를 말하지만 예측이 아니라 **기록된 날짜 필드**를
+# 묻는다 — mat_date 는 데이터에 실제로 들어 있으므로 답할 수 있어야 한다. 그래서 연도가 만기·상환·
+# 발행·상장 같은 날짜 필드 어휘에 붙어 있으면 미래 시점으로 세지 않는다. 치환한 뒤의 판정은 기존
+# 규칙 그대로라, 미래 연도가 값 표현(수익률·순자산 …)과 가까이 있을 때만 예측 질문이 된다.
+_DATE_FIELD_WORD = r"만기|상환|만료|발행|상장|설정|기준일|마감|청산|해지|폐지|출시|가입"
+_YEAR_MENTION = re.compile(
+    rf"(?:(?P<pre>{_DATE_FIELD_WORD})[^\n]{{0,6}})?(?P<year>\d{{4}})\s*년(?:\s*(?P<post>{_DATE_FIELD_WORD}))?"
+)
+# 스토어 meta 를 못 읽는 경로(모듈 단독 호출·테스트)용 기본값. 실제 판정에서는 Orchestrator 가
+# base_date(= v_etf_kr 의 meta 기준일)의 연도를 넘긴다.
+_BASE_YEAR_FALLBACK = 2026
 
-def asks_forward_looking(question: str) -> bool:
+
+def _mark_future_years(text: str, base_year: int) -> str:
+    """기준연도보다 뒤인 연도 표기를 미래 시점 표현으로 바꾼다(날짜 필드에 붙은 연도는 제외)."""
+
+    def repl(m: re.Match) -> str:
+        if int(m.group("year")) <= base_year or m.group("pre") or m.group("post"):
+            return m.group(0)
+        return "향후"
+
+    return _YEAR_MENTION.sub(repl, text)
+
+
+def asks_forward_looking(question: str, base_year: int = _BASE_YEAR_FALLBACK) -> bool:
     """질문이 데이터에 존재하지 않는 '미래 값'을 요구하는가."""
-    return bool(_FORWARD_LOOKING.search(_FORWARD_EXEMPT.sub(" ", question or "")))
+    text = _mark_future_years(_FORWARD_EXEMPT.sub(" ", question or ""), base_year)
+    return bool(_FORWARD_LOOKING.search(text))
+
+
+# ---------------------------------------------------------------- 편입 종목 조회 범위 감지
+# 편입(구성) 종목 데이터는 v_etf_constituent 하나뿐이고, 이 뷰는 국내 ETF 1,162 종목 / 22,599행
+# (네이버금융 수집)만 담는다. 해외ETF 마스터(v_etf_gl)와 공모펀드(v_fund_pub)에는 보유 종목
+# 컬럼 자체가 없다. 그러므로 "X 를 편입한 해외 ETF / 공모펀드"는 질의를 잘 짜면 답이 나오는
+# 질문이 아니라 데이터에 그 관계가 없는 질문이다 — 판단이 아니라 스키마의 사실이다.
+#   G-040: v_etf_constituent 에서 0건을 받고도 앞 라운드에 남아 있던 국내 ETF 10개를
+#          '해외 ETF'라고 나열했다.
+#   G-041: search_products 의 이름 유사도 결과를 '그 종목을 보유한 펀드'로 바꿔 읽었다.
+#          search_products 는 어휘·의미 유사도만 주고 보유 관계는 전혀 establish 하지 않는다.
+_HOLDING_WORD = re.compile(r"보유|편입|담고\s*있|담은|담긴|포함한|포함하고\s*있|포함된|구성\s*종목|들고\s*있")
+# 보유 종목 데이터가 없는 상품군. '펀드'는 그 자체로 범위 한정어이므로 공모·사모를 포괄한다.
+_NO_HOLDING_SCOPE = re.compile(r"해외\s*상장\s*ETF|해외\s*ETF|미국\s*ETF|공모\s*펀드|사모\s*펀드|ETN|펀드")
+# 국내 ETF 를 함께 지목했다면 답할 수 있는 부분이 있으므로 가드를 걸지 않는다. 범위어가 아예 없는
+# "에코프로비엠을 편입한 ETF" 도 _NO_HOLDING_SCOPE 에 걸리지 않아 그대로 답변된다.
+_HOLDING_SCOPE_OK = re.compile(r"국내\s*(?:상장\s*)?ETF")
+
+
+def asks_holdings_without_data(question: str) -> bool:
+    """'그 기업을 담고 있는 상품'을 묻는데, 지목한 상품군에 편입 데이터가 없는가."""
+    q = question or ""
+    if not _HOLDING_WORD.search(q) or not _NO_HOLDING_SCOPE.search(q):
+        return False
+    return not _HOLDING_SCOPE_OK.search(q)
 
 
 class _Steps(list):
@@ -135,9 +191,14 @@ _ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "�
 # 서로 다른 질의는 2개뿐이었고, 하나는 매번 'no such column: pd_no' 로 실패, 다른 하나는 매번
 # 0건이었다). 루프 안에서 "지금 같은 것을 또 보냈다"고 말해 주는 곳이 없었던 것이 원인이다.
 #
-# ★ LLM 라운드는 어차피 소비된 뒤다. 여기서 아끼는 것은 시간이 아니라 '모델이 자기가 막혔다는
+# ★ LLM 라운드는 어차피 소비된 뒤다. 여기서 얻는 것은 시간이 아니라 '모델이 자기가 막혔다는
 #   사실을 알아차릴 기회'다 — 같은 결과를 말없이 다시 주면 모델은 새 정보를 받았다고 착각하고
-#   같은 질의를 또 낸다. DB 재실행을 건너뛰는 것은 덤일 뿐 목적이 아니다.
+#   같은 질의를 또 낸다.
+#
+# ★ 그래서 호출은 **막지 않고 그대로 실행하고**, 결과 뒤에 경고만 덧붙인다. 처음 판에서는 실행을
+#   건너뛰고 캐시를 돌려줬는데, G-040 에서 3·4라운드에 그게 걸리면서 모델이 막다른 길에서
+#   빠져나오려던 시도를 잘라 버렸고 결국 앞 라운드에 남아 있던 결과로 답을 지어냈다. 실행을
+#   건너뛰어 아끼는 것은 도구 시간 몇 밀리초뿐이고, 그 대가로 탈출구 하나가 사라진다.
 
 _SQL_ARGS = ("sql", "sparql")
 # purpose 는 추적용 주석이라 결과를 바꾸지 않는다. 키에 넣으면 문구만 손봐도 '다른 호출'이 되어
@@ -213,8 +274,8 @@ def _repeat_note(n: int, res: ToolResult) -> str:
                "실제 표기를 확인한 뒤 다시 거세요.")
     else:
         nxt = "이미 확보한 결과입니다. 이 값을 그대로 쓰고 남은 라운드는 아직 확인하지 않은 부분에 쓰세요."
-    return (f"\n\n⚠ 이 호출은 이번 질문에서 {n}번째 동일한 호출입니다. 실행하지 않고 위의 이전 결과를 "
-            f"그대로 돌려줍니다 — 같은 입력은 몇 번을 보내도 결과가 달라지지 않습니다. "
+    return (f"\n\n⚠ 이 호출은 이번 질문에서 {n}번째 동일한 호출입니다. 위 결과는 다시 실행해서 받은 "
+            f"것이며 처음과 같습니다 — 같은 입력은 몇 번을 보내도 결과가 달라지지 않습니다. "
             f"다른 접근이 필요합니다: {nxt}")
 
 
@@ -225,6 +286,12 @@ class Orchestrator:
         self.system_prompt = system_prompt
         self.specs = tools.specs()
         self.base_date = (tools.meta.get("v_etf_kr") or {}).get("base_date") or "2026-08-21"
+
+    @property
+    def base_year(self) -> int:
+        """데이터 기준연도. '2027년' 같은 표기가 미래인지 판정하는 기준이다(스토어 meta 에서 온다)."""
+        m = re.match(r"(\d{4})", self.base_date or "")
+        return int(m.group(1)) if m else _BASE_YEAR_FALLBACK
 
     # ------------------------------------------------------------ pre-analysis
     def pre_analyze(self, question: str) -> PreAnalysis:
@@ -395,39 +462,26 @@ class Orchestrator:
                 emit("tool_call", round=rnd, name=call.name, args=call.input or {},
                      elapsed=time.monotonic() - t0)
             tool_t0 = time.monotonic()
-            # 이미 낸 적 있는 호출은 실행하지 않고 이전 결과 + 경고를 돌려준다.
-            # LLM 라운드는 이 시점에 이미 소비됐다 — 여기서 아끼는 것은 시간이 아니라
-            # 모델이 '내가 막혔다'는 사실을 알아차릴 기회다(_repeat_note 참고).
+            # 이미 낸 적 있는 호출도 그대로 실행하고, 결과 뒤에 '몇 번째 같은 호출인지'만 덧붙인다.
+            # 실행을 막으면 도구 시간 몇 밀리초를 아끼는 대신 모델이 막다른 길에서 빠져나올 길을
+            # 하나 없앤다(G-040). LLM 라운드는 이 시점에 이미 소비됐다 — 여기서 얻는 것은
+            # 시간이 아니라 모델이 '내가 막혔다'는 사실을 알아차릴 기회다(_repeat_note 참고).
             keys = [_call_key(c) for c in turn.tool_calls]
             ordn: list[int] = []                      # 이 질문에서 몇 번째 동일 호출인지(1 = 처음)
-            plan: list[tuple[str, object]] = []       # ("cache", key) | ("run", fresh 안의 인덱스)
-            first_here: dict = {}                     # 같은 턴 안의 중복도 한 번만 실행한다
-            fresh: list[ToolCall] = []
-            for i, (call, key) in enumerate(zip(turn.tool_calls, keys)):
+            for i, key in enumerate(keys):
                 if key is None:                       # final_answer 등 판정 제외 호출
                     ordn.append(1)
-                    plan.append(("run", len(fresh)))
-                    fresh.append(call)
                     continue
-                prior = seen_calls[key][0] if key in seen_calls else 0
-                ordn.append(prior + sum(1 for j in range(i) if keys[j] == key) + 1)
-                if key in seen_calls:
-                    plan.append(("cache", key))
-                elif key in first_here:
-                    plan.append(("run", first_here[key]))
-                else:
-                    first_here[key] = len(fresh)
-                    plan.append(("run", len(fresh)))
-                    fresh.append(call)
-            done = await asyncio.gather(*(self._run_tool(c) for c in fresh))
-            bases = [seen_calls[ref][1] if kind == "cache" else done[ref] for kind, ref in plan]
+                # 이전 라운드까지의 횟수 + 이번 턴에서 앞쪽에 있던 같은 호출 수 + 자기 자신
+                ordn.append(seen_calls.get(key, 0) + sum(1 for j in range(i) if keys[j] == key) + 1)
+            bases = await asyncio.gather(*(self._run_tool(c) for c in turn.tool_calls))
             # 반복분은 evidence 를 떼고 돌려준다 — 근거는 첫 실행 때 이미 기록했고,
             # 다시 넣으면 retrieved_context 에 같은 [근거] 가 중복으로 찍힌다.
             results = [b if n == 1 else ToolResult(b.content + _repeat_note(n, b), b.is_error, None)
                        for b, n in zip(bases, ordn)]
-            for key, base, n in zip(keys, bases, ordn):
+            for key, n in zip(keys, ordn):
                 if key is not None:
-                    seen_calls[key] = (n, base)
+                    seen_calls[key] = n
             tool_sec = time.monotonic() - tool_t0
             packed = []
             for call, res, ncall in zip(turn.tool_calls, results, ordn):
@@ -444,7 +498,7 @@ class Orchestrator:
                     elapsed=time.monotonic() - t0,
                 )
                 if ncall > 1:
-                    steps.append(f"라운드 {rnd}: {desc} → 동일 호출 {ncall}번째 — 미실행, 이전 결과 재사용 + 다른 접근 안내")
+                    steps.append(f"라운드 {rnd}: {desc} → 동일 호출 {ncall}번째 — 재실행 + 다른 접근 안내")
                     packed.append((call.id, res.content, res.is_error))
                     continue
                 if res.is_error:
@@ -513,7 +567,7 @@ class Orchestrator:
         # 미래 값을 묻는 질문에 과거 실적 컬럼을 그대로 붙여 답하는 사고를 막는다.
         # 숫자 자체는 도구가 낸 진짜 값이라 숫자 교차검증은 통과한다. 틀린 것은 '라벨'이므로
         # 여기서 상태와 문구를 고쳐 과거 실적임을 분명히 하고 예측으로 읽히지 않게 한다.
-        if status == "answered" and asks_forward_looking(question):
+        if status == "answered" and asks_forward_looking(question, self.base_year):
             answer = (
                 f"{CANNOT_PREFIX} 제공된 데이터는 기준일 {self.base_date} 시점의 스냅샷이며, "
                 "예상 수익률·목표가처럼 미래에 실현될 값을 담은 항목이 없습니다. "
@@ -522,6 +576,18 @@ class Orchestrator:
             )
             status = "cannot_confirm"
             steps.append("미래 예측을 요구하는 질문 → 데이터에 예측 컬럼이 없어 확인불가로 보정(과거 실적은 참고로 유지)")
+        # 보유/편입 관계는 국내 ETF 에만 있다. 해외ETF·펀드·ETN 으로 범위를 좁힌 편입 질문에
+        # 그럴듯한 답을 만들면 국내 ETF 목록을 해외 ETF 라고 내놓거나(G-040), 이름만 비슷한 펀드를
+        # '그 종목을 보유 중'이라고 단정하게 된다(G-041). 스키마의 사실을 그대로 말한다.
+        if status == "answered" and asks_holdings_without_data(question):
+            answer = (
+                f"{CANNOT_PREFIX} 편입 종목(구성종목) 데이터는 국내 ETF 1,162 종목(네이버금융 수집)"
+                "에만 있습니다. 해외 ETF·공모펀드·사모펀드·ETN 의 보유 종목은 전달받은 데이터에 "
+                "없으므로, 특정 기업을 편입했는지 여부와 그 순위는 확인할 수 없습니다."
+                f"\n\n(참고) 아래는 편입 관계를 확인한 결과가 아니라 이름·조건으로 조회한 내용입니다.\n{answer}"
+            )
+            status = "cannot_confirm"
+            steps.append("편입 데이터가 없는 상품군(해외ETF·펀드·ETN)에 대한 편입 질문 → 확인불가로 보정")
         # A count question whose single COUNT result never appears in the answer means the model
         # mis-transcribed it.  Only fires when exactly one scalar was produced, so a multi-step
         # calculation is never "corrected" against an intermediate value.

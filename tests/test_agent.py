@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 from finagent.agent.answer import CANNOT_PREFIX, Evidence, format_evidence, normalize_answer
 from finagent.agent.llm import StubLLM, ToolCall, Turn
-from finagent.agent.orchestrator import Orchestrator, _call_key, asks_forward_looking
+from finagent.agent.orchestrator import (
+    Orchestrator,
+    _call_key,
+    asks_forward_looking,
+    asks_holdings_without_data,
+)
 from finagent.agent.prompts import build_system_prompt
 from finagent.agent.tools import ToolRegistry
 from finagent.api import create_app
@@ -242,6 +247,81 @@ def test_forward_looking_detector_covers_the_class_not_one_phrasing():
         assert not asks_forward_looking(q), q
 
 
+def test_future_year_counts_as_a_future_time_reference():
+    """G-045 재발 방지: '2027년 말'처럼 연도로만 적은 미래 시점도 미래 표현으로 센다.
+
+    기준연도(데이터 base_date 의 연도)를 넘는 연도만 미래다. 함정은 G-002 —
+    "만기가 2027년인 채권"은 미래 연도를 말하지만 mat_date 라는 **기록된 날짜 필드**를 묻는
+    질문이라 답할 수 있어야 한다. 값 표현이 아니라 날짜 필드에 붙은 연도는 세지 않는다.
+    """
+    for q in ("KODEX 200의 2027년 말 예상 순자산 규모는 얼마인가요?",
+              "2028년 순자산 규모를 알려줘", "2030년 수익률이 어떻게 될까요?"):
+        assert asks_forward_looking(q, 2026), q
+    # ★ 미래 연도 + 날짜 필드 = 예측이 아니라 조회다. 여기서 발동하면 답할 수 있는 문항이 죽는다.
+    for q in ("구매 가능한 원화채권 중 신용등급 AAA이고 만기가 2027년인 종목 수를 알려줘",
+              "만기 2029년 채권 목록", "2027년 상장 예정 ETF가 있나요?",
+              "2026년 말 순자산 규모는?",   # 기준연도 이하 = 과거·현재 스냅샷
+              "2025년 수익률 알려줘"):
+        assert not asks_forward_looking(q, 2026), q
+    # 기준연도는 스토어 meta 에서 온다 — 기준연도가 밀리면 판정도 함께 밀려야 한다
+    assert asks_forward_looking("2027년 순자산 규모", 2026)
+    assert not asks_forward_looking("2027년 순자산 규모", 2027)
+
+
+def test_holdings_scope_guard_fires_only_where_there_is_no_holdings_data():
+    """G-040·G-041 재발 방지: 편입 데이터는 국내 ETF 1,162 종목에만 있다.
+
+    해외ETF·공모펀드·사모펀드·ETN 으로 범위를 좁힌 편입 질문은 데이터에 관계가 없어
+    답할 수 없다. 반대로 국내 ETF 편입 질문은 정상 답변 대상이므로 절대 건드리면 안 된다.
+    """
+    for q in ("엔비디아를 편입한 해외 ETF를 알려줘",
+              "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?",
+              "삼성전자를 보유한 공모펀드를 알려줘",
+              "테슬라를 포함한 미국 ETF가 있나요?",
+              "카카오를 편입한 ETN을 알려줘"):
+        assert asks_holdings_without_data(q), q
+    # ★ 답할 수 있는 문항 — 여기서 발동하면 정상 답변을 확인불가로 뭉갠다
+    for q in ("삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
+              "SK하이닉스를 편입하고 있는 국내 ETF는 몇 개인가요?",
+              "두산에너빌리티를 보유한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘",
+              "국내 ETF 가운데 삼성전자 비중이 가장 높은 상품은 무엇인가요?",
+              "에코프로비엠을 편입한 ETF는 몇 개인가요?",          # 범위어가 없으면 발동하지 않는다
+              "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘",  # 편입어 없음
+              "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?",
+              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"):
+        assert not asks_holdings_without_data(q), q
+
+
+async def test_fund_holdings_answer_is_rewritten_to_cannot_confirm(tiny_store, tmp_path):
+    """G-041 재발 방지: v_fund_pub 에는 보유 종목 컬럼이 없다.
+
+    search_products 는 이름·의미 유사도만 돌려주므로 '그 종목을 담고 있다'를 성립시키지 못한다.
+    모델이 그렇게 단정하면 서버가 확인불가로 내리고 근거가 없다는 사실을 밝힌다.
+    """
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 KB 만기가 있는 채권 EMP입니다.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("H-001", "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?")
+    assert resp.answer.startswith(CANNOT_PREFIX)
+    assert "국내 ETF 1,162 종목" in resp.answer
+    assert "확인불가로 보정" in resp.think_trace
+
+
+async def test_domestic_etf_holdings_answer_is_left_alone(tiny_store, tmp_path):
+    """국내 ETF 편입 질문은 답할 수 있다 — 가드가 건드리면 안 된다(오탐 방지)."""
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "에코프로비엠을 편입한 국내 ETF는 KODEX 2차전지산업 1개입니다.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("H-002", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?")
+    assert not resp.answer.startswith(CANNOT_PREFIX)
+    assert "KODEX 2차전지산업" in resp.answer
+    assert "확인불가로 보정" not in resp.think_trace
+
+
 async def test_past_return_is_not_served_as_a_forecast(tiny_store, tmp_path):
     """G-019 재발 방지: 과거 1년 수익률(du_er_1y)을 '내년 예상 수익률'로 제시하면 안 된다.
 
@@ -412,8 +492,13 @@ class _Tap(StubLLM):
         return conv
 
 
-async def test_identical_call_is_not_re_executed_and_says_so(tiny_store, tmp_path):
-    """G-015 재발 방지: 같은 질의를 세 번 보내면 두 번째부터는 실행하지 않고 '막혔다'고 알린다."""
+async def test_identical_call_is_re_executed_and_says_so(tiny_store, tmp_path):
+    """G-015 재발 방지: 같은 질의를 세 번 보내면 '막혔다'고 알린다.
+
+    단, 호출을 **막지는 않는다**(G-040). 실행을 건너뛰어 아끼는 것은 도구 시간 몇 밀리초뿐이고,
+    그 대가로 모델이 막다른 길에서 빠져나오려는 시도를 잘라 버린다. 실행은 그대로 하고
+    결과 뒤에 '몇 번째 같은 호출인지'만 덧붙인다.
+    """
     sql = "SELECT pd_no, pd_abrv_nm FROM v_etf_kr WHERE is_on_sale=1"   # pd_no 는 없는 컬럼
     script = [
         Turn("", [ToolCall("c1", "sql_query", {"sql": sql, "purpose": "1차 시도"})], "tool_use"),
@@ -429,12 +514,13 @@ async def test_identical_call_is_not_re_executed_and_says_so(tiny_store, tmp_pat
 
     resp = await s.orchestrator.answer("R-001", "국내 ETF 목록 알려줘")
 
-    assert sum(1 for q in executed if "pd_no" in q.lower()) == 1, executed   # 2·3번째는 미실행
+    assert sum(1 for q in executed if "pd_no" in q.lower()) == 3, executed   # 세 번 모두 실행된다
     assert len(llm.tool_contents) == 3
     assert "번째 동일한 호출입니다" not in llm.tool_contents[0]
     assert "2번째 동일한 호출입니다" in llm.tool_contents[1]
     assert "3번째 동일한 호출입니다" in llm.tool_contents[2]
     assert "결과가 달라지지 않습니다" in llm.tool_contents[1]
+    assert "실행하지 않고" not in llm.tool_contents[1]   # 안내 문구가 사실과 어긋나면 안 된다
     assert "table_info" in llm.tool_contents[1]              # 실패한 호출에는 컬럼 확인을 지시한다
     # 반복분도 첫 결과(오류 메시지)를 그대로 담고 있다
     assert "no such column: pd_no" in llm.tool_contents[1]
@@ -453,9 +539,14 @@ async def test_zero_row_repeat_suggests_relaxing_conditions(tiny_store, tmp_path
     ]
     llm = _Tap(script)
     s = _state(tiny_store, llm, tmp_path)
+    executed = []
+    real = s.rdb.query
+    s.rdb.query = lambda q: (executed.append(q), real(q))[1]
     resp = await s.orchestrator.answer("R-003", "없는운용사 ETF 알려줘")
+    assert sum(1 for q in executed if "없는운용사" in q) == 2   # 재실행은 막지 않는다
     assert "조건을 하나씩 빼면서" in llm.tool_contents[1]
-    assert resp.retrieved_context.count("[근거") == 1   # 반복분에는 evidence 를 붙이지 않는다
+    # 실행은 두 번 했어도 근거는 한 번만 센다 — 같은 결과가 [근거] 로 두 줄 찍히면 안 된다
+    assert resp.retrieved_context.count("[근거") == 1
 
 
 async def test_two_different_calls_both_run_untouched(tiny_store, tmp_path):
