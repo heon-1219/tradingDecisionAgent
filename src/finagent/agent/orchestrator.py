@@ -770,7 +770,14 @@ class Orchestrator:
             if self.tools.kg is not None:
                 n = len(self.tools.kg.neighbors(f"d:theme/{t.id}", relation="hasTheme_inverse", limit=10000).get("hasTheme_inverse", []))
                 cnt = f", 그래프 태깅 상품 {n}건 (graph_neighbors('{t.label_ko}','hasTheme_inverse'))"
-            lines.append(f"- 테마 '{t.label_ko}' ({t.label_en}; 동의어 {', '.join(t.synonyms[:6])}){cnt}")
+            # 동의어만 주면 모델은 여전히 질문의 한글 단어를 이름 LIKE 에 건다.  실제로 '캠브리콘이
+            # 편입된 중국 반도체 ETF' 에서 회사 코드는 맞게 쓰고도 cu_base_index LIKE '%중국%' AND
+            # LIKE '%반도체%' 를 덧붙여 0건을 받았다 — 그 상품의 이름은 'TIGER 차이나반도체FACTSET'
+            # 이다.  그래서 동의어가 아니라 '이름으로 좁히면 비어 있다'는 결과를 사실로 적는다.
+            lines.append(f"- 테마 '{t.label_ko}' ({t.label_en}; 동의어 {', '.join(t.synonyms[:6])}){cnt}"
+                         f" — 상품명·기초지수 표기는 동의어 중 어느 것이든 될 수 있으므로"
+                         f" 이름 LIKE '%{t.label_ko}%' 로 테마를 좁히면 0건이 나올 수 있습니다."
+                         f" 테마 판정은 위 그래프 결과를 쓰고, SQL 은 상품코드로 좁히세요.")
         mgrs = self.lexicon.match_managers(question)
         if mgrs:
             lines.append("- 운용사: " + ", ".join(f"{m.canonical}(manager_name='{m.canonical}')" for m in mgrs))
@@ -1266,12 +1273,16 @@ class Orchestrator:
         # 보유/편입 관계는 국내 ETF 에만 있다. 해외ETF·펀드·ETN 으로 범위를 좁힌 편입 질문에
         # 그럴듯한 답을 만들면 국내 ETF 목록을 해외 ETF 라고 내놓거나(G-040), 이름만 비슷한 펀드를
         # '그 종목을 보유 중'이라고 단정하게 된다(G-041). 스키마의 사실을 그대로 말한다.
+        # 모델이 만든 답은 덧붙이지 않고 버린다.  "(참고)" 라는 머리말을 달아도 그 아래 문장은
+        # 여전히 단언이고, 실제로 틀린 단언이 나왔다: "SK하이닉스를 담고 있는 공모펀드 중 순자산이
+        # 가장 큰 상품은 KODEX 200 입니다" — KODEX 200 은 공모펀드가 아니라 ETF 다.  주최측은
+        # 답변 불가 문항에 답을 생성하면 감점한다고 명시했으므로, 주석 뒤에 숨긴 답도 위험은 같다.
+        # 위 거절 문장이 사실을 전부 담고 있어 잃는 정보도 없다.
         if status == "answered" and asks_holdings_without_data(question):
             answer = (
                 f"{CANNOT_PREFIX} 편입 종목(구성종목) 데이터는 국내 ETF 1,162 종목(네이버금융 수집)"
                 "에만 있습니다. 해외 ETF·공모펀드·사모펀드·ETN 의 보유 종목은 전달받은 데이터에 "
                 "없으므로, 특정 기업을 편입했는지 여부와 그 순위는 확인할 수 없습니다."
-                f"\n\n(참고) 아래는 편입 관계를 확인한 결과가 아니라 이름·조건으로 조회한 내용입니다.\n{answer}"
             )
             status = "cannot_confirm"
             steps.append("편입 데이터가 없는 상품군(해외ETF·펀드·ETN)에 대한 편입 질문 → 확인불가로 보정")

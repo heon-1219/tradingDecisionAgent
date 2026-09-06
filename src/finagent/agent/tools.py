@@ -43,7 +43,13 @@ SEMANTICS = {
                   "국내/해외 구분은 ovrs_fd_desc: '국내'·'해외'·'국내외혼합'·'해당없음'. '해외 펀드' = ovrs_fd_desc='해외'. 투자지역 fd_ivst_rgn_desc(글로벌·아시아·남미/북미…)는 다른 축이므로 섞지 않는다. "
                   "환헤지 여부는 is_hedged: 1=환헤지형(H), 0=환노출형(UH), NULL=미수록. 운용속성 or_attr_desc: 주식형·채권형·채권혼합·주식혼합·재간접·MMF·파생상품·특별자산·혼합자산 등. "
                   "보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
-    "v_etf_constituent": "국내 ETF의 편입종목(네이버금융 수집, 1,162개 ETF·22,599행). etf_itm_no 로 v_etf_kr.pd_itm_no 와 조인한다. "
+    "v_etf_constituent": "국내 ETF의 편입종목(네이버금융 수집, 1,162개 ETF·22,599행). "
+                         "**이 뷰의 컬럼은 8개가 전부다: etf_itm_no, etf_ticker, etf_name, company_code, company_name, weight_pct, is_cash, as_of.** "
+                         "순자산(pd_net_tamt)·판매여부(is_on_sale)·ETF/ETN 구분(pd_grp_no)·총보수 같은 상품 속성은 이 뷰에 없다 — 그 조건은 "
+                         "v_etf_kr 과 조인한 뒤 상품 쪽 별칭에 건다: FROM v_etf_constituent c JOIN v_etf_kr e ON e.pd_itm_no = c.etf_itm_no "
+                         "WHERE c.company_code = '...' AND e.is_on_sale = 1 ORDER BY e.pd_net_tamt DESC. "
+                         "편입종목 뷰에 상품 마스터 컬럼을 직접 걸면 'no such column' 이 나며, 그것은 데이터가 없다는 뜻이 아니라 조인이 빠졌다는 뜻이다. "
+                         "etf_itm_no 로 v_etf_kr.pd_itm_no 와 조인한다. "
                          "'삼성전자를 보유한 ETF' 같은 질의는 이 뷰를 조인해서 푼다. 종목 지정은 company_code(종목코드, 79% 수록)가 가장 정확하고, "
                          "없으면 company_name 을 쓴다(해외 종목은 한글 표기). 삼성전자(005930)와 삼성전자우(005935)는 다른 종목이다. "
                          "현금·예금 행은 is_cash=1 이므로 종목을 셀 때는 is_cash=0 을 건다. weight_pct 는 비중(%). 해외ETF·펀드는 편입종목 데이터가 없다.",
