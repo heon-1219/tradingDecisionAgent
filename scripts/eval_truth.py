@@ -37,8 +37,11 @@ from finagent.kb.graph import KG  # noqa: E402
 from finagent.kb.lexicon import Lexicon  # noqa: E402
 from finagent.kb.rdb import RDB  # noqa: E402
 
-# "없습니다" 같은 흔한 종결어미는 넣지 않는다 — 정상 답변에도 자주 나와 오탐이 된다.
+# "없습니다" 를 그대로 넣으면 "값이 없는 종목은 제외했습니다" 같은 정상 답변까지 확인불가로 세어 버린다.
+# 반대로 빼 두면 "Kimi 관련 투자상품은 없습니다" 처럼 존재를 정확히 부정한 답을 오답으로 세게 되므로
+# (실제로 G-018 이 그렇게 채점됐다), 주어가 상품·데이터일 때만 부정을 인정한다.
 DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없")
+DECLINE_RX = re.compile(r"(상품|종목|펀드|ETF|ETN|채권|데이터|정보|결과)[^.\n]{0,12}?없(습니다|음|어요)")
 CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인")
 # 시스템 장애로 생성된 대체 답변. 문구상 '확인할 수 없습니다'로 시작하므로 그냥 두면
 # 확인불가 문항이 전부 통과한 것처럼 보인다 — 실제로는 모델이 판단조차 못 한 것이다.
@@ -79,7 +82,7 @@ def score(item: dict, answer: str, truth: list[str], trace: str = "") -> tuple[b
         return False, "시스템 오류 — 모델이 답하지 못함(채점 불가)"
     a_norm = norm(answer)
     if check == "cannot_confirm":
-        declined = any(d in answer for d in DECLINE)
+        declined = any(d in answer for d in DECLINE) or bool(DECLINE_RX.search(answer))
         asked_back = any(c in answer for c in CLARIFY) and "?" in answer
         ok = declined or asked_back
         return ok, "확인불가 명시" if declined else ("역질문" if asked_back else "없음 — 답을 지어냈을 가능성")
