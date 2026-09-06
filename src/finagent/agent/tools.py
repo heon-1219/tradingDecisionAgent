@@ -82,6 +82,12 @@ GRAPH_LABELS_SHOWN = 8
 # 15건을 정확히 찾아놓고 8개만 보여주자, 모델이 목록이 불완전하다고 보고 이름으로 다시 좁히려다
 # 8라운드를 돌고 119초에 죽었다.  완전한 목록을 주면 그 탐색이 아예 일어나지 않는다.
 GRAPH_LABELS_FULL_UNDER = 25
+# 이름 옆에 함께 주는 식별자 개수.  코드는 라벨보다 짧고(12자 안팎) SQL 에 바로 들어가므로 더 많이 준다.
+GRAPH_IDS_SHOWN = 60
+# 대상이 '상품'인 관계 — 이 관계들의 ID 는 v_etf_kr.pd_itm_no 로 조인된다.
+_PRODUCT_RELATIONS = {"hasTheme_inverse", "manages", "tracksIndex_inverse", "constituentOf",
+                      "hasConstituent_inverse", "memberOfFamily_inverse", "investsInRegion_inverse",
+                      "hasAssetClass_inverse", "hasRiskGrade_inverse"}
 
 
 def korean_magnitude(v: float) -> str:
@@ -553,6 +559,21 @@ class ToolRegistry:
             # "상위"가 아니라 "예시": 이 목록에는 순서가 없다. 순자산·수익률 상위는 SQL 로만 나온다.
             shown = f"{total}건" + (f", 예시 {len(head)}건" if more else "")
             lines.append(f"{rel} ({shown}): " + ", ".join(x["label"] for x in head) + (" ..." if more else ""))
+            # 이름 옆에 스토어의 식별자를 함께 준다.  이름만으로는 SQL 을 짤 수 없다: '최근 6개월
+            # 우주항공 테마 ETF' 에서 그래프가 100건을 찾아 이름 8개를 줬더니, 모델은 그것을 버리고
+            # 편입종목 회사명에서 '우주'·'항공'을 LIKE 로 찾아 무관한 53건을 받았고, "테마와의
+            # 연관성을 나타내는 정보는 포함되어 있지 않습니다" 로 끝냈다.  ID 를 주면 WHERE ... IN
+            # (...) 한 번으로 순자산·수익률·총보수를 붙일 수 있다.  사전분석이 회사 코드를 넘겨주자
+            # 캠브리콘·네이버·TSMC 가 풀린 것과 같은 처방이다.
+            ids = [x["iri"].rsplit("/", 1)[-1] for x in items if x.get("iri")]
+            ids = [i for i in ids if i][:GRAPH_IDS_SHOWN]
+            if ids and rel in _PRODUCT_RELATIONS:
+                lines.append(
+                    f"  └ 위 상품의 조회용 ID {len(ids)}개"
+                    + (f" (전체 {total}건 중)" if total > len(ids) else "")
+                    + ": pd_itm_no IN (" + ", ".join(f"'{i}'" for i in ids) + ")"
+                    + " — 이름으로 다시 찾지 말고 이 ID 로 v_etf_kr 을 조회해 순자산·수익률·총보수를 붙이세요."
+                )
             refs += [x["label"] for x in items[:10]]
         return ToolResult(note + "\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(totals.values()) or sum(len(v) for v in nb.values()), refs[:30]))
 

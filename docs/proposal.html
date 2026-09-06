@@ -176,26 +176,13 @@ section.cont{ page-break-before:auto; break-before:auto; }
   <div class="cover-top">
     <div class="cover-kicker">제10회 2026 미래에셋증권 AI Festival · 금융상품 Agent 과제</div>
     <div class="cover-title">기술제안서</div>
-    <div class="cover-sub">온톨로지를 문서가 아니라 <span style="color:#1f4e79">런타임 부품</span>으로 쓰는 연합 검색 에이전트</div>
-  </div>
-
-  <div class="cover-claim">
-    “잘 만들었다”가 아니라 <b>“측정했고, 틀린 것을 찾아냈고, 그것을 고쳤다”</b>가 이 제안의 내용입니다.
-    <small>이 문서에 적힌 모든 숫자는 실측값입니다. 측정하지 않은 것은 측정하지 않았다고 적었습니다.</small>
   </div>
 
   <div class="endpoint">
     <div class="lbl">평가용 API END-POINT</div>
     <div class="url">http://223.130.161.217/answer</div>
-    <div class="note">GET · 인증 헤더 없음 · 표준 포트 80(HTTP) · 응답 200 OK 고정 5필드 JSON · 운영 2026-09-07 ~ 09-20</div>
   </div>
 
-  <div class="stat-row">
-    <div class="stat"><div class="v">47 / 54</div><div class="k">자체 정답 키 정답률 (87%)</div></div>
-    <div class="stat"><div class="v">20.6초</div><div class="k">평균 응답 · 300초 초과 0건</div></div>
-    <div class="stat"><div class="v">108.3만</div><div class="k">지식그래프 트리플 · 술어 73종</div></div>
-    <div class="stat"><div class="v">215</div><div class="k">모델에게 노출한 컬럼 (전량)</div></div>
-  </div>
 
   <div class="cover-meta">
     <table>
@@ -213,7 +200,6 @@ section.cont{ page-break-before:auto; break-before:auto; }
   </div>
 </div>
 
-
 <!-- ==================================================================== -->
 <!-- 목차                                                                  -->
 <!-- ==================================================================== -->
@@ -228,13 +214,13 @@ section.cont{ page-break-before:auto; break-before:auto; }
     <li><span class="tn">06</span><span class="tt">부록</span><span class="td">온톨로지 스키마 · API 명세 · 평가 재현 절차 · 데이터 제한 사항</span></li>
   </ol>
 
-  <h3 style="margin-top:2em">이 문서를 읽는 법 — 세 문장 요약</h3>
+  <h3 style="margin-top:2em">먼저 읽을 세 가지</h3>
   <div class="lead" style="margin-bottom:.9em">
     <p style="margin-bottom:.5em"><strong>① 무엇을 만들었는가.</strong>
     하나의 질문이 RDB · 지식그래프 · 어휘색인 · 벡터색인 · 문서저장소 다섯 경로로 갈라졌다가 하나의 답으로 합쳐지는
     연합 검색 에이전트입니다. 다섯 경로가 <strong>같은 온톨로지 한 벌</strong>을 참조하므로 서로의 답을 검증할 수 있습니다.</p>
     <p style="margin-bottom:.5em"><strong>② 무엇이 다른가.</strong>
-    온톨로지가 제출용 문서가 아니라 <strong>기동 시 스키마 카드와 값 검증기를 만들어내는 실행 계층</strong>입니다.
+    온톨로지를 <strong>기동 시 스키마 카드와 값 검증기를 만들어내는 실행 계층</strong>으로 씁니다.
     그리고 SQL이 낸 수를 그래프로 다시 세어 대조하는 것을 절차로 삼았습니다.</p>
     <p style="margin-bottom:0"><strong>③ 무엇을 측정했는가.</strong>
     정답률 47/54, 평균 20.6초, 벡터 레그의 순기여 +3.5%p, 라운드 한계비용 +11.2초.
@@ -242,7 +228,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
   </div>
 
   <table>
-    <caption>표 0. 이 문서에 실린 실측 수치 — 어디서 나왔는가</caption>
+    <caption>표 0. 본문 실측 수치의 출처</caption>
     <thead><tr><th style="width:34%">측정 항목</th><th style="width:30%">값</th><th>재현 방법</th></tr></thead>
     <tbody>
       <tr><td>정답률 · 응답 시간</td><td>47/54 (87%) · 평균 20.6초</td><td><code>scripts/eval_truth.py</code> → <code>data/eval/truth_results.jsonl</code></td></tr>
@@ -254,6 +240,9 @@ section.cont{ page-break-before:auto; break-before:auto; }
     </tbody>
   </table>
 </div>
+
+
+
 
 
 <!-- ==================================================================== -->
@@ -367,7 +356,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 정답 키를 시스템과 <strong>같은 코드로</strong> 계산하면, 코드가 틀렸을 때 답과 정답이 <strong>함께</strong> 틀리고 채점은 초록불이 됩니다.</p>
 
 <p>실제로 그런 일이 일어났습니다. 지식그래프가 편입 관계 수를 <strong>두 배로 부풀린 채</strong> “정답”이었습니다 —
-정답 키를 그래프와 같은 코드로 계산했기 때문입니다. 이 사건 이후 이 프로젝트는
+정답 키를 그래프와 같은 코드로 계산했기 때문입니다. 이 사건 이후
 <em>SQL로 낸 수를 그래프로, 그래프로 낸 수를 SQL로 한 번 더 세어 대조하는 것</em>을 절차로 삼았습니다(02-3, 05-1).</p>
 
 <table>
@@ -419,8 +408,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
   <p class="law-q">“바꾼 뒤에 결과를 다시 센다.”</p>
   <p style="margin:0">위 6건 중 어느 것도 예외를 던지지 않았고, 로그를 남기지 않았고, 테스트를 빨갛게 만들지 않았습니다.
   성공/실패 여부를 보는 것으로는 잡히지 않고, <strong>개수를 다시 세어야</strong> 잡힙니다.
-  그래서 이 프로젝트는 각 적재·채움 단계마다 <strong>작업 전후의 건수를 재계산해 비교</strong>하는 것을 절차로 두었습니다.
-  이 절차 자체가 우리가 제안하는 방법의 일부입니다.</p>
+  그래서 각 적재·채움 단계마다 <strong>작업 전후의 건수를 재계산해 비교</strong>하는 것을 절차로 두었습니다.</p>
 </div>
 </section>
 
@@ -504,7 +492,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 </table>
 
 <div class="box warn">
-  <h4>침묵하는 오류를 잡는 방법 — 이 절의 알맹이</h4>
+  <h4>침묵하는 오류를 잡는 방법</h4>
   <p>파이프라인의 한 채움 단계는 <code>pandas</code>의 <code>Series.map</code>이 <code>None</code>을 돌려주면 <code>NaN</code>이 되고
   <code>NaN</code>은 참이라는 이유로 <strong>아무 행도 채우지 않은 채 성공을 보고</strong>하고 있었습니다.
   예외도 로그도 없었고 테스트는 초록이었습니다. 그래서 각 채움 단계는
@@ -532,9 +520,8 @@ section.cont{ page-break-before:auto; break-before:auto; }
 <h3>02-2. 어떤 온톨로지 엔지니어링을 적용했는가</h3>
 
 <div class="box good">
-  <p style="margin:0"><strong>한 문장 요약 —</strong> 온톨로지가 <strong>제출용 문서가 아니라 실행 계층</strong>입니다.
-  TTL 6개가 기동 시 ① LLM에게 보여줄 <strong>스키마 카드</strong>, ② 질문의 값을 걸러내는 <strong>검증기</strong>,
-  ③ 그래프에 물질화되는 <strong>추론 규칙</strong> 세 가지를 자동 생성합니다.
+  <p style="margin:0">TTL 6개를 기동 시 읽어 ① LLM에게 보여줄 <strong>스키마 카드</strong>, ② 질문의 값을 걸러내는 <strong>검증기</strong>,
+  ③ 그래프에 물질화되는 <strong>추론 규칙</strong>을 자동 생성합니다.
   새 상품군을 붙이는 비용이 <strong>뷰 1개 + TTL 1개</strong>로 떨어지는 것이 그 결과입니다.</p>
 </div>
 
@@ -625,7 +612,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
   <text class="t-sub" x="456" y="413">걸러내는 대신 <tspan font-weight="700">잘못 만들어낸다.</tspan></text>
   <text class="t-sub" x="456" y="433">제약이 필요한 자리에는 <tspan font-weight="700">SHACL NodeShape 13개</tspan>를 썼다.</text>
 </svg>
-<figcaption><b>그림 3.</b> 왼쪽은 “무엇이 무엇인가”, 오른쪽은 “그것이 런타임에 무엇이 되는가”입니다. 속성 정의 <b>261개 중 215개</b>가 실제 뷰 컬럼에 연결(<code>fp:sourceTable</code>/<code>fp:sourceColumn</code>)되어 있고, <b>연결되지 않은 속성은 스키마 카드에 나타나지 않으며, 스키마 카드에 없는 컬럼은 모델에게 존재하지 않는 것과 같습니다</b>(02-3 실측 근거).</figcaption>
+<figcaption><b>그림 3.</b> 왼쪽은 클래스 계층, 오른쪽은 그 정의가 런타임에 무엇이 되는지입니다. 속성 정의 <b>261개 중 215개</b>가 실제 뷰 컬럼에 연결(<code>fp:sourceTable</code>/<code>fp:sourceColumn</code>)되어 있고, <b>연결되지 않은 속성은 스키마 카드에 나타나지 않으며, 스키마 카드에 없는 컬럼은 모델에게 존재하지 않는 것과 같습니다</b>(02-3 실측 근거).</figcaption>
 </figure>
 
 <table>
@@ -649,7 +636,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 </table>
 
 <div class="box warn">
-  <p style="margin:0"><strong>정직하게 밝힐 한계 —</strong> SHACL NodeShape 13개는 <strong>선언되어 있으나 런타임 검증은 적용하지 않았습니다</strong>
+  <p style="margin:0"><strong>밝혀 둘 한계 —</strong> SHACL NodeShape 13개는 <strong>선언되어 있으나 런타임 검증은 적용하지 않았습니다</strong>
   (<code>pyshacl</code>을 의존성에 넣지 않았습니다). 현재 SHACL은 <em>제약의 명세</em>로서 기능하고,
   실제 값 차단은 온톨로지 열거형에서 생성된 검증기가 사전 분석 단계에서 수행합니다.
   <code>pyshacl</code> 도입은 확장 항목으로 남겨 두었습니다(05-3).</p>
@@ -659,7 +646,7 @@ section.cont{ page-break-before:auto; break-before:auto; }
 
 <h4>다섯 경로로 갈라지되, 무엇을 켤지는 결정론적으로 고른다</h4>
 <p>질의 요소별로 경로가 다릅니다 — 숫자 필터·정렬·집계는 SQL, 관계 순회는 그래프,
-이름·서술 매칭은 BM25, 배경 지식은 문서. 중요한 것은 <strong>이 선택을 모델의 변덕에 맡기지 않았다</strong>는 점입니다.
+이름·서술 매칭은 BM25, 배경 지식은 문서. 이 선택은 <strong>모델에 맡기지 않았습니다</strong>.
 LLM을 부르기 전에 사전 분석이 <strong>검색 실행 계획</strong>을 세우고, 그 질문에 필요한 저장소만 미리 실행해
 결과 행을 <strong>첫 프롬프트에 사실로 주입</strong>합니다(<code>agent/routing.py</code>의 <code>plan_retrieval</code>).</p>
 
@@ -781,7 +768,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <rect class="f-n" x="380" y="193" width="162" height="9"/><text class="t-tiny" x="548" y="201">45.0</text>
 
   <text class="t-sub" x="376" y="222">테마어</text>
-  <rect class="f-k" x="380" y="226" width="313" height="9"/><text class="t-tiny" x="699" y="234">87.0</text>
+  <rect class="f-k" x="380" y="226" width="313" height="9"/><text class="t-tiny" x="699" y="219">87.0</text>
   <rect class="f-n" x="380" y="237" width="201" height="9"/><text class="t-tiny" x="587" y="245">55.8</text>
   <rect class="f-g" x="693" y="226" width="13" height="9"/>
   <text class="t-tiny" x="712" y="234" fill="#2e7d5b" font-weight="700">→ 90.5 (결합, +3.5%p)</text>
@@ -790,7 +777,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <rect class="f-n" x="470" y="270" width="9" height="9"/><text class="t-tiny" x="484" y="279">벡터(TF-IDF+LSA)</text>
   <rect class="f-g" x="600" y="270" width="9" height="9"/><text class="t-tiny" x="614" y="279">결합이 더한 것 — 여기 하나뿐입니다</text>
 </svg>
-<figcaption><b>그림 5.</b> 우리는 “의미 검색이 오타·유의어를 흡수한다”고 쓰지 않습니다. <b>오타 내성은 BM25의 한글 bigram이 제공합니다</b>(어휘 93.1% 대 벡터 45.0%). TF-IDF+LSA는 의미 임베딩이 아니라 어휘 공기(co-occurrence) 기반이므로 이 정도가 이 방식의 상한입니다. 재현: <code>python scripts/audit_vector.py --sections BC</code>.</figcaption>
+<figcaption><b>그림 5.</b> “의미 검색이 오타·유의어를 흡수한다”는 서술은 쓰지 않았습니다. <b>오타 내성은 BM25의 한글 bigram이 제공합니다</b>(어휘 93.1% 대 벡터 45.0%). TF-IDF+LSA는 의미 임베딩이 아니라 어휘 공기(co-occurrence) 기반이므로 이 정도가 이 방식의 상한입니다. 재현: <code>python scripts/audit_vector.py --sections BC</code>.</figcaption>
 </figure>
 
 <h4>모델은 스키마를 물어보지 않는다 — 그래서 프롬프트 설계를 바꿨다</h4>
@@ -804,7 +791,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
 
 <div class="box law">
   <p class="law-q">“사용 시점에 사실로 준 것은 지켜졌고(5/5), 미리 준 프롬프트 규칙은 무시됐다(4/4).”</p>
-  <p>이 프로젝트가 반복 측정으로 얻은 <strong>설계 법칙</strong>입니다.
+  <p>반복 측정에서 같은 결과가 나왔습니다.
   경고문을 늘리는 것은 효과가 없었고, <strong>스키마 카드·사전 검색 결과·조회 키를 모델이 쓰는 바로 그 순간에 쥐여주는 것</strong>은 효과가 있었습니다.</p>
   <p style="margin-bottom:0">가장 명확한 사례: 교차질의에서 “해외ETF는 1년 수익률이 없으니 제외하라”는 <em>경고문</em>은 무시됐지만,
   <strong>예시 SQL의 <code>UNION</code>에서 해외ETF를 빼자</strong> 같은 실패가 사라졌습니다 — 경고는 읽히지 않았고 예시는 복사됐습니다.
@@ -867,30 +854,30 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <rect class="bx-t" x="238" y="40" width="196" height="446" rx="4"/>
   <rect class="f-k" x="238" y="40" width="196" height="26"/>
   <text class="t-w" x="336" y="58" text-anchor="middle">색인</text>
-  <rect class="bx-g" x="250" y="78" width="172" height="66" rx="3"/>
-  <text class="t-lab" x="262" y="98">어휘 색인 · BM25</text>
-  <text class="t-tiny" x="262" y="114">한글 음절 bigram</text>
-  <text class="t-tiny" x="262" y="128">정확 상품명 부스트</text>
-  <text class="t-num" x="410" y="136" text-anchor="end">75,089 문서</text>
-  <rect class="bx-n" x="250" y="152" width="172" height="66" rx="3"/>
-  <text class="t-lab" x="262" y="172">벡터 색인 · TF-IDF+LSA</text>
-  <text class="t-tiny" x="262" y="188">384차원 · max_df 0.005</text>
-  <text class="t-tiny" x="262" y="202">임베딩 API 키 불필요</text>
-  <text class="t-num" x="410" y="210" text-anchor="end">75,089 문서</text>
-  <rect class="bx-g" x="250" y="226" width="172" height="96" rx="3"/>
-  <text class="t-lab" x="262" y="246">지식그래프 · rdflib</text>
-  <text class="t-tiny" x="262" y="264">ABox: SQLite + 사전에서 생성</text>
-  <text class="t-tiny" x="262" y="278">TBox 병합 → 추론 물질화</text>
-  <text class="t-tiny" x="262" y="292">hasConstituent 는 SQLite 에서 생성</text>
-  <text class="t-num" x="410" y="312" text-anchor="end">1,082,874 트리플</text>
-  <rect class="bx-n" x="250" y="330" width="172" height="52" rx="3"/>
-  <text class="t-lab" x="262" y="350">문서 청크 색인</text>
-  <text class="t-tiny" x="262" y="366">front-matter 출처·기준일</text>
-  <rect class="bx-w" x="250" y="392" width="172" height="80" rx="3"/>
-  <text class="t-lab" x="262" y="412"><tspan font-family="Consolas,monospace">ontology/*.ttl</tspan> 로더</text>
-  <text class="t-tiny" x="262" y="430">스키마 카드 생성</text>
-  <text class="t-tiny" x="262" y="444">값 검증기 생성</text>
-  <text class="t-tiny" x="262" y="458">추론 규칙 물질화</text>
+  <rect class="bx-g" x="250" y="74" width="172" height="74" rx="3"/>
+  <text class="t-lab" x="262" y="93">어휘 색인 · BM25</text>
+  <text class="t-tiny" x="262" y="109">한글 음절 bigram</text>
+  <text class="t-tiny" x="262" y="123">정확 상품명 부스트</text>
+  <text class="t-num" x="410" y="141" text-anchor="end">75,089 문서</text>
+  <rect class="bx-n" x="250" y="154" width="172" height="74" rx="3"/>
+  <text class="t-lab" x="262" y="173">벡터 색인 · TF-IDF+LSA</text>
+  <text class="t-tiny" x="262" y="189">384차원 · max_df 0.005</text>
+  <text class="t-tiny" x="262" y="203">임베딩 API 키 불필요</text>
+  <text class="t-num" x="410" y="221" text-anchor="end">75,089 문서</text>
+  <rect class="bx-g" x="250" y="234" width="172" height="96" rx="3"/>
+  <text class="t-lab" x="262" y="254">지식그래프 · rdflib</text>
+  <text class="t-tiny" x="262" y="272">ABox: SQLite + 사전에서 생성</text>
+  <text class="t-tiny" x="262" y="286">TBox 병합 → 추론 물질화</text>
+  <text class="t-tiny" x="262" y="300">hasConstituent 는 SQLite 에서 생성</text>
+  <text class="t-num" x="410" y="320" text-anchor="end">1,082,874 트리플</text>
+  <rect class="bx-n" x="250" y="336" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="262" y="356">문서 청크 색인</text>
+  <text class="t-tiny" x="262" y="372">front-matter 출처·기준일</text>
+  <rect class="bx-w" x="250" y="394" width="172" height="80" rx="3"/>
+  <text class="t-lab" x="262" y="414"><tspan font-family="Consolas,monospace">ontology/*.ttl</tspan> 로더</text>
+  <text class="t-tiny" x="262" y="432">스키마 카드 생성</text>
+  <text class="t-tiny" x="262" y="446">값 검증기 생성</text>
+  <text class="t-tiny" x="262" y="460">추론 규칙 물질화</text>
 
   <path class="ln-k" d="M434,250 L458,250" marker-end="url(#arwk)"/>
 
@@ -957,9 +944,9 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
 
   <!-- 온톨로지 관통 -->
   <path class="ln-d" d="M116,479 L846,479" stroke="#b5651d" stroke-width="1.6"/>
-  <path class="ln-d" d="M116,479 L116,472 M336,479 L336,472 M556,479 L556,472 M770,479 L770,472" stroke="#b5651d" stroke-width="1.6"/>
+  <path class="ln-d" d="M116,479 L116,472 M336,479 L336,474 M556,479 L556,472 M770,479 L770,472" stroke="#b5651d" stroke-width="1.6"/>
 </svg>
-<figcaption><b>그림 6.</b> 주황색 점선은 온톨로지가 <em>네 단계를 모두 관통</em>한다는 뜻입니다 — 같은 TTL이 적재의 파생 정의, 색인의 추론 규칙, 검색의 스키마 카드, 생성의 값 검증기가 됩니다. 이것이 “온톨로지를 문서가 아니라 런타임 부품으로 쓴다”는 말의 실체입니다.</figcaption>
+<figcaption><b>그림 6.</b> 주황색 점선은 온톨로지가 <em>네 단계를 모두 관통</em>한다는 뜻입니다 — 같은 TTL이 적재의 파생 정의, 색인의 추론 규칙, 검색의 스키마 카드, 생성의 값 검증기가 됩니다.</figcaption>
 </figure>
 
 <table>
@@ -1022,7 +1009,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
 <h2><span class="no">04</span>주요 기능 흐름도</h2>
 <p class="lead" style="margin-bottom:1.1em">
 데이터 수집 → 온톨로지 설계 → 그래프 구축 → 검색.
-네 단계를 <strong>추상적으로 설명하는 대신 실제 질문 하나가 통과하는 모습</strong>으로 보입니다.
+네 단계를 <strong>실제 질문 하나가 통과하는 과정</strong>으로 보입니다.
 </p>
 
 <figure>
@@ -1069,7 +1056,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <text class="t-sub" x="34" y="210">이 프로젝트가 겪은 사고 6건은 모두 예외도 로그도 없이 통과했습니다(표 2). 성공/실패로는 잡히지 않고 <tspan font-weight="700">개수를 다시 세어야</tspan> 잡힙니다.</text>
   <text class="t-sub" x="34" y="230">그래서 각 화살표에는 “다음 단계로 넘기기 전에 무엇을 다시 세는가”가 정의되어 있습니다 — 이것이 파이프라인의 일부입니다.</text>
 </svg>
-<figcaption><b>그림 8.</b> 네 단계가 순차적으로 이어지되, 3단계의 그래프는 2단계의 온톨로지와 1단계의 SQLite <em>양쪽</em>을 원천으로 삼습니다. 편입 관계를 그래프가 아니라 <b>SQLite 테이블에서 생성</b>하는 것이 이 구조의 핵심입니다.</figcaption>
+<figcaption><b>그림 8.</b> 네 단계가 순차적으로 이어지되, 3단계의 그래프는 2단계의 온톨로지와 1단계의 SQLite <em>양쪽</em>을 원천으로 삼습니다. 편입 관계는 그래프가 아니라 <b>SQLite 테이블에서 생성</b>합니다.</figcaption>
 </figure>
 
 <h3>질문 하나가 처리되는 과정 — 실제 트레이스</h3>
@@ -1192,7 +1179,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
 </p>
 
 <table>
-  <caption>표 8. 오답 7건 전수 공개 — 감추면 시연에서 무너집니다</caption>
+  <caption>표 8. 오답 7건 전수</caption>
   <thead><tr><th style="width:8%">문항</th><th style="width:8%" class="c">난이도</th><th style="width:44%">질문</th><th>무엇이 틀렸나 · 진단</th></tr></thead>
   <tbody>
     <tr><td>G-012</td><td class="c">중</td><td>환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?</td><td>기대값 63 미포함 — <strong>“펀드 클래스냐 펀드냐”</strong> 정의 모호(06-D)</td></tr>
@@ -1312,7 +1299,7 @@ RRF는 두 검색기가 동의하는 문서를 위로 올리는데, 이 코퍼�
   <text class="t-tiny" x="18" y="188">근거: 이 구조는 이미 한 번 검증됐습니다 — 편입종목(<tspan font-family="Consolas,monospace">etf_constituent</tspan>)이 뷰 1개 + TTL 1개로 추가되면서 SQL·그래프·색인·근거 표기에 동시에 반영됐습니다.</text>
   <text class="t-tiny" x="18" y="202">LLM 어댑터 구조 덕분에 대회 규정으로 제공자가 HyperCLOVA X 로 확정됐을 때 교체 비용이 사실상 0이었습니다(<tspan font-family="Consolas,monospace">LLM_PROVIDER</tspan> 환경변수 1개).</text>
 </svg>
-<figcaption><b>그림 11.</b> 확장 비용이 낮은 이유는 온톨로지가 <em>문서</em>가 아니라 <em>부품</em>이기 때문입니다. TTL을 추가하면 프롬프트·검증기·그래프가 함께 늘어나고, 셋을 따로 손볼 필요가 없습니다.</figcaption>
+<figcaption><b>그림 11.</b> TTL을 추가하면 프롬프트·검증기·그래프가 함께 늘어나고, 셋을 따로 손볼 필요가 없습니다.</figcaption>
 </figure>
 
 <h4>확장 방향</h4>
@@ -1402,7 +1389,7 @@ curl -G "http://223.130.161.217/answer" \<br>
 
 <h3>06-D. 데이터 · 시스템 제한 사항</h3>
 <div class="box warn" style="margin-top:.4em">
-  <p style="margin:0">이 절은 <strong>이 시스템이 못 하는 것</strong>의 목록입니다. 감추면 시연에서 무너지고, 밝히면 답변 정책이 됩니다 —
+  <p style="margin:0"><strong>이 시스템이 못 하는 것</strong>의 목록입니다.
   아래 각 항목은 실제로 <code>cannot_confirm</code> 응답의 근거로 쓰입니다.</p>
 </div>
 <table>

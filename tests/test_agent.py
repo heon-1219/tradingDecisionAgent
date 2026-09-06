@@ -738,9 +738,16 @@ async def test_graph_neighbors_shows_few_labels_but_the_true_total(tiny_store, t
     assert "229건" in r.content and r.evidence.row_count == 229      # 총계는 잘리지 않는다
     assert r.content.count("ETF") == GRAPH_LABELS_SHOWN == 8         # 라벨은 8개만
     assert "ETF007" in r.content and "ETF008" not in r.content
-    assert "예시 8건" in r.content and r.content.rstrip().endswith("...")
+    # 라벨 줄은 여전히 "..." 로 잘리지만, 그 아래에 SQL 조회용 ID 줄이 따라붙는다.
+    labels_line = r.content.splitlines()[0]
+    assert "예시 8건" in labels_line and labels_line.rstrip().endswith("...")
+    assert "조회용 ID" in r.content and "pd_itm_no IN (" in r.content
     assert "상위" not in r.content                                    # 정렬돼 있지 않으므로 '상위'라 부르지 않는다
-    assert len(r.content) < 200                                       # 40개 시절 삼성전자는 1,501자였다
+    # 상한 200 -> 700.  라벨 8개만으로는 모델이 SQL 을 짤 수 없어 조회용 ID 줄을 덧붙였고,
+    # 그만큼 길어진다(229건 관계에서 550자).  이 상한의 목적은 40개 시절 삼성전자가 1,501자를
+    # 쏟아내던 것을 막는 것이었고, 550자는 그 3분의 1이다.  ID 없이 짧기만 한 출력은 실제로
+    # 답을 못 만들었다 — 우주항공 테마 100건을 받고도 이름만으로는 쓰지 못해 확인불가로 끝났다.
+    assert len(r.content) < 700
 
     # 총계가 상한 이하면 아무것도 잘리지 않고 "예시" 표기도 붙지 않는다
     s.tools.kg = _FakeKG(3)
