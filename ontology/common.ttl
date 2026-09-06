@@ -321,6 +321,41 @@ fp:hasSubsidiary a owl:ObjectProperty ;
     rdfs:domain fp:Company ; rdfs:range fp:Company ;
     owl:inverseOf fp:subsidiaryOf .
 
+# --- 기업집단(계열) 관계 -----------------------------------------------------
+# 왜 자회사와 따로 두는가 — 원천에 지분율이 없기 때문이다.
+#   fp:subsidiaryOf/hasSubsidiary 는 '지분 50%+ 소유'라는 주장이다. 이것을 뒷받침하는 데이터는
+#   companies.yaml 의 손으로 확인한 4개 엣지뿐이다(에코프로 3 + SK이노베이션 1).
+#   그룹주 ETF(예: PLUS 한화그룹주)의 편입종목은 운용사가 '이 종목들이 이 그룹이다'라고 상품에
+#   담아둔 사실이므로 '같은 기업집단'까지는 말할 수 있다. 그러나 누가 누구를 소유하는지는
+#   말하지 않는다: 한화시스템·한화오션은 한화에어로스페이스의 자회사지만 한화생명·한화손해보험은
+#   지주회사 (주)한화의 자회사다. 같은 ETF 에 담겼다는 사실만으로는 이 둘을 구분할 수 없다.
+#   따라서 유도된 관계는 소유가 아니라 대칭 관계 fp:affiliateOf('계열사')로 적는다.
+fp:BusinessGroup a owl:Class ;
+    rdfs:label "기업집단"@ko , "Business Group"@en ;
+    rdfs:comment "같은 기업집단(그룹)에 속한 기업의 묶음. ABox 는 그룹주 ETF(v_etf_constituent 의 '…그룹' ETF)의 편입종목에서 유도한다. 지분 소유 구조가 아니라 '같은 그룹'이라는 사실만을 담는다."@ko .
+
+fp:affiliateOf a owl:ObjectProperty , owl:SymmetricProperty ;
+    rdfs:label "계열사"@ko , "affiliate of"@en ;
+    rdfs:comment "기업 ↔ 같은 기업집단에 속한 기업(대칭). 그룹주 ETF 가 함께 편입한 종목에서 유도한다. 소유·지배 관계를 뜻하지 않으므로 답변에는 '자회사'가 아니라 '계열사'로 표기해야 한다. 지분 기준 자회사는 fp:hasSubsidiary 를 쓴다."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:Company .
+
+fp:memberOfGroup a owl:ObjectProperty ;
+    rdfs:label "소속 기업집단"@ko , "member of group"@en ;
+    rdfs:comment "기업 → 소속 기업집단. 역관계 fp:hasGroupMember."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:BusinessGroup ;
+    owl:inverseOf fp:hasGroupMember .
+
+fp:hasGroupMember a owl:ObjectProperty ;
+    rdfs:label "계열사 목록"@ko , "has group member"@en ;
+    rdfs:comment "기업집단 → 소속 기업. fp:memberOfGroup 의 역관계."@ko ;
+    rdfs:domain fp:BusinessGroup ; rdfs:range fp:Company ;
+    owl:inverseOf fp:memberOfGroup .
+
+fp:groupEvidenceProduct a owl:ObjectProperty ;
+    rdfs:label "계열 근거 상품"@ko , "group evidence product"@en ;
+    rdfs:comment "기업집단 → 그 집단을 유도한 근거가 된 그룹주 ETF. 계열 관계가 어느 상품의 편입종목에서 나왔는지를 그래프 안에 남긴다."@ko ;
+    rdfs:domain fp:BusinessGroup ; rdfs:range fp:DomesticETF .
+
 fp:memberOfFamily a owl:ObjectProperty ;
     rdfs:label "소속 펀드 패밀리"@ko , "member of family"@en ;
     rdfs:comment "펀드 클래스 → 패밀리 (fund_family). 같은 패밀리의 클래스끼리만 보수 비교가 유효."@ko ;

@@ -10,3 +10,9 @@ data/external/cache/
 
 # 튜닝 학습셋은 스크립트로 재생성 가능 (CSV 는 용량이 큼)
 data/tuning/*.csv
+
+# 서버 접속 키 — 절대 커밋 금지 (NCP 인증키, SSH 키)
+*.pem
+*.key
+*.p12
+id_rsa*

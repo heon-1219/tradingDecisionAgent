@@ -6,15 +6,15 @@
 ## 0. 평가용 API End-point
 
 ```
-http://<TBD>/answer
+http://223.130.161.217/answer
 ```
 
-> ⚠ **배포 후 이 주소를 확정 기입해야 합니다.** 주최측 공지: "API End-point 주소는 README.md 파일에 명시합니다(필수)."
+네이버 클라우드 플랫폼 VPC · Ubuntu 24.04 · Docker Compose · 표준 포트 80(HTTP). 운영 기간 2026-09-07 ~ 09-20.
 
 호출 예시 (인증 헤더 없음, 경로는 `/answer` 고정):
 
 ```bash
-curl -G "http://<TBD>/answer" \
+curl -G "http://223.130.161.217/answer" \
   --data-urlencode "question_id=Q-001" \
   --data-urlencode "question=평가 질의"
 ```

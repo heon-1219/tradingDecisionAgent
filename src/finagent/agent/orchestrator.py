@@ -14,6 +14,7 @@ from ..models import AnswerResponse
 from ..ontology.loader import normalize_text as _nrm
 from .answer import CANNOT_PREFIX, Evidence, fallback_answer, format_evidence, format_trace, normalize_answer
 from .llm import LLMClient, ToolCall
+from .routing import prefetch as route_prefetch
 from .tools import ToolRegistry, ToolResult
 
 log = logging.getLogger("finagent.orchestrator")
@@ -216,30 +217,46 @@ _CRIT_STOP = {"상품", "종목", "가지", "개수", "건수", "곳", "것", "�
               "채권", "상품군", "항목", "기준", "이름", "정보", "데이터", "조건", "구분", "현재", "지금"}
 # 기준 표현 앞에 붙는 기간 수식어 — '1년' '5년' '최근 3개월' '연초대비' 는 뒤 명사와 한 덩어리다.
 _PERIOD_TOKEN = re.compile(r"^(?:최근)?\s*(?:\d+\s*(?:일|주|주일|개월|달|년)|연초\s*대비|ytd)$", re.I)
+# 관형형·용언 어미로 끝나는 말은 값의 이름이 아니라 앞 명사를 꾸미는 말이다. '판매중인 상품 기준으로'
+# 의 '판매중인' 이 is_on_sale 을 정렬 기준으로 끌고 왔고, '서로 다른 종목' 의 '다른' 도 그랬다.
+# 실제 값 이름(총보수·순자산·수익률·표면금리·분배금·비중·만기·변동성·추적오차)은 이 어미로 끝나지 않는다.
+_ADNOMINAL = re.compile(r"(?:인|한|는|된|던|른|은|을|를)$")
 _COUNT_ASKED = re.compile(r"(?:top|상위|하위)\s*(\d+)|(\d+)\s*개(?!월)|(\d+)\s*(?:종목|건|가지)", re.I)
 
 
-def criterion_phrase(question: str) -> str | None:
-    """The measure phrase a ranking question sorts by, or None when the question ranks nothing.
+def criterion_phrases(question: str) -> list[str]:
+    """Candidate measure phrases for a ranking question — [] when the question ranks nothing.
 
     The regexes capture greedily up to the ranking word, so the capture usually swallows the whole
-    clause ('국내 ETF와 공모펀드를 1년 수익률').  The measure is the tail of it: the last token, plus
-    the token before it when that one is a period ('1년' + '수익률').
+    clause ('국내 ETF와 공모펀드를 1년 수익률').  Which part of the tail is the measure is not knowable
+    from surface form alone: in '1년 수익률' it is the last two tokens, in '순자산 규모' the *first* of
+    the two ('규모' alone resolves to a USD AUM column that has nothing to do with a 공모펀드
+    question).  So the tail is offered as several candidates and the ontology picks — the caller
+    keeps whichever resolves best.  Longest window first, then the individual tokens.
     """
     q = question or ""
     for pat in _CRITERION:
         for m in pat.finditer(q):
-            toks = [t for t in re.split(r"\s+", m.group(1).strip()) if t]
+            toks = [t.strip("의은는이가을를도와과및,") for t in re.split(r"\s+", m.group(1).strip())]
+            toks = [t for t in toks if t][-3:]
             if not toks:
                 continue
-            tail = toks[-1].strip("의은는이가을를도와과및,")
-            if len(toks) >= 3 and _PERIOD_TOKEN.match(f"{toks[-3]} {toks[-2]}"):
-                tail = f"{toks[-3]} {toks[-2]} {tail}"
-            elif len(toks) >= 2 and _PERIOD_TOKEN.match(toks[-2]):
-                tail = f"{toks[-2]} {tail}"
-            if len(_nrm(tail)) >= 2 and _nrm(tail) not in _CRIT_STOP:
-                return tail
-    return None
+            cands = [" ".join(toks[-n:]) for n in range(len(toks), 0, -1)] + toks[:-1]
+            out, seen = [], set()
+            for c in cands:
+                n, last = _nrm(c), _nrm(c.split()[-1])
+                # 끝 낱말로 판정한다: 한국어는 수식이 앞에 붙으므로 구의 정체는 마지막 명사가 정한다.
+                # '판매중인 상품' 은 상품을 가리키는 말이지 값의 이름이 아니다.
+                if len(n) < 2 or n in seen or n in _CRIT_STOP or last in _CRIT_STOP or _ADNOMINAL.search(n):
+                    continue
+                seen.add(n)
+                out.append(c)
+            if out:
+                return out
+    return []
+
+
+_STATUS_RANK = {"resolved": 4, "period_missing": 3, "ambiguous": 2, "weak": 1, "none": 0}
 
 
 def requested_count(question: str) -> int | None:
@@ -350,6 +367,66 @@ def _norm_sql(s: str) -> str:
         last = m.end()
     out.append(_plain(s[last:]))
     return "".join(out)
+
+
+# ------------------------------------------------- 조회 없이 낸 답변을 되돌리는 강제 재시도
+# HCX-005 는 도구를 한 번도 부르지 않고 사전학습 지식만으로 답해 버리는 경우가 있다. 같은 질문을
+# 5회씩 실측한 결과 그렇게 나온 답은 예외 없이 틀렸다:
+#   G-034 — 5/5 가 도구 0회로 3.3초에 끝나고 운용사를 약칭 'Invesco' 로 답했다.
+#           DB 의 값은 'Invesco Capital Management LLC' 라 공식 명칭이 아니어서 오답.
+#   G-010 — 5회 중 도구를 부른 3회는 정답, 부르지 않은 2회는 DB 에 존재하지도 않는 상품명과
+#           수치를 통째로 지어냈다(순수 환각).
+# 도구를 부르면 맞고 안 부르면 틀린다는 관찰에 예외가 없었으므로, 조회를 한 번도 하지 않은 채
+# 제출된 final_answer 는 받지 않고 한 라운드를 더 돌린다. 채점 기준의 [환각 방지] 항목이
+# "데이터에 없는 내용은 추출하지 않음" 을 요구한다.
+#
+# '조회 도구'의 정의는 final_answer 를 뺀 나머지 전부다. 부정 조건(name != "final_answer")
+# 대신 명시적 허용 목록으로 적은 이유는, 모델이 존재하지 않는 이름의 도구를 부른 경우를 조회로
+# 세면 안 되기 때문이다 — 그런 호출은 실행되지 않고 "알 수 없는 도구" 오류만 돌아오므로 근거가
+# 생기지 않는다. 목록이 실제 레지스트리와 어긋나면 test_lookup_tools_matches_registry 가 잡는다.
+#
+# table_info 는 값이 아니라 스키마를 돌려주지만 조회로 친다: 기준일·허용값처럼 table_info 만으로
+# 답이 되는 문항이 있고, 여기서 빼면 그런 문항에 근거 없이 라운드가 하나 더 붙는다.
+LOOKUP_TOOLS = frozenset({
+    "sql_query", "table_info", "search_products", "resolve_entity",
+    "graph_neighbors", "graph_query", "search_documents",
+})
+
+# 강제 재시도 1회의 실측 비용은 LLM 라운드 1회 ≈ 11초다. 다만 되돌린 뒤에는 도구를 실행하는
+# 라운드와 final_answer 를 다시 받는 라운드가 더 필요하므로 세 라운드 분의 여유를 요구한다.
+# 남은 예산이 이보다 적으면 되돌리지 않고 있는 답을 그대로 받는다 — 근거 없는 답 하나보다
+# 응답시간(주최측 권장 60초)을 넘겨 문항을 통째로 잃는 쪽이 나쁘다.
+FORCED_LOOKUP_MIN_REMAINING_SEC = 33.0
+
+# final_answer 호출에 되돌려 주는 tool_result. OpenAI/CLOVA 프로토콜은 이 턴의 tool_call 마다
+# 결과를 요구하므로, 대화를 이어가려면 반드시 채워야 한다(비우면 다음 요청이 400 으로 떨어진다).
+_NO_LOOKUP_TOOL_RESULT = (
+    "제출이 거부되었습니다. 이번 질문에서 데이터 조회 도구를 한 번도 호출하지 않았습니다. "
+    "조회 결과에 근거하지 않은 답변은 환각으로 처리됩니다. 데이터를 먼저 조회한 뒤 "
+    "final_answer 를 다시 호출하세요."
+)
+
+_UNRUN_TOOL_RESULT = (
+    "이 호출은 같은 턴에 final_answer 가 함께 있어 실행되지 않았습니다. 필요하면 지금 다시 호출하세요."
+)
+
+# 재시도 지시는 '사용 시점의 사실'로 준다. 이 프로젝트에서 미리 준 프롬프트 규칙은 무시됐고
+# (4/4), 그 순간의 사실로 준 지시는 지켜졌다(5/5). 마지막 문단은 확인불가 문항이 이 재시도
+# 때문에 답을 지어내기 시작하는 부작용을 막는다 — 조회 후의 거절은 유지되어야 한다.
+_NO_LOOKUP_RETRY = (
+    "[답변 전 데이터 조회 필수] 방금 제출한 final_answer 는 받지 않았습니다. 이번 질문에서 "
+    "데이터 조회 도구를 한 번도 부르지 않았기 때문입니다.\n"
+    "답변 전에 최소 한 번은 데이터를 조회해야 합니다. 상품의 공식 명칭·수치·날짜는 반드시 조회 "
+    "결과에서 그대로 가져오세요. 기억에 있는 이름을 쓰면 안 됩니다 — 이 데이터에 실린 정식 명칭은 "
+    "흔히 쓰는 약칭과 다르고(예: 운용사명은 법인 정식명입니다), 기억에서 꺼낸 수치는 이 데이터의 "
+    "값이 아닙니다.\n"
+    "지금 할 일: 관련 뷰를 sql_query 로 조회하세요. 컬럼 이름이 불확실하면 table_info 를, 상품의 "
+    "정확한 표기를 모르면 search_products 나 resolve_entity 를 먼저 부르세요. 조회 결과를 확인한 "
+    "뒤 다시 final_answer 를 호출하세요.\n"
+    "조회 결과가 비어 있거나 근거를 찾지 못했다면 답을 지어내지 마세요. 그럴 때는 "
+    "status=cannot_confirm 을 그대로 유지하는 것이 정답입니다. 조회한 뒤의 '제공된 데이터로는 "
+    "확인할 수 없습니다' 는 맞는 답이지만, 조회 없이 단정한 답은 틀린 답입니다."
+)
 
 
 def _call_key(call: ToolCall):
@@ -513,8 +590,7 @@ class Orchestrator:
             lines.append(f"- '최근 {n}개월' = {cutoff.isoformat()} ~ {self.base_date} (데이터 기준일 기준)")
         if whole is not None and whole.products and whole.products[0].score >= 60:
             lines.append("- 질문 전체와 유사한 상품: " + "; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in whole.products[:3]))
-        crit_phrase = criterion_phrase(question)
-        crit = self._criterion_lines(question, groups)
+        crit_phrase, crit = self._criterion_lines(question, groups)
         lines += crit
         if invalid:
             lines.insert(0, "- ⚠ 온톨로지 위반: " + " / ".join(invalid))
@@ -525,7 +601,7 @@ class Orchestrator:
             + (f"; 테마 {', '.join(t.label_ko for t in themes)}" if themes else "")
             + (f"; 상품군 {', '.join(group_name(ci) for ci in groups)}" if groups else "")
             + ("; 편입데이터 없는 상품군" if holding_blind else "")
-            + (f"; 정렬기준 '{crit_phrase}'" if crit else "")
+            + (f"; 정렬기준 '{crit_phrase}'" if crit_phrase else "")
             + (f"; 온톨로지 위반 {len(invalid)}건" if invalid else "")
             + (f"; 미존재 상품 {len(unresolved)}건" if unresolved else "")
         )
@@ -557,22 +633,39 @@ class Orchestrator:
             f"이름이나 테마가 비슷한 상품을 보유 상품인 것처럼 제시하면 오답입니다."
         )
 
-    def _criterion_lines(self, question: str, groups) -> list[str]:
-        """Ontology-resolved ranking criterion, or [] when the question ranks nothing.
+    def _pick_criterion(self, question: str):
+        """(phrase, resolution) for the candidate the ontology resolves best, or None."""
+        best = None
+        for phrase in criterion_phrases(question):
+            res = self.ontology.resolve_measure(phrase)
+            if res.status == "none":
+                continue
+            score = max((h.score for h in res.hits + res.other_periods), default=0)
+            key = (_STATUS_RANK[res.status], score, len(phrase))
+            if best is None or key > best[0]:
+                best = (key, phrase, res)
+        return None if best is None else (best[1], best[2])
+
+    def _criterion_lines(self, question: str, groups) -> tuple[str | None, list[str]]:
+        """(phrase, lines) for the ranking criterion — (None, []) when the question ranks nothing.
 
         Silence is the default and the common case: 순위를 묻지 않는 질문에는 한 줄도 붙지 않는다.
         """
         if self.ontology is None:
-            return []
+            return None, []
         try:
-            phrase = criterion_phrase(question)
-            if not phrase:
-                return []
-            res = self.ontology.resolve_measure(phrase)
+            picked = self._pick_criterion(question)
+            if picked is None:
+                return None, []
+            phrase, res = picked
             out: list[str] = []
             if res.status == "resolved":
+                # 질문이 상품군을 지목했으면 그 뷰의 컬럼을 앞에 둔다. '국내 ETF 중 분배율' 에
+                # v_fund_pub 컬럼이 먼저 오면 첫 줄만 읽은 모델이 엉뚱한 뷰로 간다.
+                scope = {v for s in group_views(groups, self.ontology).values() for v in s}
+                hits = sorted(res.hits, key=lambda h: (h.prop.table not in scope, -h.score)) if scope else res.hits
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
-                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in res.hits[:6])
+                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in hits[:6])
                 out.append(f"- 정렬 기준 '{phrase}' → 온톨로지 라벨 조회 결과 {cols}. 이 컬럼으로 정렬하고 NULL·0 은 후보에서 제외하세요.")
                 out += self._missing_in_groups(res, groups)
             elif res.status == "period_missing":
@@ -585,9 +678,10 @@ class Orchestrator:
             elif res.status == "ambiguous":
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko})" for h in res.hits[:10])
                 out.append(
-                    f"- 정렬 기준 '{phrase}' 는 온톨로지에서 {len({(h.prop.table, h.prop.column) for h in res.hits})}개 컬럼에 대응해 "
-                    f"하나로 확정되지 않습니다: {cols}. 임의로 하나를 고르지 말고, 어느 것인지 되묻거나 "
-                    f"고른 기준을 답변 첫 문장에 명시하세요."
+                    f"- 정렬 기준 '{phrase}' 는 기간·대상이 지정되지 않아 온톨로지에서 "
+                    f"{len({(h.prop.table, h.prop.column) for h in res.hits})}개 컬럼에 대응합니다: {cols}. "
+                    f"질문 맥락에 맞는 컬럼을 고르고 그 기준을 답변 첫 문장에 밝히세요. "
+                    f"맥락으로도 정해지지 않으면 임의로 고르지 말고 되물으세요."
                 )
             elif res.status == "weak":
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
@@ -600,10 +694,10 @@ class Orchestrator:
                 n = requested_count(question)
                 if n is not None:
                     out.append(f"- 요청 개수: {n}개 (LIMIT {n})")
-            return out
+            return (phrase if out else None), out
         except Exception:  # noqa: BLE001
             log.exception("criterion resolution failed")
-            return []
+            return None, []
 
     def _missing_in_groups(self, res, groups) -> list[str]:
         """Which of the named product groups do *not* carry the resolved criterion.
@@ -677,12 +771,43 @@ class Orchestrator:
             elapsed=time.monotonic() - t0,
         )
 
-        conv = self.llm.start(self.system_prompt, self.specs, f"질문: {question}\n\n{pre.text}")
+        # ---- 라운드 0: 검색 실행 계획(agent/routing.py)
+        # 사전분석이 "이 저장소가 필요하다"고 판정한 것만 미리 조회해서, 그 결과를 첫 프롬프트에
+        # 사실로 싣는다. 프롬프트로 "그래프를 쓰라"고 지시하는 것과 달리 이것은 지켜진다
+        # (이 프로젝트의 측정: 사용 시점의 사실 5/5 준수, 사전 규칙 4/4 무시).
+        # 실패하거나 예산을 넘기면 아무것도 싣지 않고 기존 도구 루프가 그대로 이어진다.
+        prefetch_block = ""
+        try:
+            pf = await route_prefetch(
+                question, self.tools, resolver=self.resolver, lexicon=self.lexicon,
+                ontology=self.ontology, mentions=list(pre.mentions),
+                unresolved=[m for m, _ in pre.unresolved],
+                forward_looking=asks_forward_looking(question, self.base_year),
+            )
+            steps += pf.steps
+            prefetch_block = pf.block
+            # 라운드 0 근거는 retrieved_context 에 넣지 않는다: 도구 루프가 같은 조회를 다시 하는
+            # 경우가 대부분이라 [근거] 가 중복으로 찍힌다(근거 개수를 세는 기존 테스트가 이를 잡는다).
+            # 라운드 0 이 무엇을 왜 조회했는지는 think_trace 의 '라운드 0' 줄이 그대로 보여준다.
+            emit("prefetch", text=pf.block, ran=pf.ran, seconds=pf.seconds,
+                 elapsed=time.monotonic() - t0)
+        except Exception as e:  # noqa: BLE001 - 사전검색은 최적화일 뿐 의존성이 아니다
+            log.exception("retrieval routing failed")
+            steps.append(f"라운드 0 라우팅 실패({type(e).__name__}) — 기존 흐름으로 진행")
+
+        conv = self.llm.start(self.system_prompt, self.specs,
+                              f"질문: {question}\n\n{pre.text}"
+                              + (f"\n\n{prefetch_block}" if prefetch_block else ""))
         last_text = ""
         nudged = False
         # key -> (지금까지 몇 번째 호출인지, 첫 실행 결과)
         seen_calls: dict = {}
         repeat_nudged = False
+        # 이번 질의에서 실제로 "실행된" 데이터 조회 호출 수. 같은 턴에 final_answer 와 섞여 나와
+        # 실행되지 않은 호출은 세지 않는다 — 결과를 못 봤으면 근거가 없는 것과 같다.
+        lookups = 0
+        forced_lookup = False                 # 강제 재시도는 질문당 한 번뿐(무한 루프 금지)
+        rejected_final: dict | None = None    # 되돌린 답변. 재시도가 빈손으로 끝나면 이것을 쓴다.
         for rnd in range(1, self.settings.max_tool_rounds + 2):
             remaining = deadline - time.monotonic()
             if remaining < 3:
@@ -706,6 +831,28 @@ class Orchestrator:
                 final = fa.input or {}
                 others = [c for c in turn.tool_calls if c.name != "final_answer"]
                 steps.append(f"라운드 {rnd}: final_answer(status={final.get('status', '?')})" + (f" + 무시된 도구 {len(others)}개" if others else ""))
+                remaining = deadline - time.monotonic()
+                if lookups == 0 and not forced_lookup:
+                    # 되돌릴 여유가 있는지 라운드와 시간을 모두 본다. 재시도가 쓸모 있으려면
+                    # 도구를 실행할 라운드가 최소 하나 남아 있어야 한다(rnd+1 <= max_tool_rounds).
+                    if rnd >= self.settings.max_tool_rounds or remaining < FORCED_LOOKUP_MIN_REMAINING_SEC:
+                        steps.append(
+                            f"라운드 {rnd}: 데이터 조회 0회지만 예산 부족(잔여 {remaining:.0f}s, "
+                            f"최대 {self.settings.max_tool_rounds}라운드) → 강제 재시도 생략하고 답변 수용"
+                        )
+                        break
+                    forced_lookup = True
+                    rejected_final, final = final, None
+                    conv.add_tool_results(
+                        [(fa.id, _NO_LOOKUP_TOOL_RESULT, True)]
+                        + [(c.id, _UNRUN_TOOL_RESULT, True) for c in others]
+                    )
+                    conv.add_user(_NO_LOOKUP_RETRY)
+                    steps.append(f"라운드 {rnd}: 데이터 조회 0회 상태의 final_answer → 제출 거부, 조회 후 재제출 지시")
+                    emit("forced_lookup_retry", round=rnd,
+                         status=str(rejected_final.get("status") or "?"),
+                         elapsed=time.monotonic() - t0)
+                    continue
                 break
             if not turn.tool_calls:
                 steps.append(f"라운드 {rnd}: 도구 호출 없이 텍스트 응답")
@@ -717,6 +864,8 @@ class Orchestrator:
             if rnd > self.settings.max_tool_rounds:
                 steps.append(f"라운드 {rnd}: 최대 라운드 초과")
                 break
+            # 여기까지 왔으면 이 턴의 호출은 아래 gather 에서 전부 실행된다 — 실행되는 것만 센다.
+            lookups += sum(1 for c in turn.tool_calls if c.name in LOOKUP_TOOLS)
             # execute all tool calls of this turn concurrently
             for call in turn.tool_calls:
                 emit("tool_call", round=rnd, name=call.name, args=call.input or {},
@@ -790,6 +939,11 @@ class Orchestrator:
                 conv.add_user("[시간 예산 임박] 추가 도구 호출 없이 지금까지 확보한 근거로 즉시 final_answer 를 호출하세요.")
                 steps.append(f"라운드 {rnd}: 시간 예산 임박 안내 (잔여 {remaining:.0f}s)")
 
+        # 되돌린 답변을 잃지 않는다. 재시도 라운드가 LLM 오류·시간 초과·라운드 소진으로 아무것도
+        # 내놓지 못하면, 근거는 없어도 원래 있던 답이 빈손보다 낫다.
+        if final is None and rejected_final is not None:
+            final = rejected_final
+            steps.append("강제 재시도 후 final_answer 재호출 없음 → 처음 제출된 답변을 사용")
         # ---------------------------------------------------------- compose
         if final is not None:
             status = str(final.get("status") or "answered")

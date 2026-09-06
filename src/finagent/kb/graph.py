@@ -41,6 +41,98 @@ def slug(s: str | None) -> str:
     return s[:80] or "unknown"
 
 
+# --------------------------------------------------------------- group affiliates
+# 그룹주 ETF 의 편입종목에서 '같은 기업집단'(계열) 관계를 유도한다.
+#
+# 왜 데이터로 유도하는가 — companies.yaml 의 손으로 적은 parent 4개(에코프로 3 + SK이노베이션 1)는
+#   주최측 예시 문항에 나온 회사만 맞추는 오버피팅이었다. 다른 그룹을 물으면 답변불가가 됐다.
+#   운용사가 '이 종목들이 이 그룹이다'라고 상품에 담아둔 사실이 v_etf_constituent 안에 이미 있다.
+#
+# 왜 '계열사'이지 '자회사'가 아닌가 — 원천에 지분율이 없다. 같은 그룹주 ETF 에 담겼다는 사실은
+#   같은 기업집단임을 말할 뿐, 누가 누구를 소유하는지는 말하지 않는다. ontology/common.ttl 의
+#   fp:affiliateOf 주석 참조.
+#
+# 규칙(실측으로 정했다. 17개 그룹주 ETF 전수 확인):
+#   1) 편입종목이 기업이 아닌 ETF 는 버린다 — 채권·혼합형은 편입종목이 채권 종목("현대카드914-4",
+#      "국고채권03250-2706")이거나 선물("삼성전자선물2609")이다. 이것을 회사로 채택하면 곧 오답이다.
+#   2) 그룹명 토큰에 숫자가 들어가면 버린다 — "5대그룹주"(복수 그룹 혼합), "인도시장대표BIG5그룹"
+#      (지수명)은 하나의 그룹에 귀속시킬 수 없다.
+#   3) 순수형(그룹명 뒤에 가중방식 수식어만 붙는 것: '', '주', '동일가중', '섹터가중', '밸류')은
+#      편입종목 전부를 계열사로 채택한다. 이것이 이 방식의 이득이다 — 에스원·제일기획·호텔신라는
+#      실제 삼성 계열사인데 이름 접두어로는 절대 잡을 수 없고 ETF 는 잡는다.
+#   4) 혼합형(플러스·포커스·대표주 등 '관련주'를 섞는 상품)은 이름에 그룹명 토큰을 포함하는
+#      종목만 채택한다. TIGER LG그룹플러스에서 GS·GS건설·GS리테일·LS·휴젤을 떨어뜨리고,
+#      WON 두산그룹포커스에서 한전기술·삼성전자·파미셀을 떨어뜨린다.
+#   5) 같은 그룹의 ETF 가 여럿이면 합집합.
+_GROUP_RX = re.compile(r"([0-9A-Za-z가-힣&.]+)그룹")
+# 편입종목이 기업이 아닌 상품(채권 종목·국고채·선물). 회사로 채택하면 안 된다.
+_GROUP_NOT_EQUITY = re.compile(r"채권|혼합|국고|통안")
+# '그룹' 뒤에 와도 편입 유니버스를 바꾸지 않는 수식어(가중방식·표기 변형)
+_GROUP_PURE_SUFFIX = {"", "주", "동일가중", "섹터가중", "밸류", "sw", "주sw", "주동일가중", "주섹터가중"}
+# 그룹명 앞에 붙은 투자지역 수식어("인도타타그룹" → 타타그룹)
+_GROUP_REGION_PREFIX = ("인도", "미국", "중국", "일본", "국내", "해외", "유럽")
+# 같은 회사를 한글/영문 두 표기로 쓰는 그룹 (POSCO홀딩스는 '포스코' 부분문자열로 잡히지 않는다)
+_GROUP_TOKEN_ALIASES = {"포스코": ("posco",)}
+
+
+def parse_group_etf(etf_name: str) -> tuple[str, bool] | None:
+    """'…그룹…' ETF 이름 → (그룹명 토큰, 순수형 여부). 계열 유도에 쓸 수 없으면 None.
+
+    >>> parse_group_etf("PLUS 한화그룹주")
+    ('한화', True)
+    >>> parse_group_etf("TIGER LG그룹플러스")
+    ('LG', False)
+    >>> parse_group_etf("RISE 삼성그룹Top3채권혼합") is None
+    True
+    """
+    name = unicodedata.normalize("NFKC", str(etf_name or "")).strip()
+    if "그룹" not in name or _GROUP_NOT_EQUITY.search(name):
+        return None
+    m = None
+    for m in _GROUP_RX.finditer(name):  # 마지막 '…그룹' 을 그룹명으로 본다
+        pass
+    if m is None:
+        return None
+    token, suffix = m.group(1), name[m.end():].strip()
+    if re.search(r"\d", token):  # '5대', '인도시장대표BIG5' — 하나의 그룹이 아니다
+        return None
+    for p in _GROUP_REGION_PREFIX:
+        if token.startswith(p) and len(token) - len(p) >= 2:
+            token = token[len(p):]
+            break
+    if len(token) < 2:
+        return None
+    return token, suffix.lower().replace(" ", "") in _GROUP_PURE_SUFFIX
+
+
+def _group_token_matches(token: str, company_name: str) -> bool:
+    cn = unicodedata.normalize("NFKC", str(company_name or "")).lower()
+    return any(t.lower() in cn for t in (token, *_GROUP_TOKEN_ALIASES.get(token, ())))
+
+
+def derive_group_affiliates(rows) -> dict[str, dict[str, list[str]]]:
+    """편입종목 행에서 기업집단을 유도한다.
+
+    ``rows``: (etf_itm_no, etf_name, company_key, company_name) 반복자. ``company_key`` 는
+    ``_load_constituents`` 가 회사 IRI 를 만들 때 쓰는 것과 **같은** 식별키여야 한다 — 다른 키를
+    쓰면 같은 회사가 그래프에 두 번 생긴다.
+
+    반환: {그룹명 토큰: {company_key: [근거 ETF itm_no, ...]}}
+    """
+    groups: dict[str, dict[str, list[str]]] = defaultdict(dict)
+    for etf_id, etf_name, key, cname in rows:
+        parsed = parse_group_etf(etf_name)
+        if parsed is None:
+            continue
+        token, pure = parsed
+        if not pure and not _group_token_matches(token, cname):
+            continue
+        ev = groups[token].setdefault(key, [])
+        if etf_id not in ev:
+            ev.append(etf_id)
+    return dict(groups)
+
+
 class KG:
     def __init__(self, g: rdflib.Graph):
         self.graph = g
@@ -304,9 +396,9 @@ class KG:
                 add((pi, FP.hasTheme, ti))
             n += 1
         log(f"  funds: {n} ({len(fam_seen)} families)")
-        # --- constituents ---------------------------------------------------
-        n = cls._load_constituents(g, comp_iri, rdb)
-        log(f"  constituents: {n}")
+        # --- constituents + 기업집단(계열) -----------------------------------
+        n, n_groups, n_aff = cls._load_constituents(g, comp_iri, rdb)
+        log(f"  constituents: {n} | 기업집단 {n_groups}개 · 계열사 엣지 {n_aff}")
         # --- TBox + inference -----------------------------------------------
         asserted = len(g)
         inferred = cls._materialize(g, ontology, log) if ontology is not None and getattr(ontology, "graph", None) is not None else 0
@@ -403,12 +495,13 @@ class KG:
         """
         try:
             rows = rdb.fetch_all(
-                "SELECT etf_itm_no, company_code, company_name, company_id FROM etf_constituent WHERE is_cash = 0"
+                "SELECT etf_itm_no, company_code, company_name, company_id, etf_name FROM etf_constituent WHERE is_cash = 0"
             )
         except Exception:  # noqa: BLE001 - a store built before this table simply has no constituents
-            return 0
+            return 0, 0, 0
         n = 0
-        for etf_id, code, cname, cid in rows:
+        group_rows: list[tuple] = []
+        for etf_id, code, cname, cid, etf_name in rows:
             if not etf_id or not cname:
                 continue
             pi = D[f"etf_kr/{etf_id}"]
@@ -424,8 +517,43 @@ class KG:
                 g.add((ci, FP.ticker, Literal(str(code))))
             g.add((pi, FP.hasConstituent, ci))
             g.add((ci, FP.constituentOf, pi))
+            group_rows.append((etf_id, etf_name, cid, cname))
             n += 1
-        return n
+        return (n, *KG._load_group_affiliates(g, comp_iri, group_rows))
+
+    @staticmethod
+    def _load_group_affiliates(g: rdflib.Graph, comp_iri: dict[str, URIRef], group_rows: list[tuple]) -> tuple[int, int]:
+        """Materialize fp:BusinessGroup / fp:affiliateOf from the group-ETF holdings.
+
+        Runs *after* the constituent pass so that ``comp_iri`` already holds every company the
+        holdings created — the affiliate edges must land on the same nodes the ETF edges did, or the
+        graph gets two 한화에어로스페이스 and every join silently halves.
+
+        fp:affiliateOf is asserted in both directions (it is declared owl:SymmetricProperty, but the
+        materializer only closes owl:inverseOf) so a one-hop SPARQL pattern answers from either end.
+        """
+        n_groups = n_edges = 0
+        for token, members in sorted(derive_group_affiliates(group_rows).items()):
+            keys = [k for k in members if k in comp_iri]
+            if len(keys) < 2:  # 혼자인 '집단'은 계열 관계를 만들지 못한다
+                continue
+            n_groups += 1
+            gi = D[f"group/{slug(token)}"]
+            label = f"{token}그룹"
+            g.add((gi, RDF.type, FP.BusinessGroup))
+            g.add((gi, FP.name, Literal(label)))
+            g.add((gi, RDFS.label, Literal(label, lang="ko")))
+            for k in keys:
+                g.add((comp_iri[k], FP.memberOfGroup, gi))
+                g.add((gi, FP.hasGroupMember, comp_iri[k]))
+                for etf_id in members[k]:  # 이 계열 관계가 어느 상품에서 나왔는지를 그래프에 남긴다
+                    g.add((gi, FP.groupEvidenceProduct, D[f"etf_kr/{etf_id}"]))
+            for i, a in enumerate(keys):
+                for b in keys[i + 1:]:
+                    g.add((comp_iri[a], FP.affiliateOf, comp_iri[b]))
+                    g.add((comp_iri[b], FP.affiliateOf, comp_iri[a]))
+                    n_edges += 2
+        return n_groups, n_edges
 
     # ------------------------------------------------------------------ query
     def _reindex(self) -> None:
@@ -538,6 +666,28 @@ class KG:
                     continue
                 add(pname, s)
         return dict(out)
+
+    def subsidiary_candidates(self, entity: str, limit: int = 60) -> dict:
+        """'…의 자회사' 질문에 쓸 후보. 지분 기준 자회사가 있으면 그것을, 없으면 계열사를 준다.
+
+        주최측 예시 문항이 '자회사'라는 단어를 쓰므로 이 질문이 답변불가로 떨어지면 안 된다.
+        대부분의 경우 자회사 ⊂ 같은 그룹 계열사 − 자기 자신이다 ('에코프로의 자회사' =
+        {에코프로, 에코프로비엠, 에코프로머티} − {에코프로}).  fp:affiliateOf 는 자기 자신을 향한
+        엣지를 만들지 않으므로 자기 제외는 이미 되어 있다.
+
+        ``kind`` 를 반드시 함께 읽어라: "affiliate" 는 **지분 소유가 확인되지 않은** 관계이므로
+        호출자는 '자회사'가 아니라 '계열사'라고 표기해야 한다.
+        """
+        totals: dict[str, int] = {}
+        items = self.neighbors(entity, relation="hasSubsidiary", limit=limit, totals=totals).get("hasSubsidiary", [])
+        if items:
+            return {"kind": "subsidiary", "items": items, "groups": [], "total": totals.get("hasSubsidiary", len(items))}
+        totals = {}
+        items = self.neighbors(entity, relation="affiliateOf", limit=limit, totals=totals).get("affiliateOf", [])
+        if not items:
+            return {"kind": "", "items": [], "groups": [], "total": 0}
+        groups = [x["label"] for x in self.neighbors(entity, relation="memberOfGroup", limit=5).get("memberOfGroup", [])]
+        return {"kind": "affiliate", "items": items, "groups": groups, "total": totals.get("affiliateOf", len(items))}
 
     def _label(self, o) -> str:
         if isinstance(o, Literal):

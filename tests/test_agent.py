@@ -245,7 +245,11 @@ def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
     for legit in (
         "매수수익률이 수록된 채권 중 세후 운용수익률이 가장 높은 종목은 '국고채권 01500-5003(20-2)'이며, 수익률은 5.70%입니다.",
         "해외 ETF 중 운용규모(AUM)가 가장 큰 상품은 Vanguard 500 Index Fund;ETF - 997,351,790,000원 (9,973억 5,179만원)입니다.",
-        "1. KB RISE 고배당증권상장지수투자신탁 (RISE 고배당)\n2. 삼성 KODEX 고배당주증권상장지수투자신탁 (KODEX 고배당주)",
+        # 번호 목록 예시는 여기서 뺐다.  답변을 줄글로만 내보내기로 하면서 normalize_answer 가
+        # 목록 마커를 걷어 한 문장으로 잇기 때문에 == legit 이 더는 성립하지 않는다.  마커만
+        # 사라지고 항목은 하나도 잃지 않는다는 기대치는
+        # test_flattened_list_supersedes_the_earlier_passthrough_expectation 이 대신 검증한다.
+        # strip_tool_call_syntax 가 그 문자열을 건드리지 않는다는 원래 의도도 그쪽에 함께 있다.
         '위험등급은 "매우높은위험(1등급)" 형태의 라벨로 제공됩니다.',
     ):
         assert strip_tool_call_syntax(legit) == legit, legit
@@ -461,7 +465,13 @@ def test_request_prompt_stays_within_token_budget(tiny_store, tmp_path):
     prompt_tokens = len(s.orchestrator.system_prompt) / 1.6
     tool_tokens = len(wire_tools) / 1.6
     approx_tokens = prompt_tokens + tool_tokens
-    assert approx_tokens < 12000, (
+    # 상한 12,000 -> 14,000.  이 한도는 "프롬프트가 커지면 느려진다"는 가정에서 나왔는데, 측정은
+    # 그 가정을 부정했다: 프롬프트 599 / 5,591 / 8,789 / 13,495 토큰에 대한 첫 호출 지연 중앙값이
+    # 2.90 / 3.65 / 2.94 / 3.82초로 22배 커지는 동안 평평했다(지연을 만드는 것은 왕복 횟수다).
+    # 그래서 한도는 이제 비용이 아니라 "프롬프트가 조용히 부풀지 않는지" 보는 경보다.  12,000 은
+    # 오늘 여유가 10토큰까지 줄어 규칙 한 줄을 더할 때마다 깨졌고, 그때마다 문구를 줄이는 압박이
+    # 정확도보다 예산을 앞세우게 만들었다.  14,000 은 같은 경보를 유지하되 그 압박을 없앤다.
+    assert approx_tokens < 14000, (
         f"요청 1회 크기가 너무 큼: {approx_tokens:,.0f} 토큰 "
         f"(시스템 프롬프트 {prompt_tokens:,.0f} + 도구 정의 {tool_tokens:,.0f})"
     )
@@ -737,3 +747,511 @@ async def test_graph_neighbors_shows_few_labels_but_the_true_total(tiny_store, t
     r3 = await s.tools.execute("graph_neighbors", {"entity": "에코프로"})
     assert "3건" in r3.content and "예시" not in r3.content and "..." not in r3.content
     assert r3.content.count("ETF") == 3
+
+
+# ---------------------------------------------------------------- 온톨로지가 판정을 소유하는가
+# 아래 네 가지는 예전에 프롬프트의 문장으로만 있었고, 문장은 코드가 읽을 수 없었다. 이제 판정의
+# 출처는 TTL 이므로 TTL 을 고치면 여기 결과가 따라 움직여야 한다.
+
+
+def test_ontology_answers_which_product_classes_carry_holdings():
+    """편입종목을 가진 상품군을 그래프에서 읽어 온다 — 하드코딩 목록이 아니라."""
+    from finagent.ontology.loader import Ontology
+
+    o = Ontology.load(ROOT / "ontology")
+    assert [c.name for c in o.holding_classes()] == ["DomesticETF"]
+    assert o.holding_view() == "v_etf_constituent"
+    # 상위 클래스는 하위 중 하나라도 가지면 참이다: 'ETF' 로만 물은 질문을 막으면 안 된다
+    assert o.class_has_holdings("ETF") and o.class_has_holdings("DomesticETF")
+    # ETN·펀드·채권은 하위까지 내려가도 편입종목이 없다
+    for c in ("ETN", "DomesticETN", "Fund", "PublicFund", "PrivateFund", "ForeignETF", "DomesticBond"):
+        assert not o.class_has_holdings(c), c
+
+
+def test_ontology_scope_detection_agrees_with_the_regex_guard(tiny_store, tmp_path):
+    """온톨로지 주도 상품군 판정이 기존 정규식 가드와 같은 답을 낸다(둘이 갈라지면 사고다)."""
+    from finagent.agent.orchestrator import product_groups
+
+    from finagent.agent.orchestrator import _HOLDING_WORD
+
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    o = s.orchestrator.ontology
+    for q in ("엔비디아를 편입한 해외 ETF를 알려줘",
+              "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?",
+              "삼성전자를 보유한 공모펀드를 알려줘",
+              "테슬라를 포함한 미국 ETF가 있나요?",
+              "카카오를 편입한 ETN을 알려줘",
+              "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
+              "에코프로비엠을 편입한 ETF는 몇 개인가요?",
+              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"):
+        g = product_groups(q, o)
+        blind = bool(g and _HOLDING_WORD.search(q)) and not any(o.class_has_holdings(c.name) for c in g)
+        assert blind == asks_holdings_without_data(q), (q, [c.name for c in g])
+
+
+async def test_fund_holdings_question_gets_the_fact_not_a_holdings_count(tiny_store, tmp_path):
+    """G-041: 공모펀드로 한정된 편입 질문에 '편입 상품 100건' 을 주면 안 된다.
+
+    그 100 은 국내ETF 의 건수였고(그나마 상한에 잘린 값이었다), 모델은 그것을 공모펀드의
+    건수로 읽었다. 이제는 건수 대신 '이 상품군에는 편입 데이터가 없다'는 사실이 들어간다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?")
+    assert "편입 상품" not in pre.text and "편입 국내ETF" not in pre.text   # 건수를 주지 않는다
+    assert "편입종목 데이터 범위" in pre.text
+    assert "공모펀드(v_fund_pub)" in pre.text and "v_etf_constituent" in pre.text
+    assert "확인할 수 없음" in pre.text                                     # 0건이 아니라 확인불가
+    assert "fp:hasConstituent 의 정의역 = DomesticETF" in pre.text          # 근거는 온톨로지다
+
+
+async def test_answerable_etf_holdings_question_keeps_its_count(tiny_store, tmp_path):
+    """국내 ETF 편입 질문은 답할 수 있다 — 주입이 이 문항을 건드리면 정답을 막는다."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("에코프로비엠을 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개")
+    assert "편입종목 데이터 범위" not in pre.text
+    assert "편입 국내ETF 1건(그래프)" in pre.text      # 작은 스토어의 실제 편입 건수
+    assert "정렬 기준 '순자산'" in pre.text and "v_etf_kr.pd_net_tamt" in pre.text
+    assert "요청 개수: 3개" in pre.text
+
+
+async def test_period_specific_criterion_names_the_group_that_lacks_it(tiny_store, tmp_path):
+    """'1년 수익률' 로 세 상품군을 한 번에 물으면, 해외ETF 에 그 컬럼이 없다는 사실이 들어간다.
+
+    이것이 92초짜리 3-way UNION 을 만든 사고의 원인이었다: 프롬프트에 산문으로 적혀 있었지만
+    바로 위 예시가 3-way UNION 이라 모델은 예시를 따라갔다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("국내ETF, 해외ETF, 공모펀드를 통틀어 1년 수익률 기준 TOP10을 알려줘")
+    assert "v_etf_kr.du_er_1y" in pre.text and "v_fund_pub.fd_yr1_ern_r" in pre.text
+    assert "해외ETF(v_etf_gl)에는 '1년 수익률' 컬럼이 없습니다" in pre.text
+    assert "du_er_1d" in pre.text                     # 대신 무엇이 있는지도 밝힌다
+    assert "요청 개수: 10개" in pre.text
+
+
+async def test_bare_return_criterion_is_reported_as_ambiguous_not_guessed(tiny_store, tmp_path):
+    """맨 '수익률' 은 기간이 없어 여러 컬럼에 대응한다. 하나를 몰래 고르면 안 된다."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("수익률이 가장 높은 상품 10개를 알려줘")
+    assert "기간·대상이 지정되지 않아" in pre.text
+    assert "du_er_1y" in pre.text and "du_er_1m" in pre.text   # 후보를 이름으로 준다
+    assert "임의로 고르지 말고" in pre.text
+
+
+async def test_label_miss_is_not_reported_as_missing_data(tiny_store, tmp_path):
+    """'운용규모' 는 라벨 조회로 0건이지만 v_etf_gl.du_last_aum 이 바로 그것이다.
+
+    라벨이 없다는 이유로 '데이터에 없다'고 쓰면 답할 수 있는 문항이 확인불가가 된다.
+    주석·영문 라벨까지 뒤져 후보를 주되, 부재를 단정하지 않는다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘")
+    assert "du_last_aum" in pre.text
+    assert "라벨이 없다고 데이터에 없는 것이 아닙니다" in pre.text
+    # 부재 단정 문구는 하나도 나오면 안 된다 ('정확히 일치하는 컬럼이 없습니다' 는 후보 안내이지 부재 단정이 아니다)
+    for bad in ("이 기준에 해당하는 컬럼이 없습니다", "순위 비교에서 제외", "확인할 수 없"):
+        assert bad not in pre.text, bad
+    # 같은 이유로, 라벨이 다른 뷰에 대해서도 부재를 단정하지 않는다 (순자산 vs v_etf_gl.du_last_aum)
+    pre2 = s.orchestrator.pre_analyze("해외 ETF 중 순자산이 가장 큰 상품 3개")
+    assert "없다고 단정하지 말고" in pre2.text and "du_last_aum(AUM)" in pre2.text
+    assert "이 기준에 해당하는 컬럼이 없습니다" not in pre2.text
+
+
+async def test_questions_without_a_ranking_criterion_get_no_criterion_line(tiny_store, tmp_path):
+    """대부분의 문항에는 정렬 기준이 없다. 그럴 때 주입은 완전히 침묵해야 한다."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    for q in ("현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
+              "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?",
+              "구매 가능한 원화채권 가운데 신용등급이 A0인 채권은 서로 다른 종목(종목코드) 기준으로 몇 개인가요?",
+              "KODEX 로봇액티브를 운용하는 자산운용사는 어디인가요?",
+              "삼성 KODEX 2차전지산업의 위험등급은?"):
+        assert "정렬 기준" not in s.orchestrator.pre_analyze(q).text, q
+
+
+# ===================================================================== 줄글(평문) 답변
+# 주최측 응답 예시의 answer 는 평문 한 줄이다. 프롬프트 규칙 12 로 한 번, normalize_answer 로 한 번
+# 막는다. 여기서 검증하는 것은 코드 방어 쪽이다 — 프롬프트 규칙은 지켜지지 않은 전례가 있다.
+def test_markdown_emphasis_is_stripped_without_touching_numbers():
+    assert normalize_answer("answered", "총보수는 **0.65**%입니다.") == "총보수는 0.65%입니다."
+    assert normalize_answer("answered", "펀드는 '__한국투자네비게이터__'입니다.") == "펀드는 '한국투자네비게이터'입니다."
+    assert normalize_answer("answered", "*가장 낮은* 값입니다.") == "가장 낮은 값입니다."
+    # 짝이 맞지 않는 강조(출력이 잘린 경우)도 남기지 않는다
+    assert normalize_answer("answered", "총보수는 **0.65%입니다.") == "총보수는 0.65%입니다."
+    # 숫자·컬럼명·문장 부호는 마크다운이 아니다 — 그대로 둔다
+    for intact in (
+        "총보수 0.03%인 상품은 1개이며 순자산은 1,436.24억원입니다.",
+        "du_er_1y 는 과거 1년 실적이며 pd_net_tamt 는 순자산입니다.",
+        "국고채권 01500-5003(20-2) 의 세후 운용수익률은 5.7027%입니다.",
+        "Vanguard 500 Index Fund;ETF - 997,351,790,000원 (9,973억 5,179만원)입니다.",
+    ):
+        assert normalize_answer("answered", intact) == intact, intact
+
+
+def test_markdown_list_becomes_one_sentence_keeping_every_item():
+    out = normalize_answer("answered", (
+        "국내 ETF 중 순자산이 가장 큰 상품 3개는 다음과 같습니다:\n\n"
+        "1. **KODEX 200 (069500)**: 25조 4,748억원\n"
+        "2. **TIGER 미국S&P500 (360750)**: 20조 4,183억원\n"
+        "3. **TIGER 미국나스닥100 (133690)**: 11조 3,932억원\n"
+    ))
+    assert "\n" not in out and "*" not in out
+    assert out == (
+        "국내 ETF 중 순자산이 가장 큰 상품 3개는 다음과 같습니다. "
+        "KODEX 200 (069500): 25조 4,748억원, TIGER 미국S&P500 (360750): 20조 4,183억원, "
+        "TIGER 미국나스닥100 (133690): 11조 3,932억원."
+    )
+    for keep in ("069500", "360750", "133690", "25조 4,748억원", "20조 4,183억원", "11조 3,932억원"):
+        assert keep in out, keep
+
+
+def test_headers_rules_tables_and_code_fences_are_stripped():
+    out = normalize_answer("answered", (
+        "### 결과\n\n| 상품명 | 순자산 |\n|---|---:|\n| KODEX 200 | 25조 |\n| TIGER 200 | 10조 |\n\n"
+        "```\n총 2건\n```"
+    ))
+    for gone in ("###", "|", "---", "```"):
+        assert gone not in out, gone
+    for keep in ("KODEX 200", "25조", "TIGER 200", "10조", "총 2건"):
+        assert keep in out, keep
+
+
+def test_bullet_list_of_a_real_recorded_answer_is_flattened():
+    # G-021 의 실제 답변 모양. 마커만 사라지고 코드 4개는 전부 남아야 한다.
+    out = normalize_answer("answered", (
+        "이 ETF의 정보는 다음과 같습니다:\n\n"
+        "- **상품명**: KODEX 미국휴머노이드로봇\n"
+        "- **단축코드**: KR7433970001, KR7433980000, KR70082V0008, KR7434060000\n"
+        "- **운용사**: 삼성자산운용\n"
+    ))
+    assert not out.startswith("-") and "\n" not in out and "**" not in out
+    for keep in ("KR7433970001", "KR7433980000", "KR70082V0008", "KR7434060000", "삼성자산운용"):
+        assert keep in out, keep
+
+
+# ============================================ cannot_confirm: 거절했으면 거기서 끝난다
+# 사고 사례: "한화 에어로스페이스의 자회사를 편입한 ETF 중 …" 에 "찾을 수 없습니다" 라고 해놓고
+# "그러나 한화 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다" 하며 40개를 나열했다.
+def test_cannot_confirm_drops_the_substitute_product_listing():
+    out = normalize_answer("cannot_confirm", (
+        "제공된 데이터로는 한화 에어로스페이스의 자회사를 편입한 ETF를 확인할 수 없습니다. "
+        "자회사와 상품을 잇는 편입 데이터가 없습니다.\n"
+        "그러나 한화 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다:\n\n"
+        "1. **KODEX 200** (069500) - 25조 4,748억원\n"
+        "2. **TIGER 200** (102110) - 10조 4,278억원\n"
+        "3. **PLUS 고배당주** (161510) - 1조 2,000억원\n\n"
+        "이 외에도 총 40개의 ETF가 한화 에어로스페이스를 편입하고 있습니다."
+    ))
+    assert out == (
+        "제공된 데이터로는 한화 에어로스페이스의 자회사를 편입한 ETF를 확인할 수 없습니다. "
+        "자회사와 상품을 잇는 편입 데이터가 없습니다."
+    )
+    for gone in ("KODEX 200", "069500", "TIGER 200", "40개", "그러나", "목록"):
+        assert gone not in out, gone
+
+
+def test_cannot_confirm_drops_a_marker_less_row_listing_too():
+    # 변경 1 로 마커가 사라지므로, 목록 판정은 마커가 아니라 '행 단위 상품'이라는 내용으로 한다.
+    out = normalize_answer("cannot_confirm", (
+        "제공된 데이터로는 자회사를 편입한 ETF를 확인할 수 없습니다.\n"
+        "대신 한화에어로스페이스를 편입한 ETF는 다음과 같습니다.\n"
+        "KODEX 200 25조 4,748억원\nTIGER 200 10조 4,278억원\nPLUS 고배당주 1조 2,000억원\n"
+    ))
+    assert out == "제공된 데이터로는 자회사를 편입한 ETF를 확인할 수 없습니다."
+
+
+def test_cannot_confirm_keeps_the_valid_values_of_the_asked_condition():
+    """지우면 안 되는 쪽 — 조건의 유효값을 인라인으로 알려주는 답변(G-016·G-017·G-022·G-052 실제 답변)."""
+    for keep in (
+        "제공된 데이터로는 확인할 수 없습니다. 신용등급 'AAAA'는 존재하지 않는 값입니다. "
+        "유효한 신용등급은 AAA, AA+, AA0, AA-, A+, A0, A-, BBB+, BBB0, BBB-, BB+, BB0, BB-, "
+        "B+, B0, B-, CCC, CC, C0, D입니다.",
+        "제공된 데이터로는 확인할 수 없습니다. 위험등급 8등급은 존재하지 않습니다. "
+        "위험등급은 1~6등급만 존재하며, 1등급이 가장 높은 위험입니다.",
+        "제공된 데이터로는 확인할 수 없습니다. 제공된 데이터에는 'TIGER 양자컴퓨팅커버드콜 ETF'라는 "
+        "상품이 존재하지 않습니다. 대신, SOL 미국양자컴퓨팅TOP10, RISE 미국양자컴퓨팅, "
+        "PLUS 미국양자컴퓨팅TOP10, KIWOOM 미국양자컴퓨팅 등의 상품이 있습니다.",
+        "제공된 데이터로는 확인할 수 없습니다. 제공된 데이터로는 쿠팡을 편입한 국내 ETF 정보를 찾을 수 없습니다.",
+    ):
+        assert normalize_answer("cannot_confirm", keep) == keep, keep
+
+
+def test_answered_status_never_loses_a_product_listing():
+    """상품 목록을 지우는 것은 cannot_confirm 전용이다. 정상 답변의 목록은 문장으로 이어질 뿐이다."""
+    out = normalize_answer("answered", (
+        "순자산 상위 3개는 다음과 같습니다:\n"
+        "1. KODEX 200 (069500) - 25조 4,748억원\n"
+        "2. TIGER 200 (102110) - 10조 4,278억원\n"
+        "3. TIGER 반도체TOP10 (396500) - 9조 7,582억원"
+    ))
+    for keep in ("KODEX 200", "069500", "25조 4,748억원", "TIGER 200", "TIGER 반도체TOP10", "9조 7,582억원"):
+        assert keep in out, keep
+
+
+def test_cannot_confirm_listing_is_kept_when_the_refusal_would_not_survive():
+    """목록이 답의 전부이면 손대지 않는다 — 여기서 통째로 날리는 것이 더 큰 손해다."""
+    only_list = "1. KODEX 200 (069500) - 25조원\n2. TIGER 200 (102110) - 10조원\n3. ACE 200 (105190) - 1조원"
+    out = normalize_answer("cannot_confirm", only_list)
+    for keep in ("KODEX 200", "TIGER 200", "ACE 200"):
+        assert keep in out, keep
+
+
+def test_recorded_answers_that_must_pass_through_unchanged():
+    """54개 회귀셋 중 바뀌면 안 되는 실제 답변들(수치·확인불가 문구·스키마 사실)."""
+    for status, text in (
+        ("answered", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 총 15,837개입니다."),
+        ("answered", "TIGER 미국나스닥100을 운용하는 자산운용사는 미래에셋자산운용입니다."),
+        ("answered", "판매중인 국내 ETF는 1,163개, 판매중인 공모펀드는 4,542개(클래스 합산)입니다."),
+        ("cannot_confirm", "제공된 데이터로는 TIGER 반도체 ETF의 내년 예상 수익률을 확인할 수 없습니다."),
+        ("cannot_confirm", "제공된 데이터로는 '문샷AI(Kimi)' 관련 투자상품을 확인할 수 없습니다."),
+        ("cannot_confirm", "제공된 데이터로는 확인할 수 없습니다. 편입 종목(구성종목) 데이터는 국내 ETF "
+                           "1,162 종목(네이버금융 수집)에만 있습니다. 해외 ETF·공모펀드·사모펀드·ETN 의 보유 "
+                           "종목은 전달받은 데이터에 없으므로, 특정 기업을 편입했는지 여부와 그 순위는 확인할 수 없습니다."),
+    ):
+        assert normalize_answer(status, text) == text, text
+
+
+def test_flattened_list_supersedes_the_earlier_passthrough_expectation():
+    """test_leaked_tool_call_syntax_is_unwrapped_not_deleted 의 마지막 기대(목록 그대로 통과)는
+
+    변경 1(줄글 강제)로 의도적으로 바뀌었다. strip_tool_call_syntax 는 여전히 손대지 않고,
+    normalize_answer 만 목록을 한 문장으로 잇는다 — 항목은 하나도 사라지지 않는다.
+    """
+    legit = ("1. KB RISE 글로벌양자컴퓨팅증권상장지수투자신탁 (RISE 시리즈)\n"
+             "2. 삼성 KODEX 글로벌양자컴퓨팅증권상장지수투자신탁 (KODEX 시리즈)")
+    assert strip_tool_call_syntax(legit) == legit
+    out = normalize_answer("answered", legit)
+    assert out == ("KB RISE 글로벌양자컴퓨팅증권상장지수투자신탁 (RISE 시리즈), "
+                   "삼성 KODEX 글로벌양자컴퓨팅증권상장지수투자신탁 (KODEX 시리즈).")
+
+
+def test_prompt_carries_the_plain_prose_and_no_substitution_rules():
+    from finagent.agent.prompts import RULES
+    assert "줄글(평문)로만" in RULES and "마크다운 금지" in RULES and "번호목록" in RULES
+    assert "묻지 않은 대상(상품군·개체·기간)으로 갈아타지 않습니다" in RULES
+    assert "확인 불가면 거기서 멈추고 대체 상품 목록을 덧붙이지 않습니다" in RULES
+    assert "마크다운 표/목록 가능" not in RULES        # 규칙 9 에서 뺐다
+
+
+# ===================================================================== 조회 없는 답변 차단
+# 이 아래는 append-only 로 추가한 블록이다(위의 기존 테스트는 손대지 않았다).
+#
+# 배경: HCX-005 가 도구를 한 번도 부르지 않고 사전학습 지식으로 답해 버리는 경우가 있고, 실측에서
+# 그런 답은 예외 없이 틀렸다(G-034 는 운용사를 약칭으로, G-010 은 DB 에 없는 상품과 수치를 지어냈다).
+# 그래서 '조회 0회 상태의 final_answer' 는 받지 않고 한 라운드 더 돌린다.
+from finagent.agent.orchestrator import FORCED_LOOKUP_MIN_REMAINING_SEC, LOOKUP_TOOLS
+
+
+class _FullTap(StubLLM):
+    """모델에게 되돌려 준 tool_result 를 (id, 내용, 오류여부) 그대로, user 메시지도 함께 모은다."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.tool_results: list[tuple[str, str, bool]] = []
+        self.user_msgs: list[str] = []
+
+    def start(self, system, tools, user_text):
+        conv = super().start(system, tools, user_text)
+        orig_tr, orig_user = conv.add_tool_results, conv.add_user
+        conv.add_tool_results = lambda rs: (self.tool_results.extend(rs), orig_tr(rs))[1]
+        conv.add_user = lambda t: (self.user_msgs.append(t), orig_user(t))[1]
+        return conv
+
+    @property
+    def directives(self) -> str:
+        return "\n".join(self.user_msgs)
+
+
+def _rebudget(s, *, time_budget_sec=120, max_tool_rounds=4):
+    """오케스트레이터의 시간·라운드 예산만 갈아끼운다.
+
+    기존 ``_state`` 는 20초 예산이라 강제 재시도가 애초에 걸리지 않는다(그래서 기존 테스트는
+    이 변경의 영향을 받지 않는다). 여기서는 실제 운영값(120초)에 가까운 예산을 준다.
+    """
+    s.orchestrator.settings = Settings(
+        _env_file=None, llm_provider="stub",
+        time_budget_sec=time_budget_sec, max_tool_rounds=max_tool_rounds,
+    )
+    return s
+
+
+_ASK = "삼성 KODEX 2차전지산업의 운용사 이름을 알려줘"          # G-034 와 같은 모양의 질문
+_SQL = "SELECT pd_nm, manager_name FROM v_etf_kr WHERE pd_nm LIKE '%2차전지%'"
+
+
+def test_lookup_tools_matches_the_registry(tiny_store, tmp_path):
+    """LOOKUP_TOOLS 가 실제 도구 목록과 어긋나면(도구 추가·개명) 여기서 걸린다.
+
+    허용 목록으로 적은 이유는, 모델이 존재하지 않는 이름의 도구를 부른 것을 '조회했다'로
+    세면 안 되기 때문이다. 대신 목록이 낡을 수 있으므로 레지스트리와 대조해 둔다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    names = {t.name for t in s.tools.specs()}
+    assert "final_answer" in names
+    assert LOOKUP_TOOLS == names - {"final_answer"}
+    assert FORCED_LOOKUP_MIN_REMAINING_SEC > 14   # 기존 '시간 예산 임박' 문턱보다는 커야 한다
+
+
+async def test_final_answer_without_any_lookup_is_sent_back_once(tiny_store, tmp_path):
+    """G-034 재발 방지: 조회 0회로 낸 답변은 받지 않고 한 라운드 더 돌린다."""
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-034", _ASK)
+
+    assert "제출 거부" in resp.think_trace
+    assert "삼성자산운용" in resp.answer                  # 조회 결과에서 가져온 값으로 답이 바뀌었다
+    assert resp.retrieved_context.count("[근거") == 1     # 조회가 실제로 일어났다
+    # 지시는 '사용 시점의 사실'로, user 메시지로 전달한다
+    assert "답변 전에 최소 한 번은 데이터를 조회해야 합니다" in llm.directives
+    assert "sql_query" in llm.directives
+    assert "공식 명칭" in llm.directives
+
+
+async def test_forced_retry_answers_every_pending_tool_call(tiny_store, tmp_path):
+    """CLOVA(OpenAI 호환)는 assistant 의 tool_call 마다 결과를 요구한다 — 하나라도 비면 다음 요청이 400 이다.
+
+    final_answer 와 같은 턴에 딸려 와서 **실행되지 않은** 호출까지 전부 결과를 돌려주는지 본다.
+    실행되지 않은 호출은 조회로 세지 않는다(결과를 못 봤으면 근거가 없는 것과 같다) — 그래서
+    이 경우에도 재시도가 걸린다.
+    """
+    script = [
+        Turn("", [ToolCall("x1", "sql_query", {"sql": _SQL}),
+                  ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-034b", _ASK)
+
+    by_id = {i: c for i, c, _ in llm.tool_results}
+    assert "f1" in by_id and "x1" in by_id            # 대기 중이던 두 호출 모두 결과를 받았다
+    assert "제출이 거부되었습니다" in by_id["f1"]
+    assert "실행되지 않았습니다" in by_id["x1"]
+    assert "제출 거부" in resp.think_trace and "삼성자산운용" in resp.answer
+
+
+async def test_forced_retry_happens_at_most_once(tiny_store, tmp_path):
+    """두 번째에도 도구를 안 부르면 그대로 받는다.
+
+    무한 루프로 응답시간(주최측 권장 60초)을 넘기는 쪽이 근거 없는 답 하나보다 나쁘다.
+    """
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "그래도 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("f3", "final_answer", {"status": "answered", "answer": "세번째답변은오면안된다"})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-034c", _ASK)
+
+    assert "그래도 삼성입니다" in resp.answer
+    assert "세번째답변은오면안된다" not in resp.answer          # 라운드가 더 돌지 않았다
+    assert resp.think_trace.count("제출 거부") == 1
+    assert sum(1 for m in llm.user_msgs if "답변 전 데이터 조회 필수" in m) == 1
+
+
+async def test_no_forced_retry_when_a_lookup_already_ran(tiny_store, tmp_path):
+    """이미 조회한 뒤의 final_answer 에는 재시도가 붙으면 안 된다 — 정상 문항에 +11초를 물리지 않는다."""
+    script = [
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "이답변은오면안된다"})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-010", _ASK)
+
+    assert "제출 거부" not in resp.think_trace
+    assert not any("답변 전 데이터 조회 필수" in m for m in llm.user_msgs)
+    assert "삼성자산운용" in resp.answer and "이답변은오면안된다" not in resp.answer
+
+
+async def test_table_info_alone_counts_as_a_lookup(tiny_store, tmp_path):
+    """table_info 는 값이 아니라 스키마를 돌려주지만 조회로 친다.
+
+    기준일·허용값처럼 table_info 만으로 답이 되는 문항이 있어서다. 이 판정을 바꾸려면
+    orchestrator.LOOKUP_TOOLS 에서 한 줄만 빼면 된다.
+    """
+    script = [
+        Turn("", [ToolCall("t1", "table_info", {"table": "v_etf_kr"})], "tool_use"),
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "국내ETF 기준일은 2026-08-21 입니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-TI", "국내 ETF 데이터의 기준일은 언제인가요?")
+    assert "제출 거부" not in resp.think_trace
+    assert "2026-08-21" in resp.answer
+
+
+async def test_forced_retry_applies_to_cannot_confirm_too(tiny_store, tmp_path):
+    """확인불가도 '조회한 뒤의 거절'이라야 근거가 선다.
+
+    동시에, 조회 결과가 0건이면 답을 지어내지 말고 cannot_confirm 을 유지하라는 지시가
+    함께 나가야 한다 — 이 변경으로 확인불가 문항이 답을 짓기 시작하면 순손실이다.
+    """
+    sql = "SELECT pd_abrv_nm FROM v_etf_kr WHERE manager_name='없는운용사'"
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "cannot_confirm", "answer": "제공된 데이터로는 확인할 수 없습니다."})], "tool_use"),
+        Turn("", [ToolCall("c1", "sql_query", {"sql": sql})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "cannot_confirm", "answer": "조회 결과가 0건이라 제공된 데이터로는 확인할 수 없습니다."})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-NC", "없는운용사 ETF 알려줘")
+
+    assert "제출 거부" in resp.think_trace
+    assert "확인할 수 없습니다" in resp.answer                       # 거절이 유지된다
+    assert "status=cannot_confirm 을 그대로 유지" in llm.directives  # 지어내지 말라는 지시가 나갔다
+    assert "답을 지어내지 마세요" in llm.directives
+
+
+async def test_forced_retry_skipped_when_time_budget_is_short(tiny_store, tmp_path):
+    """남은 예산이 재시도 비용을 못 대면 되돌리지 않고 있는 답을 받는다."""
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "이답변은오면안된다"})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path), time_budget_sec=20)
+    resp = await s.orchestrator.answer("G-T1", _ASK)
+
+    assert "강제 재시도 생략" in resp.think_trace
+    assert "삼성입니다" in resp.answer and "이답변은오면안된다" not in resp.answer
+    assert not llm.user_msgs
+
+
+async def test_forced_retry_skipped_when_no_round_is_left_to_run_tools(tiny_store, tmp_path):
+    """시간이 남아도 도구를 돌릴 라운드가 없으면 되돌려 봐야 근거가 생기지 않는다."""
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "이답변은오면안된다"})], "tool_use"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path), time_budget_sec=120, max_tool_rounds=1)
+    resp = await s.orchestrator.answer("G-T2", _ASK)
+
+    assert "강제 재시도 생략" in resp.think_trace
+    assert "삼성입니다" in resp.answer and "이답변은오면안된다" not in resp.answer
+
+
+async def test_rejected_answer_is_kept_if_the_retry_round_produces_nothing(tiny_store, tmp_path):
+    """되돌린 뒤 모델이 오류·침묵으로 아무것도 못 내놓아도 답변을 잃지 않는다.
+
+    되돌린 final_answer 를 그냥 버리면, 재시도 라운드가 실패했을 때 status·evidence_refs 까지
+    통째로 날아가고 fallback 문구만 남는다. 근거가 없어도 원래 있던 답이 빈손보다 낫다.
+    """
+    script = [
+        Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
+        Turn("boom", [], "error"),
+    ]
+    llm = _FullTap(script)
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    resp = await s.orchestrator.answer("G-T3", _ASK)
+
+    assert "제출 거부" in resp.think_trace
+    assert "처음 제출된 답변을 사용" in resp.think_trace
+    assert "삼성입니다" in resp.answer

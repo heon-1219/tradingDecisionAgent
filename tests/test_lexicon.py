@@ -30,3 +30,78 @@ def test_manager_canonical_raw_value():
     lx = Lexicon.load(ENRICH)
     assert lx.manager_canonical("미래에셋증권 주식회사") == "미래에셋증권"
     assert lx.manager_canonical("KB") == "KB자산운용"
+
+
+# --- span shadowing: a shorter alias must not fire inside a longer, unrelated one ---------------
+
+
+def test_indonesia_is_not_india():
+    lx = Lexicon.load(ENRICH)
+    ids = {t.id for t in lx.match_themes("한국투자 ACE MSCI인도네시아증권상장지수투자신탁(주식-파생형)(합성)")}
+    assert "indonesia" in ids
+    assert "india" not in ids
+    # the bare country still resolves on its own
+    assert "india" in {t.id for t in lx.match_themes("인도 니프티50 ETF")}
+
+
+def test_us_treasury_is_not_korea_treasury():
+    lx = Lexicon.load(ENRICH)
+    for name in (
+        "한화 PLUS 미국S&P500미국채혼합50액티브증권상장지수투자신탁(채권혼합-재간접형)",
+        "메리츠증권 메리츠 미국채30년 상장지수증권(H) 제37호",
+        "삼성 KODEX 미국10년국채액티브증권상장지수투자신탁[채권-재간접형](H)",
+        "삼성누버거버먼이머징단기채권증권자투자신탁",  # 신흥국채권 -> '국채' 는 신흥국+채권의 경계에 걸친다
+        "미래에셋 아시아신흥국채권혼합증권자투자신탁",
+    ):
+        assert "kr_treasury" not in {t.id for t in lx.match_themes(name)}, name
+    # 국고채/국공채/국채선물 은 그대로 국고채 테마
+    for name in ("KB RISE 국채선물10년증권상장지수투자신탁(채권-파생형)", "삼성 KODEX 국고채3년증권상장지수투자신탁"):
+        assert "kr_treasury" in {t.id for t in lx.match_themes(name)}, name
+
+
+def test_us_treasury_still_matches_us_treasury_and_usa():
+    lx = Lexicon.load(ENRICH)
+    ids = {t.id for t in lx.match_themes("한화 PLUS 미국S&P500미국채혼합50액티브증권상장지수투자신탁(채권혼합-재간접형)")}
+    assert {"us_treasury", "usa", "sp500"} <= ids
+
+
+def test_compound_themes_keep_the_themes_they_contain():
+    lx = Lexicon.load(ENRICH)
+    assert {"china_semi", "china", "semiconductor"} <= {t.id for t in lx.match_themes("TIGER 차이나반도체FACTSET")}
+    assert {"china_semi", "china", "semiconductor"} <= {t.id for t in lx.match_themes("KODEX 중국반도체")}
+
+
+def test_manager_brand_in_a_product_name_is_not_a_theme():
+    lx = Lexicon.load(ENRICH)
+    # 메리츠 != 리츠, 한국투자 != 한국
+    assert "reits" not in {t.id for t in lx.match_themes("메리츠증권 메리츠 인버스 천연가스 선물 상장지수증권(H) 제44호")}
+    assert "korea" not in {t.id for t in lx.match_themes("한국투자 ACE 미국배당귀족증권자투자신탁")}
+    # 브랜드가 아닌 곳에 나온 리츠는 그대로 매칭된다
+    assert "reits" in {t.id for t in lx.match_themes("미래에셋 TIGER 글로벌리츠부동산자투자신탁")}
+
+
+def test_new_themes_resolve():
+    lx = Lexicon.load(ENRICH)
+    cases = {
+        "metaverse": "삼성 KODEX 메타버스액티브증권상장지수투자신탁[주식]",
+        "group_stock": "우리 WON 두산그룹포커스증권상장지수투자신탁(주식)",
+        "silver": "삼성 KODEX 은선물특별자산상장지수투자신탁(은-파생형)(H)",
+        "copper": "미래에셋 TIGER 구리실물 특별자산상장지수투자신탁(금속)",
+        "agriculture": "삼성 KODEX 3대농산물선물특별자산상장지수투자신탁[농산물-파생형](H)",
+        "hydrogen": "KB RISE Fn수소경제테마증권상장지수투자신탁(주식)",
+        "construction": "삼성KODEX건설증권상장지수투자신탁[주식]",
+        "transport": "삼성KODEX운송증권상장지수투자신탁[주식]",
+        "factor": "한화ARIRANG스마트베타Quality증권상장지수투자신탁(주식)",
+    }
+    for theme_id, name in cases.items():
+        assert theme_id in {t.id for t in lx.match_themes(name)}, name
+    # '수소' 는 '필수소비재' 안에서는 걸리지 않는다
+    assert "hydrogen" not in {t.id for t in lx.match_themes("KODEX 필수소비재")}
+
+
+def test_ascii_alias_may_be_followed_by_digits_but_not_absorbed():
+    lx = Lexicon.load(ENRICH)
+    assert "target_date" in {t.id for t in lx.match_themes("KIWOOM 적격TDF2030액티브증권상장지수투자신탁")}
+    assert "mmf" in {t.id for t in lx.match_themes("외환스타신종MMF3")}
+    # 여전히 단어 경계는 지킨다
+    assert "ai" not in {t.id for t in lx.match_themes("Daily Value Fund")}

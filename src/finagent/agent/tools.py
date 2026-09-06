@@ -142,8 +142,8 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "search_products",
-                "상품명·운용사·기초지수·전략 텍스트 검색. mode=hybrid(기본)는 어휘검색(BM25)과 의미검색(벡터)을 RRF로 결합하고, lexical은 정확한 표기 매칭, vector는 표현이 달라도 의미가 가까운 상품을 찾습니다. "
-                "정확한 상품명을 모르거나 테마 키워드(예: 우주항공, robot, China semiconductor)로 후보를 찾을 때 사용. 해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
+                "상품명·운용사·기초지수·전략 텍스트 검색. mode=hybrid(기본)는 어휘검색(BM25) 결과를 상위에 두고 하위 약 30% 슬롯만 의미검색(벡터)이 단독으로 찾아낸 상품에 배정합니다. lexical은 정확한 표기 매칭, vector는 표현이 달라도 의미가 가까운 상품을 찾습니다. "
+                "상품명·코드·티커를 알고 있으면 이 도구가 아니라 sql_query 가 정확합니다(실측: 정식명칭 recall@1 어휘 93.8% 대 벡터 33.8%). 이름을 모르고 테마·성격·전략만 아는 경우에 쓰세요(예: 우주항공, robot, China semiconductor). 해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
                 {
                     "type": "object",
                     "properties": {
@@ -163,7 +163,7 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "graph_neighbors",
-                "지식그래프에서 엔티티(상품명/코드/티커/기업명/테마명/운용사명)의 관계를 조회합니다. 관계 예: managedBy, hasTheme, hasConstituent(편입종목), constituentOf_inverse, "
+                "지식그래프에서 엔티티(상품명/코드/티커/기업명/테마명/운용사명)의 관계를 조회합니다. 관계 예: managedBy, hasTheme, hasConstituent(편입종목), affiliateOf(계열사), "
                 "subsidiaryOf, hasSubsidiary, tracksIndex, hasBenchmark, memberOfFamily, investsInRegion, hasAssetClass, hasRiskGrade, hasTheme_inverse(테마→상품). "
                 "예: graph_neighbors('에코프로','hasSubsidiary'), graph_neighbors('에코프로비엠','constituentOf'), graph_neighbors('우주항공','hasTheme_inverse').",
                 {
@@ -183,7 +183,7 @@ class ToolRegistry:
                 "search_documents",
                 "외부 참고 문서(마크다운: 국민성장펀드 개요, ETF 용어·지표 해설, ETF 위험요인 일반)를 검색합니다. 상품 마스터에 없는 배경 설명·위험요인·용어가 필요할 때 사용. "
                 "출처·기준일이 함께 반환되며, 주최측 제공 데이터가 우선합니다.",
-                {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 4}}, "required": ["query"]},
+                {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 8}}, "required": ["query"]},
             ),
             ToolSpec(
                 "final_answer",
@@ -471,6 +471,15 @@ class ToolRegistry:
             subs = self.lexicon.subsidiaries_of(c.id)
             if subs:
                 text += f"\n{c.name_ko}의 자회사(사전): " + ", ".join(s.name_ko for s in subs)
+            elif self.kg is not None:
+                # 지분 기준 자회사가 없을 때의 차선책. '자회사'가 아니라 '계열사'로 적는다.
+                cand = self.kg.subsidiary_candidates(c.name_ko, limit=40)
+                if cand["kind"] == "affiliate":
+                    text += (
+                        f"\n{c.name_ko}의 계열사({'/'.join(cand['groups']) or '그룹주 ETF'} 편입 기준, {cand['total']}개): "
+                        + ", ".join(x["label"] for x in cand["items"][:20])
+                        + " — 같은 기업집단이라는 뜻이며 지분 소유(자회사) 관계가 아닙니다."
+                    )
             if self.kg is not None:
                 nb = self.kg.neighbors(c.name_ko, relation="constituentOf", limit=30)
                 cons = nb.get("constituentOf", [])
@@ -489,6 +498,20 @@ class ToolRegistry:
         totals: dict[str, int] = {}
         nb = self.kg.neighbors(entity, relation=relation, limit=60, totals=totals)
         note = ""
+        if not nb and relation in ("hasSubsidiary", "subsidiaryOf_inverse"):
+            # 주최측 예시가 '자회사'라는 단어를 쓴다. 지분 기준 자회사 엣지는 손으로 확인한 4건뿐이라
+            # 나머지 회사는 전부 답변불가로 떨어졌다(실제 사고: "한화 에어로스페이스의 자회사를 편입한
+            # ETF"). 같은 기업집단 계열사로 대신 답하되, 관계 이름을 바꿔치기하지 않고 무엇을 돌려주는
+            # 것인지 밝힌다 — 계열은 '같은 그룹'이지 '지분 50%+ 소유'가 아니다.
+            cand = self.kg.subsidiary_candidates(entity, limit=60)
+            if cand["kind"] == "affiliate":
+                totals, nb = {"affiliateOf": cand["total"]}, {"affiliateOf": cand["items"]}
+                note = (
+                    f"('{entity}' 의 지분 소유 기준 자회사는 제공 데이터에 없습니다. 대신 같은 기업집단"
+                    f"({'/'.join(cand['groups']) or '그룹주 ETF'})의 **계열사**를 반환합니다 — 그룹주 ETF 가 함께 편입한 "
+                    f"종목에서 유도한 관계이며 지분 관계가 아닙니다. 답변에는 '계열사'로 표기하고 "
+                    f"'X는 Y의 자회사입니다'라고 쓰지 마세요.)\n"
+                )
         if not nb and relation:
             # An empty *filtered* result is nearly always the wrong direction, not a missing entity:
             # 삼성전자 has no hasConstituent but constituentOf has 238.  Returning the relations it does
@@ -525,7 +548,7 @@ class ToolRegistry:
         refs = [next(iter(r.values())) for r in rows[:20]]
         return ToolResult("\n".join(lines) + f"\n총 {len(rows)}건", False, Evidence("graph", None, None, None, sparql.strip(), len(rows), refs))
 
-    def _t_search_documents(self, query: str, k: int = 4) -> ToolResult:
+    def _t_search_documents(self, query: str, k: int = 8) -> ToolResult:
         if self.docs is None or len(self.docs) == 0:
             return ToolResult("외부 문서 없음", False)
         hits = self.docs.search(query, k=int(k))

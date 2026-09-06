@@ -421,7 +421,12 @@ class Ontology:
                 label = int(88 * len(lbase) / len(qbase))
             else:
                 label = int(_dice(qbase, lbase) * 80)
-        ctx = 72 if (len(qbase) >= 2 and qbase in text) else int(_coverage(qbase, text) * 68)
+        # 주석 본문 매칭은 3자 이상부터. 2자짜리 흔한 말('다른', '규모')은 아무 주석에나 들어 있어서
+        # 무엇이든 72점으로 맞춘다 — 실제로 '서로 다른 종목' 의 '다른' 이 has_buy_yield·hdge_fd_yn 을
+        # 정렬 기준 후보로 끌어올렸다. 2자 질의는 라벨로만 판정한다('비중'→편입비중은 라벨로 걸린다).
+        ctx = 0
+        if len(qbase) >= 3:
+            ctx = 72 if qbase in text else int(_coverage(qbase, text) * 68)
         return max(label, ctx)
 
     def resolve_measure(self, phrase: str) -> MeasureResolution:

@@ -49,7 +49,7 @@
 - id: bio
   label_ko: 바이오
   label_en: Biotech / Healthcare
-  synonyms: [바이오, 헬스케어, 제약, biotech, biotechnology, healthcare, health care, pharma]
+  synonyms: [바이오, 헬스케어, 제약, 의료기기, biotech, biotechnology, healthcare, health care, pharma]
 - id: bank_finance
   label_ko: 금융
   label_en: Financials
@@ -102,11 +102,12 @@
 - id: kr_treasury
   label_ko: 국고채
   label_en: Korea Treasury Bond
-  synonyms: [국고채, 국채, KTB, 국공채]
+  # 'KTB' 는 뺐다: 데이터의 KTB 는 전부 KTB자산운용(현 다올) 펀드명이고 국고채 지수 표기는 한 건도 없다.
+  synonyms: [국고채, 국채, 국공채, 국고통안, 물가채]
 - id: short_term_bond
   label_ko: 단기채/머니마켓
   label_en: Short-term Bond / Money Market
-  synonyms: [단기채, 초단기채, 머니마켓, 통안채, CD금리, KOFR, 파킹, money market, ultra short]
+  synonyms: [단기채, 초단기채, 머니마켓, 통안채, CD금리, CD1년금리, KOFR, 파킹, money market, ultra short]
 - id: mmf
   label_ko: MMF
   label_en: Money Market Fund
@@ -167,7 +168,7 @@
 - id: tech
   label_ko: 테크/빅테크
   label_en: Technology
-  synonyms: [테크, 빅테크, 기술주, 정보기술, technology, tech, TOP10]
+  synonyms: [테크, 빅테크, 기술주, 정보기술, 소프트웨어, technology, tech, software, TOP10]
   related: [ai, semiconductor]
 - id: value_growth
   label_ko: 가치/성장
@@ -192,7 +193,7 @@
 - id: consumer
   label_ko: 소비재
   label_en: Consumer
-  synonyms: [소비재, 필수소비재, 경기소비재, 럭셔리, 화장품, 뷰티, consumer, consumer discretionary, consumer staples, luxury, cosmetics]
+  synonyms: [소비재, 필수소비재, 경기소비재, 럭셔리, 화장품, 뷰티, 여행레저, consumer, consumer discretionary, consumer staples, luxury, cosmetics]
 - id: crypto
   label_ko: 가상자산/비트코인
   label_en: Crypto / Bitcoin
@@ -222,7 +223,7 @@
 - id: group_stock
   label_ko: 그룹주/지주회사
   label_en: Chaebol Group / Holding Company
-  synonyms: [그룹주, 지주회사, 삼성그룹, 현대차그룹, 카카오그룹, 두산그룹, 한화그룹, LG그룹, 5대그룹]
+  synonyms: [그룹주, 지주회사, 삼성그룹, 현대차그룹, 카카오그룹, 두산그룹, 한화그룹, 포스코그룹, LG그룹, 5대그룹]
 - id: hydrogen
   label_ko: 수소
   label_en: Hydrogen
@@ -231,7 +232,7 @@
 - id: silver
   label_ko: 은
   label_en: Silver
-  synonyms: [은선물, 은현물, 실버, silver]
+  synonyms: [은선물, 실버, silver]
   related: [gold]
 - id: copper
   label_ko: 구리
@@ -244,4 +245,18 @@
 - id: factor
   label_ko: 팩터/스마트베타
   label_en: Factor / Smart Beta
-  synonyms: [스마트베타, 멀티팩터, 로우볼, 최소변동성, 저변동, 모멘텀, 퀄리티, smart beta, multifactor, low volatility, minimum volatility, momentum, quality]
+  # 한글 '모멘텀'·'퀄리티'는 뺐다: 상품명 60건을 얻는 대신 "모멘텀 좋은 ETF" 같은 평범한 질문에 팩터 테마가
+  # 붙는다. 영문 momentum/quality 는 지수명에만 나오므로 남겨 둔다.
+  synonyms: [스마트베타, 멀티팩터, 로우볼, 최소변동성, 저변동, smart beta, multifactor, low volatility, minimum volatility, momentum, quality]
+- id: construction
+  label_ko: 건설
+  label_en: Construction
+  synonyms: [건설, construction]
+- id: steel
+  label_ko: 철강/소재
+  label_en: Steel & Materials
+  synonyms: [철강, 철강소재, steel]
+- id: transport
+  label_ko: 운송/물류
+  label_en: Transport & Logistics
+  synonyms: [운송, 해운, 물류, logistics]
