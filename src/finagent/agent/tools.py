@@ -30,9 +30,19 @@ VIEW_LABEL = {
 }
 SEMANTICS = {
     "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 한 종목이 여러 행일 수 있다(장내/장외 + 장외 판매 LOT info_seq, 최대 4행). 따라서 '몇 개'를 물으면 COUNT(DISTINCT pd_no) 를 쓴다. LOT 마다 매수수익률·단가가 다르므로 행 자체는 의미가 있다.",
-    "v_etf_kr": "판매중(구매가능) = is_on_sale=1 (상장 유지 + 거래정지 아님, 1,534건). ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 일부만 수록(NULL이면 '데이터 없음'이라고 답하고 0으로 취급하지 않는다). 순자산 pd_net_tamt(KRW). 상장일 listing_date, 상장종료일 delisting_date(9999-12-31=상장 유지). 대표명 pd_abrv_nm.",
-    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'), 기준일 2026-08-22. 구매가능 = is_on_sale=1(거래정지 아님). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목 수록). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. 레버리지/인버스 제외 시 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL. 편입종목 데이터 없음.",
-    "v_fund_pub": "공모펀드 = product_type='공모펀드'(14,716건), 사모도 섞여 있으므로 반드시 조건에 넣는다. 판매중(구매가능) = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY 하고 대표 1개만 제시. 보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
+    "v_etf_kr": "판매중(구매가능) = is_on_sale=1 (상장 유지 + 거래정지 아님, 1,534건). ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 일부만 수록(NULL이면 '데이터 없음'이라고 답하고 0으로 취급하지 않는다). 순자산 pd_net_tamt(KRW). 상장일 listing_date, 상장종료일 delisting_date(9999-12-31=상장 유지). 대표명 pd_abrv_nm. "
+                "이 뷰는 ETF 1,235건과 ETN 545건을 함께 담는다 — 'ETF' 를 물으면 pd_grp_no='ETF' 를 반드시 건다(안 걸면 위험등급 1등급이 223건 대신 594건으로 2.7배가 된다). "
+                "자산군은 wu_inv_ast_type: 주식·채권·원자재·대체투자·혼합자산·단기자금·통화·기타. '채권에 투자하는 ETF' = wu_inv_ast_type='채권' (컬럼 접두어는 cu_ 가 아니라 wu_ 다). "
+                "분배주기는 pd_dvid_cycl: 'M'=매월(월배당)·'Q'=분기·'A'=연1회·'S'=반기, 공백 두 칸과 NULL은 분배 미지급/미수록이다. '월배당 상품' = pd_dvid_cycl='M'. pd_dvid_pay_cnt(연 지급 횟수 12/4/1/2)도 같은 사실을 담는다.",
+    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'), 기준일 2026-08-22. 구매가능 = is_on_sale=1(거래정지 아님). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목 수록). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. "
+                "인버스/숏을 **세려면** cu_inverse_short_yn='Y' 를 쓴다(값은 'Y' 문자열 183건과 NULL뿐이며, 숫자 1이나 IS NOT NULL 로 비교하면 답이 틀린다). "
+                "cu_lev_fector 는 레버리지 '배수'(2.0·3.0, 음수 -2.0·-3.0 은 인버스 배수)이지 인버스 여부가 아니다. 레버리지·인버스를 모두 제외할 때만 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL 을 쓴다. "
+                "이 뷰도 ETF 5,972건과 ETN 65건을 함께 담으므로 'ETF' 를 물으면 pd_grp_no='ETF' 를 건다. 편입종목 데이터 없음.",
+    "v_fund_pub": "공모펀드 = product_type='공모펀드'(14,716건), 사모도 섞여 있으므로 반드시 조건에 넣는다. 판매중(구매가능) = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY 하고 대표 1개만 제시. "
+                  "**'펀드가 몇 개인가'를 물으면 COUNT(DISTINCT fund_family) 로 센다** — 클래스(행)를 세면 같은 펀드를 여러 번 세는 것이다(예: 환헤지 해외 채권형 판매중은 클래스 130행이지만 펀드는 63개). 클래스 수 자체를 물을 때만 COUNT(*). "
+                  "국내/해외 구분은 ovrs_fd_desc: '국내'·'해외'·'국내외혼합'·'해당없음'. '해외 펀드' = ovrs_fd_desc='해외'. 투자지역 fd_ivst_rgn_desc(글로벌·아시아·남미/북미…)는 다른 축이므로 섞지 않는다. "
+                  "환헤지 여부는 is_hedged: 1=환헤지형(H), 0=환노출형(UH), NULL=미수록. 운용속성 or_attr_desc: 주식형·채권형·채권혼합·주식혼합·재간접·MMF·파생상품·특별자산·혼합자산 등. "
+                  "보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
     "v_etf_constituent": "국내 ETF의 편입종목(네이버금융 수집, 1,162개 ETF·22,599행). etf_itm_no 로 v_etf_kr.pd_itm_no 와 조인한다. "
                          "'삼성전자를 보유한 ETF' 같은 질의는 이 뷰를 조인해서 푼다. 종목 지정은 company_code(종목코드, 79% 수록)가 가장 정확하고, "
                          "없으면 company_name 을 쓴다(해외 종목은 한글 표기). 삼성전자(005930)와 삼성전자우(005935)는 다른 종목이다. "

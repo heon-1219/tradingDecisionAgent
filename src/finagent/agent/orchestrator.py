@@ -596,6 +596,12 @@ class Orchestrator:
         # 편입종목을 가진 상품 수. 주입문에 숫자를 적으려면 온톨로지가 아니라 데이터에서 세야 한다
         # (온톨로지는 '어느 상품군이 갖는가'를 알지 '몇 개인가'를 모른다).
         self.holding_product_count = self._count_holding_products()
+        # 편입종목 뷰에서 실제로 통하는 조회 키. 사전의 한글명이 원천 표기와 다른 기업이 있어서
+        # (캠브리콘 -> '한무기', 네이버 -> 'NAVER', 에코프로머티리얼즈 -> '에코프로머티') 한글명을
+        # 그대로 WHERE 에 넣으면 0건이 돌아오고, 모델은 그것을 '데이터에 없음'으로 단정한다.
+        # 질문마다 조회하면 기업 하나당 약 12ms 가 붙지만(company_id 에 인덱스가 없다) 기동 시
+        # 한 번의 GROUP BY 는 실측 16~24ms 라, 매핑을 미리 만들고 질문 시점에는 dict 만 본다(µs 단위).
+        self.constituent_keys = self._load_constituent_keys()
 
     def _count_holding_products(self) -> int | None:
         view = self.ontology.holding_view() if self.ontology is not None else None
@@ -606,6 +612,91 @@ class Orchestrator:
             return int(rows[0][0])
         except Exception:  # noqa: BLE001 - a store without the view simply gets no number
             return None
+
+    def _load_constituent_keys(self) -> dict[str, list[tuple[str, str, int]]]:
+        """{기업 id: [(company_code, company_name, 행수), ...]} — 편입종목 뷰의 실제 표기.
+
+        키는 추측하지 않는다.  ETL 이 원천의 종목코드로 이미 붙여 둔 ``etf_constituent.company_id``
+        를 그대로 읽는다 — 그래프의 편입 엣지도 같은 열로 만들어지므로, 여기서 주입하는 키의 건수와
+        같은 줄에 이미 실려 나가는 그래프 건수가 서로 어긋나지 않는다.  (사전의 티커로 뷰를 뒤지는
+        방법도 있지만 그것은 추측이다: 에어버스의 티커 'AIR' 는 이 데이터에서 AAR 을 가리킨다.)
+
+        그 열이 없는 스토어에서는 빈 매핑이 되고, 빈 매핑이면 주입문은 예전 그대로다.
+        """
+        if self.tools.rdb is None or self.lexicon is None:
+            return {}
+        try:
+            known = {c.id for c in self.lexicon.companies}
+            rows = self.tools.rdb.fetch_all(
+                "SELECT company_id, company_code, company_name, COUNT(*) FROM etf_constituent "
+                "WHERE is_cash = 0 AND company_id IS NOT NULL AND company_code IS NOT NULL "
+                "GROUP BY 1, 2, 3"
+            )
+        except Exception:  # noqa: BLE001 - 매핑이 없으면 키를 안 붙일 뿐, 답변을 막지 않는다
+            log.exception("constituent key map unavailable - 조회 키 주입 없이 진행")
+            return {}
+        out: dict[str, list[tuple[str, str, int]]] = {}
+        for cid, code, name, n in rows:
+            if cid in known:
+                out.setdefault(cid, []).append((str(code), str(name or ""), int(n)))
+        for v in out.values():
+            v.sort(key=lambda x: -x[2])
+        return out
+
+    @property
+    def _holding_view(self) -> str:
+        view = self.ontology.holding_view() if self.ontology is not None else None
+        return view or "v_etf_constituent"
+
+    def _constituent_key_note(self, company) -> str:
+        """편입종목 뷰에서 이 기업을 찾는 방법 — 한 줄, 스토어에서 읽은 사실만.
+
+        한글명이 뷰 표기와 그대로 일치하는 기업(사전 97개 중 61개)에는 **아무것도 붙이지 않는다**.
+        그 경로는 이미 맞게 조회되고 있고, 잘 되는 것을 건드릴 이유가 없다.  표기가 어긋나는 32개와
+        행이 아예 없는 4개만 사실을 받는다 — 후자는 0건이 질의 잘못이 아니라 데이터의 부재임을
+        모델이 올바로 읽게 하려는 것이다.
+        """
+        if not self.constituent_keys:
+            return ""
+        rows = self.constituent_keys.get(company.id) or []
+        view = self._holding_view
+        if not rows:
+            return (f". ⚠ {view} 에 이 기업의 행은 0건입니다 — 어떤 조회 키를 써도 0건이며, "
+                    f"이는 질의가 잘못된 것이 아니라 편입종목 데이터에 이 기업이 없다는 사실입니다")
+        if any(name == company.name_ko for _, name, _ in rows):
+            return ""
+        shown = rows[:3]
+        codes = ", ".join(f"'{c}'" for c, _, _ in shown)
+        names = " / ".join(f"'{n}'" for _, n, _ in shown)
+        where = f"company_code = {codes}" if len(rows) == 1 else f"company_code IN ({codes})"
+        more = f" (코드 {len(rows)}개 중 상위 {len(shown)}개만 표시)" if len(rows) > len(shown) else ""
+        return (f". 편입종목 조회 키: {view} 에서 {where} 로 조회하세요{more} "
+                f"(이 뷰의 company_name 값은 {names} — 한글명으로 WHERE 하면 0건입니다)")
+
+    def _subsidiary_key_line(self, subs) -> str:
+        """자회사들의 조회 키를 한 줄로.  자회사 이름은 질문에 없어서 각자 줄을 받지 못한다.
+
+        '에코프로의 자회사를 편입한 ETF' 에서 모델이 실제로 WHERE 에 넣는 것은 바로 위 줄이 나열한
+        이 이름들이다 — 셋 중 하나는 뷰 표기가 다르고(에코프로머티리얼즈 -> '에코프로머티') 하나는
+        행이 아예 없다.  하나라도 어긋날 때만, 그때는 전부를 싣는다(일부만 주면 나머지는 다시
+        추측 대상이 된다).
+        """
+        if not self.constituent_keys or not subs:
+            return ""
+        parts, off = [], False
+        for s in subs[:6]:
+            rows = self.constituent_keys.get(s.id) or []
+            if not rows:
+                parts.append(f"{s.name_ko} → 행 0건(편입종목 데이터에 없음)")
+                off = True
+            elif any(n == s.name_ko for _, n, _ in rows):
+                parts.append(f"{s.name_ko} → company_code='{rows[0][0]}'")
+            else:
+                parts.append(f"{s.name_ko} → company_code='{rows[0][0]}' (뷰 표기 '{rows[0][1]}')")
+                off = True
+        if not off:
+            return ""
+        return f"  · 자회사 {self._holding_view} 조회 키: " + ", ".join(parts)
 
     @property
     def base_year(self) -> int:
@@ -660,9 +751,17 @@ class Orchestrator:
                 self.tools.kg.neighbors(c.name_ko, relation="constituentOf", limit=1, totals=totals)
                 n = totals.get("constituentOf", 0)
                 info += f", 편입 {holder_label or '상품'} {n}건(그래프)" if n else ", 편입 상품 없음(그래프)"
+            # 해소된 개체를 SQL 까지 데려가는 줄.  라벨만 주면 모델은 질문의 표면 문자열을 그대로
+            # WHERE 리터럴로 쓰고 0건을 받는다 — 이 프로젝트에서 반복 확인된 근본 결함이다.
+            if not holding_blind:
+                info += self._constituent_key_note(c)
             if c.note:
                 info += f". 비고: {c.note}"
             lines.append(info)
+            if not holding_blind:
+                sub_keys = self._subsidiary_key_line(subs)
+                if sub_keys:
+                    lines.append(sub_keys)
         if holding_blind:
             lines.append(self._no_holdings_note(groups, holder_label))
         themes = self.lexicon.match_themes(question)

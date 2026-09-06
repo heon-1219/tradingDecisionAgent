@@ -55,9 +55,13 @@ _HOLDER = re.compile(r"([A-Za-z가-힣][A-Za-z0-9가-힣·&\.\-]{1,19})\s*(?:" +
 _PARTICLE = re.compile(r"(?:을|를|이|가|은|는|와|과|도|의|에)$")
 # Words that are never a company: they show up before the verb in scope phrases like
 # '판매중인 상품 기준으로 채권에 투자하는' or '국내 ETF가 포함된'.
+# 관계어도 마찬가지다.  '에코프로의 자회사를 편입한 ETF' 에서 동사 바로 앞 토큰은 '자회사' 이고,
+# 그것을 회사 이름으로 잡아 graph_neighbors('자회사', constituentOf) 를 부르면 0건이 돌아온다
+# (실측).  이 단어들이 가리키는 회사는 문장 앞쪽에 있고, 그 회사는 사전분석이 이미 해소해 둔다.
 _NOT_A_HOLDER = {
     "상품", "종목", "펀드", "etf", "etn", "채권", "자산", "것", "기업", "회사", "지수",
     "데이터", "정보", "포트폴리오", "구성", "비중", "현재", "모두", "전체", "다음",
+    "자회사", "계열사", "계열회사", "모회사", "관계사", "관련주", "테마주", "대장주", "경쟁사",
 }
 
 # GRAPH (themes).  Only an explicit '테마' question routes to the graph.  Theme aliases match very
@@ -223,12 +227,23 @@ def plan_retrieval(sig: Signals) -> RoutePlan:
             holders = holder_mentions(q)
             # 사전에 있는 기업명이면 그 표준명을 쓴다(그래프 라벨과 같은 표기).
             canon = {c.replace(" ", ""): c for c in sig.companies}
+            # 우선순위: (1) 사전이 아는 홀더 토큰 → (2) 사전분석이 해소한 기업 → (3) 표면 토큰.
+            #
+            # (2)가 (3)보다 앞서는 이유: 표면 추출은 동사 바로 앞 한 토큰만 보므로 '…의 자회사를
+            # 편입한' 처럼 주어가 한 칸 떨어져 있으면 엉뚱한 말을 회사로 잡는다.  _NOT_A_HOLDER 로
+            # 걸러도 목록이 닿지 않는 표현은 남으므로, 해소된 기업이 있으면 그쪽을 먼저 믿는다.
+            # (3)은 그대로 남긴다 — 쿠팡·야놀자는 사전에 없지만 두 문항 모두 정답이 '해당 없음'
+            # 이고, 그 사실을 아는 곳은 그래프뿐이라 표면 토큰으로라도 물어야 한다.
             entity = None
             for h in holders:
-                entity = canon.get(h.replace(" ", ""), h)
-                break
+                hit = canon.get(h.replace(" ", ""))
+                if hit is not None:
+                    entity = hit
+                    break
             if entity is None and sig.companies:
                 entity = sig.companies[0]
+            if entity is None and holders:
+                entity = holders[0]
             if entity is None:
                 plan.skipped.append(("graph", "편입 질의지만 대상 기업을 문장에서 특정하지 못함"))
             else:
