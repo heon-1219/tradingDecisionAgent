@@ -49,7 +49,14 @@ ERROR_MARKERS = ("시스템 처리 중 문제가 발생", "<요청 실패", "내
 
 
 def is_infra_error(answer: str, trace: str = "") -> bool:
-    return any(m in (answer or "") for m in ERROR_MARKERS) or "LLM 오류" in (trace or "")
+    """Did the run fail before the model could answer?
+
+    Judged on the answer, not the trace.  An LLM error in a later round does not undo an answer the
+    model already produced: G-021 replied "KODEX AI로봇 … 해당 상품은 존재하지 않습니다" — correct — and
+    was thrown out as an infrastructure failure because a subsequent round hit a connection error.
+    A run that truly failed carries the server's fallback wording, which ERROR_MARKERS matches.
+    """
+    return any(m in (answer or "") for m in ERROR_MARKERS)
 
 
 def norm(s: str) -> str:
