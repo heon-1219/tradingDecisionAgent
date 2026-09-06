@@ -10,6 +10,7 @@ import datetime as dt
 import sqlite3
 import sys
 import time
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -103,7 +104,36 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         df["is_on_sale"] = df["sale_yn"].map(to_flag)
         df["itm_nm"] = df["itm_nm"].map(clean_text)
         df["fund_family"] = df["itm_nm"].map(lambda v: fund_family_key(v) if isinstance(v, str) else None)
-        df["manager_name"] = df["itm_nm"].map(lambda v: lx.manager_for_product_name(v) if isinstance(v, str) else None)
+        # 운용사는 상품명이 아니라 주최측이 준 코드에서 읽는다.  상품명 접두어 매칭은 이름이
+        # 운용사 브랜드로 시작할 때만 맞는다: 23,676행 중 17,660행(74.6%)만 풀리고 6,016행이
+        # 통째로 NULL 이 된다.  반면 or_co_xtn_itt_cd(운용회사대외기관코드)는 원천이 전 행에
+        # 채워 보내주며 275개 코드로 운용사를 구분한다 — 추정할 필요가 없는 값이 이미 있는데
+        # 이름을 보고 짐작하고 있었던 것이다.
+        # 다만 코드→운용사명 표는 원천에 없으므로 데이터 자체에서 만든다.  이름으로 이미 풀린
+        # 행을 코드별로 묶으면 이름이 붙은 코드 89개 중 72개(81%)가 단일 이름으로 수렴하므로,
+        # 코드마다 최빈 이름을 그 코드의 정식 명칭으로 삼는다.  동률이면 임의로 고르지 않고
+        # 비워 둔다 — 틀린 운용사명은 NULL 보다 나쁘다.  외부 표를 손으로 적지 않고 주최측이
+        # 준 값만으로 NULL 6,016행 중 3,938행이 회복된다.
+        # 이름으로 풀린 값은 절대 덮어쓰지 않으며, 어느 쪽에서 왔는지는 manager_source 에 남긴다.
+        # 파이썬 리스트로 다루는 이유: Series.map 이 돌려준 None 은 pandas 가 str dtype 의
+        # NaN 으로 바꾸는데, NaN 은 truthy 라서 `이름 or 코드` 식 폴백이 조용히 전부 '이름'
+        # 으로 판정된다.  결측은 반드시 `is None` 으로만 본다.
+        by_name = [lx.manager_for_product_name(v) if isinstance(v, str) else None for v in df["itm_nm"]]
+        codes = [c if isinstance(c, str) else None for c in df["or_co_xtn_itt_cd"]]
+        tally: dict[str, Counter] = defaultdict(Counter)
+        for code, name in zip(codes, by_name):
+            if code is not None and name is not None:
+                tally[code][name] += 1
+        code_to_name: dict[str, str] = {}
+        for code, cnt in tally.items():
+            top = cnt.most_common(2)
+            if len(top) == 1 or top[0][1] > top[1][1]:  # 동률이면 매핑하지 않는다
+                code_to_name[code] = top[0][0]
+        by_code = [code_to_name.get(c) if c is not None else None for c in codes]
+        df["manager_name"] = [n if n is not None else c for n, c in zip(by_name, by_code)]
+        df["manager_source"] = [
+            "name" if n is not None else ("code" if c is not None else None) for n, c in zip(by_name, by_code)
+        ]
         df["base_date"] = df["fd_price_bas_dt"]
         df["risk_grade"] = pd.to_numeric(df["zrin_fd_ivst_risk_gcd"], errors="coerce").astype("Int64")
         df["is_hedged"] = df["exchdg_yn"].map(to_flag)
@@ -143,7 +173,8 @@ VIEWS: dict[str, str] = {
     ),
     "v_fund_pub": (
         "SELECT itm_no, itm_nm, itm_abrv_nm, itm_eng_nm, fund_family, product_type, prvo_pbff_desc, is_on_sale, sale_yn, "
-        "thco_sale_yn, manager_name, or_attr_desc, zrin_btyp_nm, zrin_ptn_nm, zrin_attr_nms, fd_ivst_rgn_desc, "
+        "thco_sale_yn, manager_name, manager_source, or_co_xtn_itt_cd, or_attr_desc, zrin_btyp_nm, zrin_ptn_nm, "
+        "zrin_attr_nms, fd_ivst_rgn_desc, "
         "ovrs_fd_desc, bmrk_nm, bmrk_eng_nm, curr_cd, exchdg_yn, is_hedged, hdge_fd_yn, ofsfd_yn, int_dvd_desc, "
         "pers_corp_desc, zrin_fd_ivst_risk_grd_nm, risk_grade, han_clas_nm, han_clas_fee_type, han_clas_sales_channel, "
         "han_clas_policies, or_co_rwrd_r, sale_co_rwrd_r, trusc_rwrd_r, ofwk_trus_rwrd_r, fd_nast_suma, bns_bpr, "
