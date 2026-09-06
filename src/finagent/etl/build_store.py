@@ -50,6 +50,14 @@ TEXT_CODE_COLS: dict[str, list[str]] = {
 }
 
 
+# 운용사 기관코드로 쓰이지 않는 자리표시자.  '99999999' 는 27행에만 붙어 있고 그 행들의 상품명에서
+# 풀린 운용사는 현대·대신·미래에셋·신영·신한 5곳으로 갈린다 — 한 기관의 코드라면 나올 수 없는 분포다.
+# 최빈값 투표는 그럼에도 이 코드를 '현대자산운용' 으로 확정해 6행을 채우고 있었다.  근거가 가장 약한
+# 부분이고, 확실하지 않은 귀속은 넣지 않는다는 이 프로젝트의 원칙에 어긋나므로 매핑에서 제외한다.
+# (제외해도 상품명으로 풀린 21행은 그대로 남는다. 코드로 채우던 6행만 NULL 이 된다.)
+_PLACEHOLDER_MANAGER_CODES = {"99999999"}
+
+
 def _read(raw_dir: Path, stem: str, text_cols: list[str]) -> pd.DataFrame:
     df = pd.read_excel(raw_dir / f"{stem}_data.xlsx", dtype={c: str for c in text_cols})
     for c in text_cols:
@@ -122,7 +130,7 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         codes = [c if isinstance(c, str) else None for c in df["or_co_xtn_itt_cd"]]
         tally: dict[str, Counter] = defaultdict(Counter)
         for code, name in zip(codes, by_name):
-            if code is not None and name is not None:
+            if code is not None and name is not None and code not in _PLACEHOLDER_MANAGER_CODES:
                 tally[code][name] += 1
         code_to_name: dict[str, str] = {}
         for code, cnt in tally.items():

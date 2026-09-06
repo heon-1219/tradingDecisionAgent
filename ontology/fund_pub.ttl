@@ -2,7 +2,7 @@
 # fund_pub.ttl — 공모펀드 마스터 (v_fund_pub / PRFD01N001) TBox
 #
 # 목적
-#   공모펀드마스터 뷰의 57개 컬럼을 fp:Fund (공모+사모 공통 상위) 의 속성으로 문서화하고
+#   공모펀드마스터 뷰의 59개 컬럼을 fp:Fund (공모+사모 공통 상위) 의 속성으로 문서화하고
 #   운용속성(fp:ManagementAttribute), 판매수수료유형(fp:FeeType), 판매채널(fp:SalesChannel),
 #   위험등급(fp:fundRiskGrade → fp:RiskGrade) 열거형을 연결한다.
 #
@@ -19,7 +19,10 @@
 #     공개되지 않았다. 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만 허용.
 #   - 기간 수익률(fd_mm1_ern_r ~ fd_yr5_ern_r)은 약 30% 만 수록, fd_wk1_ern_r 은 전부 NULL.
 #   - base_date 는 약 60% NULL.
-#   - manager_name 은 상품명 접두어로 추정한 운용사 (오추정 가능).
+#   - 원천에 운용사 이름 컬럼은 없지만 운용사 기관코드 or_co_xtn_itt_cd 는 23,676행 전부에
+#     채워져 있다 (275개 코드). manager_name 은 상품명 접두어로 풀고, 이름이 아무것도 주지
+#     않는 행은 그 코드별 최빈 이름으로 채운다 (name 17,660행 + code 3,932행 = 21,592행).
+#     출처는 manager_source 에 남는다.
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -167,10 +170,22 @@ fp:fundSoldByUs a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "thco_sale_yn" .
 
 fp:fundManagerName a owl:DatatypeProperty ;
-    rdfs:label "운용사(추정)"@ko ;
-    rdfs:comment "상품명 접두어에서 추정한 운용사명 (예: 미래에셋, 삼성, KB). 원천에 운용사 컬럼이 없어 추정값이므로 오류 가능. 런타임에 fp:managedBy 로 연결."@ko ;
+    rdfs:label "운용사"@ko ;
+    rdfs:comment "운용사명 (예: 미래에셋자산운용, 삼성자산운용, KB자산운용). 상품명 접두어가 운용사 브랜드로 시작하면 그 값을 쓰고 (17,660행), 아니면 or_co_xtn_itt_cd(운용사 기관코드) 별 최빈 이름을 쓴다 (3,932행). 23,676행 중 21,592행 수록. 어느 쪽에서 왔는지는 manager_source 에 남으므로 근거를 밝힐 때 함께 조회한다. 런타임에 fp:managedBy 로 연결."@ko ;
     rdfs:domain fp:Fund ; rdfs:range xsd:string ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "manager_name" .
+
+fp:fundManagerNameSource a owl:DatatypeProperty ;
+    rdfs:label "운용사명 출처"@ko ;
+    rdfs:comment "manager_name 을 무엇으로 풀었는지: 'name' = 상품명 접두어 (17,660행), 'code' = or_co_xtn_itt_cd 별 최빈 이름 (3,932행), NULL = 풀지 못함 (2,084행, manager_name 도 NULL). 'code' 행은 코드로 도출한 값이므로 운용사를 근거로 답할 때 그 사실을 밝힌다."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "manager_source" .
+
+fp:fundManagerInstitutionCode a owl:DatatypeProperty ;
+    rdfs:label "운용사 기관코드"@ko ;
+    rdfs:comment "운용회사 대외기관코드 (8자리 문자열). 원천이 23,676행 전부에 채워 보내며 275개 코드가 운용사를 구분한다 — 같은 운용사의 펀드를 묶는 가장 정확한 키다. 코드→운용사명 표는 원천에 없어 manager_name 을 이 코드별 최빈 이름으로 도출한다. 다만 '99999999' (27행) 는 해석된 이름이 5개 운용사로 갈려 한 기관을 가리키지 않는 자리표시자이므로 도출에서 제외한다."@ko ;
+    rdfs:domain fp:Fund ; rdfs:range xsd:string ;
+    fp:sourceTable "v_fund_pub" ; fp:sourceColumn "or_co_xtn_itt_cd" .
 
 # ----------------------------------------------------------------------------
 # 6. 분류 (운용속성 / 제로인 / 지역)

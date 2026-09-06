@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from ..models import AnswerResponse
 from .answer import CANNOT_PREFIX, Evidence, fallback_answer, format_evidence, format_trace, normalize_answer
 from .llm import LLMClient, ToolCall
-from .tools import ToolRegistry
+from .tools import ToolRegistry, ToolResult
 
 log = logging.getLogger("finagent.orchestrator")
 
@@ -33,6 +33,47 @@ class PreAnalysis:
 
 # 답변이 "그 상품은 없다"는 사실을 인지했는지 판정할 때 쓰는 표현들
 _COUNT_QUESTION = re.compile(r"몇\s*(개|건|종목|가지|곳)|개수|건수|수는\??$|수를\s*알려")
+
+# ---------------------------------------------------------------- 미래 예측 요구 감지
+# 온톨로지의 속성을 전수 확인한 결과, **미래에 실현될 값을 담은 컬럼은 하나도 없다.** 앞을 보는
+# 이름을 가진 유일한 속성은 v_bond_kr.exrt_grte_ern_r(만기보장수익률)인데 이조차 계약으로 확정된
+# 값이지 예측이 아니고, mat_date·delisting_date 는 예정된 사실이다. 마스터 테이블은 모두 기준일
+# 시점의 스냅샷이다. 따라서 "미래 값"을 묻는 질문은 표현을 바꾼다고 답할 수 있는 것이 아니라
+# 스키마상 답이 존재하지 않는 질문이다 — 이것이 이 가드의 근거다.
+# (사고 사례 G-019: "내년 예상 수익률" 에 과거 1년 수익률 du_er_1y=260.41 을 예측치로 제시)
+_FORECAST_WORD = r"예상|전망|예측|추정"
+_VALUE_WORD = r"수익률|수익|가격|주가|시세|배당|성과"
+# '미래' 뒤에 한글이 붙으면 미래 시점이 아니라 이름이다 — 상품명 9,816건이 '미래'로 시작하고
+# (미래에셋…, BNK 미래전략기술액티브 …) 운용사 이름 자체가 미래에셋이다. 접미 한글을 배제한다.
+# '연말'은 과거일 수도 있어("작년 연말 수익률") 넣지 않는다. 미래를 뜻하는 '올해 말'만 받는다.
+_FUTURE_WORD = r"내년|내후년|향후|앞으로|미래(?![가-힣])|장래|다음\s*해|올해\s*말"
+
+_FORWARD_LOOKING = re.compile(
+    "|".join(
+        (
+            # "예상 수익률", "수익률 전망" — 예측어와 값 표현이 붙어 있는 경우
+            rf"(?:{_FORECAST_WORD})[^\n]{{0,10}}(?:{_VALUE_WORD})",
+            rf"(?:{_VALUE_WORD})[^\n]{{0,10}}(?:{_FORECAST_WORD})",
+            # "내년 수익률", "앞으로 주가" — 미래 시점 표현이 값 표현 근처에 있는 경우
+            rf"(?:{_FUTURE_WORD})[^\n]{{0,15}}(?:{_VALUE_WORD})",
+            rf"(?:{_VALUE_WORD})[^\n]{{0,15}}(?:{_FUTURE_WORD})",
+            # 값 표현 없이 등락만 묻는 경우: "오를까요?", "떨어질까"
+            r"(?:오를|올라갈|상승할|하락할|떨어질|내려갈|빠질)\s*(?:까|지|것|수|듯|가능성|여지|전망)",
+            r"(?:얼마나|얼마|몇\s*%|몇\s*퍼센트)\s*(?:오를|오르|상승|하락|떨어질|내릴)",
+        )
+    )
+)
+
+# 만기보장수익률(v_bond_kr.exrt_grte_ern_r)과 분배/배당 주기는 실제로 데이터에 있는 값이므로
+# 미래 예측 질문으로 오인하면 안 된다. 운용사명 '미래 에셋'(띄어 쓴 표기)도 마찬가지다.
+# 판정 전에 지워서 값 표현·미래 표현으로 세지 않게 한다.
+_FORWARD_EXEMPT = re.compile(r"(?:만기\s*)?보장\s*수익률|배당\s*주기|분배\s*주기|미래\s*에셋")
+
+
+def asks_forward_looking(question: str) -> bool:
+    """질문이 데이터에 존재하지 않는 '미래 값'을 요구하는가."""
+    return bool(_FORWARD_LOOKING.search(_FORWARD_EXEMPT.sub(" ", question or "")))
+
 
 class _Steps(list):
     """The trace list, with a tap.
@@ -87,6 +128,94 @@ def _scalar_of(text: str) -> int | None:
 
 
 _ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "찾을 수 없", "없습니다만", "혹시", "말씀하시", "유사한", "다른 상품")
+
+
+# ---------------------------------------------------------------- 같은 호출 반복 감지
+# 첫 접근이 실패했을 때 같은 호출을 그대로 다시 보내는 사고가 실제로 났다(G-015: 8라운드 동안
+# 서로 다른 질의는 2개뿐이었고, 하나는 매번 'no such column: pd_no' 로 실패, 다른 하나는 매번
+# 0건이었다). 루프 안에서 "지금 같은 것을 또 보냈다"고 말해 주는 곳이 없었던 것이 원인이다.
+#
+# ★ LLM 라운드는 어차피 소비된 뒤다. 여기서 아끼는 것은 시간이 아니라 '모델이 자기가 막혔다는
+#   사실을 알아차릴 기회'다 — 같은 결과를 말없이 다시 주면 모델은 새 정보를 받았다고 착각하고
+#   같은 질의를 또 낸다. DB 재실행을 건너뛰는 것은 덤일 뿐 목적이 아니다.
+
+_SQL_ARGS = ("sql", "sparql")
+# purpose 는 추적용 주석이라 결과를 바꾸지 않는다. 키에 넣으면 문구만 손봐도 '다른 호출'이 되어
+# 감지기를 그냥 빠져나간다 — 막으려는 루프가 정확히 그 모양이다.
+_KEY_IGNORED_ARGS = ("purpose",)
+_SQL_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _norm_sql(s: str) -> str:
+    """두 SQL 이 '같은 질의'인지 비교하기 위한 정규화.
+
+    코드펜스와 끝 세미콜론을 떼고, 공백을 접고(연산자·괄호·쉼표 주변 공백은 아예 제거),
+    **문자열 리터럴 밖만** 소문자로 내린다. 바꾸는 것은 표기뿐이고 의미는 건드리지 않는다.
+
+    리터럴까지 소문자로 내리면 안 된다 — SQLite 에서 crd_grd='AA-' 와 'aa-' 는 다른 질의라서,
+    조건 값을 바꿔 가며 좁혀 가는 정상적인 재시도를 '반복'으로 오인하게 된다.
+    """
+    s = re.sub(r"^```(?:sql)?\s*|\s*```$", "", (s or "").strip(), flags=re.I).strip().rstrip(";")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    def _plain(seg: str) -> str:
+        # 'a = 1' 과 'a=1', 'in (1, 2)' 와 'in(1,2)' 는 같은 질의다. 식별자끼리는 붙지 않는다
+        # (공백을 지우는 것은 구두점·연산자에 '붙은' 공백뿐이다).
+        return re.sub(r"\s*([^\w\s가-힣])\s*", r"\1", seg.lower())
+
+    out, last = [], 0
+    for m in _SQL_LITERAL.finditer(s):
+        out.append(_plain(s[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_plain(s[last:]))
+    return "".join(out)
+
+
+def _call_key(call: ToolCall):
+    """'같은 호출'의 정의 = 도구 이름 + (purpose 를 뺀) 인자들의 정규화 형태.
+
+    더 느슨하게(예: 모든 인자를 casefold·특수문자 제거) 잡으면 서로 다른 검색어를 한 호출로
+    묶어 멀쩡한 시도를 막는다. 오탐 1건의 손해(엉뚱한 이전 결과를 돌려주고 '막혔다'고 말함)가
+    미탐 1건의 손해(지금과 동일한 상태)보다 크므로 엄격한 쪽으로 정의했다.
+    SQL 만 예외적으로 완화한 이유는 위 _norm_sql 참고 — 대소문자·들여쓰기만 바꿔 같은 질의를
+    다시 보내는 것이 실제로 관찰된 형태이기 때문이다.
+    """
+    if call.name == "final_answer":
+        return None  # 종료 호출은 중복 판정 대상이 아니다
+    args = call.input or {}
+    parts = []
+    for k in sorted(args):
+        if k in _KEY_IGNORED_ARGS:
+            continue
+        v = args[k]
+        t = json.dumps(v, ensure_ascii=False, sort_keys=True) if isinstance(v, (dict, list)) else str(v)
+        parts.append((k, _norm_sql(t) if k in _SQL_ARGS else re.sub(r"\s+", " ", t).strip()))
+    return (call.name, tuple(parts))
+
+
+def _looks_empty(res: ToolResult) -> bool:
+    ev = res.evidence
+    if ev is not None and ev.row_count == 0:
+        return True
+    c = res.content or ""
+    return "(0건)" in c or "검색 결과 없음" in c or "관련 문서 없음" in c
+
+
+def _repeat_note(n: int, res: ToolResult) -> str:
+    """반복 호출에 붙이는 안내. 무엇에 막혔는지에 따라 다음 수를 구체적으로 지정한다."""
+    if res.is_error:
+        nxt = ("위 오류 메시지가 알려준 실제 컬럼·뷰 이름으로 SQL 을 고치세요. "
+               "이름이 확실하지 않으면 table_info 로 컬럼 목록부터 확인하세요.")
+    elif _looks_empty(res):
+        nxt = ("조건을 하나씩 빼면서 어느 조건이 결과를 0건으로 만드는지 찾으세요. "
+               "값의 표기가 어긋났을 수 있으니 table_info 로 허용값을, resolve_entity·search_products 로 "
+               "실제 표기를 확인한 뒤 다시 거세요.")
+    else:
+        nxt = "이미 확보한 결과입니다. 이 값을 그대로 쓰고 남은 라운드는 아직 확인하지 않은 부분에 쓰세요."
+    return (f"\n\n⚠ 이 호출은 이번 질문에서 {n}번째 동일한 호출입니다. 실행하지 않고 위의 이전 결과를 "
+            f"그대로 돌려줍니다 — 같은 입력은 몇 번을 보내도 결과가 달라지지 않습니다. "
+            f"다른 접근이 필요합니다: {nxt}")
 
 
 class Orchestrator:
@@ -224,6 +353,9 @@ class Orchestrator:
         conv = self.llm.start(self.system_prompt, self.specs, f"질문: {question}\n\n{pre.text}")
         last_text = ""
         nudged = False
+        # key -> (지금까지 몇 번째 호출인지, 첫 실행 결과)
+        seen_calls: dict = {}
+        repeat_nudged = False
         for rnd in range(1, self.settings.max_tool_rounds + 2):
             remaining = deadline - time.monotonic()
             if remaining < 3:
@@ -263,10 +395,42 @@ class Orchestrator:
                 emit("tool_call", round=rnd, name=call.name, args=call.input or {},
                      elapsed=time.monotonic() - t0)
             tool_t0 = time.monotonic()
-            results = await asyncio.gather(*(self._run_tool(c) for c in turn.tool_calls))
+            # 이미 낸 적 있는 호출은 실행하지 않고 이전 결과 + 경고를 돌려준다.
+            # LLM 라운드는 이 시점에 이미 소비됐다 — 여기서 아끼는 것은 시간이 아니라
+            # 모델이 '내가 막혔다'는 사실을 알아차릴 기회다(_repeat_note 참고).
+            keys = [_call_key(c) for c in turn.tool_calls]
+            ordn: list[int] = []                      # 이 질문에서 몇 번째 동일 호출인지(1 = 처음)
+            plan: list[tuple[str, object]] = []       # ("cache", key) | ("run", fresh 안의 인덱스)
+            first_here: dict = {}                     # 같은 턴 안의 중복도 한 번만 실행한다
+            fresh: list[ToolCall] = []
+            for i, (call, key) in enumerate(zip(turn.tool_calls, keys)):
+                if key is None:                       # final_answer 등 판정 제외 호출
+                    ordn.append(1)
+                    plan.append(("run", len(fresh)))
+                    fresh.append(call)
+                    continue
+                prior = seen_calls[key][0] if key in seen_calls else 0
+                ordn.append(prior + sum(1 for j in range(i) if keys[j] == key) + 1)
+                if key in seen_calls:
+                    plan.append(("cache", key))
+                elif key in first_here:
+                    plan.append(("run", first_here[key]))
+                else:
+                    first_here[key] = len(fresh)
+                    plan.append(("run", len(fresh)))
+                    fresh.append(call)
+            done = await asyncio.gather(*(self._run_tool(c) for c in fresh))
+            bases = [seen_calls[ref][1] if kind == "cache" else done[ref] for kind, ref in plan]
+            # 반복분은 evidence 를 떼고 돌려준다 — 근거는 첫 실행 때 이미 기록했고,
+            # 다시 넣으면 retrieved_context 에 같은 [근거] 가 중복으로 찍힌다.
+            results = [b if n == 1 else ToolResult(b.content + _repeat_note(n, b), b.is_error, None)
+                       for b, n in zip(bases, ordn)]
+            for key, base, n in zip(keys, bases, ordn):
+                if key is not None:
+                    seen_calls[key] = (n, base)
             tool_sec = time.monotonic() - tool_t0
             packed = []
-            for call, res in zip(turn.tool_calls, results):
+            for call, res, ncall in zip(turn.tool_calls, results, ordn):
                 desc = self._describe(call)
                 ev = res.evidence
                 emit(
@@ -279,6 +443,10 @@ class Orchestrator:
                     },
                     elapsed=time.monotonic() - t0,
                 )
+                if ncall > 1:
+                    steps.append(f"라운드 {rnd}: {desc} → 동일 호출 {ncall}번째 — 미실행, 이전 결과 재사용 + 다른 접근 안내")
+                    packed.append((call.id, res.content, res.is_error))
+                    continue
                 if res.is_error:
                     steps.append(f"라운드 {rnd}: {desc} → 오류: {res.content[:100]}")
                 else:
@@ -292,6 +460,17 @@ class Orchestrator:
                             scalars.append(sv)
                 packed.append((call.id, res.content, res.is_error))
             conv.add_tool_results(packed)
+            # 3번째 동일 호출이면 마무리를 유도한다. 강제 종료가 아니라 안내인 이유:
+            # (1) 2번째에 붙인 경고를 보고 방향을 트는 경우가 있고, (2) 키 정규화가 오탐했을 때
+            # 문항 하나를 통째로 날리지 않기 위해서다. 질문당 한 번만 보낸다.
+            if max(ordn, default=1) >= 3 and not repeat_nudged:
+                repeat_nudged = True
+                conv.add_user(
+                    "[같은 호출 반복] 동일한 도구 호출이 3번 나왔습니다. 이 접근으로는 더 진전이 없습니다. "
+                    "조건이나 도구를 바꿔 한 번만 더 시도하고, 그래도 근거를 얻지 못하면 즉시 final_answer 를 "
+                    "호출하세요(근거가 없으면 status=cannot_confirm)."
+                )
+                steps.append(f"라운드 {rnd}: 동일 호출 3회 → 조기 마무리 안내")
             remaining = deadline - time.monotonic()
             if remaining < 14 or rnd == self.settings.max_tool_rounds:
                 conv.add_user("[시간 예산 임박] 추가 도구 호출 없이 지금까지 확보한 근거로 즉시 final_answer 를 호출하세요.")
@@ -331,6 +510,18 @@ class Orchestrator:
             )
             status = "clarify"
             steps.append(f"존재하지 않는 상품({', '.join(names)})을 답변에 사용 → 역질문으로 보정")
+        # 미래 값을 묻는 질문에 과거 실적 컬럼을 그대로 붙여 답하는 사고를 막는다.
+        # 숫자 자체는 도구가 낸 진짜 값이라 숫자 교차검증은 통과한다. 틀린 것은 '라벨'이므로
+        # 여기서 상태와 문구를 고쳐 과거 실적임을 분명히 하고 예측으로 읽히지 않게 한다.
+        if status == "answered" and asks_forward_looking(question):
+            answer = (
+                f"{CANNOT_PREFIX} 제공된 데이터는 기준일 {self.base_date} 시점의 스냅샷이며, "
+                "예상 수익률·목표가처럼 미래에 실현될 값을 담은 항목이 없습니다. "
+                "과거 수익률은 미래 수익을 보장하지 않으므로 예측치로 제시할 수 없습니다."
+                f"\n\n(참고) 아래는 예측이 아니라 데이터에 기록된 과거·현재 실적입니다.\n{answer}"
+            )
+            status = "cannot_confirm"
+            steps.append("미래 예측을 요구하는 질문 → 데이터에 예측 컬럼이 없어 확인불가로 보정(과거 실적은 참고로 유지)")
         # A count question whose single COUNT result never appears in the answer means the model
         # mis-transcribed it.  Only fires when exactly one scalar was produced, so a multi-step
         # calculation is never "corrected" against an intermediate value.

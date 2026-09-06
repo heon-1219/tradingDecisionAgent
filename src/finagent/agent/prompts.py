@@ -77,37 +77,65 @@ ORDER BY 수익률1년 DESC LIMIT 10
 """
 
 
-# 시스템 프롬프트에 넣을 핵심 컬럼. 전체 컬럼(48~58개)을 매 요청에 실으면 입력이 1.3만 토큰이 되어
-# CLOVA TPM 한도(테스트앱 3만/분)를 한 번의 호출로 소진한다. 나머지는 table_info 로 필요할 때만 준다.
+# 스키마 카드에 실을 컬럼과 그 순서.  **주최측이 준 컬럼은 전부 싣는다.**
+#
+# 예전에는 뷰마다 20~30개만 골라 실었다.  그런데 22문항 평가에서 모델은 table_info 를 단 한 번도
+# 부르지 않았다 — sql_query 24회, final_answer 20회, graph_neighbors 2회, table_info 0회.
+# "컬럼이 불확실하면 table_info 먼저"라고 프롬프트에 적어 두어도 모델은 그 길로 가지 않으므로,
+# 카드에 없는 컬럼은 사실상 존재하지 않는 컬럼이 된다.  그렇게 가려져 있던 컬럼이 104개였다.
+# 카드를 전량으로 늘리면 3,129 -> 6,257자(약 +1,564토큰)이고 시스템 프롬프트는 약 7,100토큰이
+# 되는데, 429가 터졌던 수준은 13,389토큰이었으므로 감당 가능한 값이다.
+#
+# 순서는 뷰 정의(build_store.VIEWS) 순서를 그대로 쓴다: 식별자·명칭 → 유형·판매상태 → 분류 →
+# 수치 → 날짜.  ontology.props_for 는 컬럼명 알파벳순이라 이 순서를 잃어버리므로 schema_card 가
+# 여기서 준 순서를 따르게 되어 있다.  집합(set)을 그대로 흘리면 실행마다 순서가 바뀌어
+# 프롬프트 캐시가 깨진다.
 CORE_COLUMNS = {
     "v_etf_constituent": [
-        "etf_itm_no", "etf_ticker", "etf_name", "company_code", "company_name",
-        "weight_pct", "is_cash", "as_of",
+        "etf_itm_no", "etf_ticker", "etf_name", "company_code", "company_name", "weight_pct", "is_cash", "as_of",
     ],
     "v_bond_kr": [
-        "pd_no", "pd_nm", "product_type", "pd_exg_mkt", "is_sellable", "has_buy_yield", "issuer_name",
-        "bd_knd", "std_pd_mcls_nm", "bd_ofr_tcd", "crd_grd", "pd_risk_nm", "curr_cd", "srfc_irt",
-        "isu_date", "mat_date", "remaining_days", "remaining_years", "applied_yield", "buy_yield",
-        "after_tax_yield", "dur", "pd_pen_tr_yn", "base_date",
+        "pd_no", "pd_nm", "pd_abrv_nm", "pd_eng_nm", "product_type", "pd_exg_mkt", "info_seq", "is_sellable",
+        "bdbns_abl_chnl_nm", "issuer_name", "bd_knd", "std_pd_mcls_nm", "std_pd_scls_nm", "bd_ofr_tcd",
+        "bd_inrt_tcd", "bd_intp_tcd", "crd_grd", "crd_grd_dt", "pd_risk_nm", "pd_risk_gcd", "curr_cd",
+        "srfc_irt", "isu_date", "mat_date", "remaining_days", "remaining_years", "bd_tisu_a", "isu_bal_amt",
+        "has_buy_yield", "applied_yield", "buy_yield", "after_tax_yield", "pref_tax_yield",
+        "avg_annual_tax_yield", "corp_pretax_yield", "corp_after_tax_yield", "depo_equiv_yield_154",
+        "depo_equiv_yield_495", "trade_price", "buyable_quantity", "eval_price", "dirty", "dur", "cov",
+        "exg_close_price", "exg_close_yield", "exrt_grte_ern_r", "exrt_rpy_r", "pd_pen_tr_yn", "base_date",
     ],
     "v_etf_kr": [
-        "pd_itm_no", "pd_ticker", "pd_abrv_nm", "pd_nm", "product_type", "pd_grp_no", "is_on_sale",
-        "manager_name", "cu_strtegy", "cu_lev_fector", "cu_base_index", "cu_charge_rt", "wu_inv_ast_type",
-        "wu_inv_rgn", "risk_grade", "pd_risk_nm", "pd_pen_tr_yn", "pd_net_tamt", "du_last_aum", "du_clpr",
-        "du_er_1m", "du_er_3m", "du_er_6m", "du_er_ytd", "du_er_1y", "du_vlty_1y", "du_vol_1d",
-        "pd_dvid_cycl", "pd_dvid_yield", "listing_date", "delisting_date", "base_date",
+        "pd_itm_no", "pd_ticker", "pd_abrv_nm", "pd_nm", "product_type", "pd_grp_no", "is_on_sale", "is_listed",
+        "pd_sale_yn", "pd_tr_yn", "manager_name", "cu_fund_mgmt_co", "cu_strtegy", "cu_lev_fector",
+        "cu_base_index", "ref_base_index", "cu_charge_rt", "cu_charge_etc_rt", "wu_inv_ast_type", "wu_inv_rgn",
+        "ref_ast_type", "ref_geo_focus", "wu_core_yn", "pd_risk_nm", "risk_grade", "pd_pen_tr_yn",
+        "pd_pen_risk_nm", "pd_net_tamt", "du_last_aum", "du_last_nav", "du_clpr", "ru_mkt_price", "du_bpr",
+        "du_diff_rt", "du_chas_errt", "du_er_1d", "du_er_1m", "du_er_3m", "du_er_6m", "du_er_ytd", "du_er_1y",
+        "du_vlty_1m", "du_vlty_3m", "du_vlty_6m", "du_vlty_1y", "du_vol_1d", "du_val_1d", "du_val_1m",
+        "pd_dvid_cycl", "pd_dvid_yield", "pd_divd_amt_pshr", "pd_dvid_pay_cnt", "pd_dvid_pay_months",
+        "listing_date", "delisting_date", "pd_lst_stk_cnt", "fn_average_coupon", "fn_effective_maturity",
+        "base_date",
     ],
     "v_etf_gl": [
-        "pd_itm_no", "ticker", "pd_nm", "product_type", "is_on_sale", "pd_exg_mkt_cd", "pd_mkt_id",
-        "pd_curr_cd", "manager_name", "cu_base_index", "cu_strtegy", "expense_ratio_pct", "cu_lev_fector",
-        "cu_inverse_short_yn", "wu_inv_ast_type", "wu_inv_rgn", "du_last_aum", "du_clpr", "du_er_1d",
-        "du_vol_1d", "listing_date", "base_date",
+        "pd_itm_no", "ticker", "pd_nm", "product_type", "pd_grp_no", "is_on_sale", "is_listed", "pd_tr_yn",
+        "pd_sale_yn", "pd_exg_mkt_cd", "pd_mkt_id", "pd_curr_cd", "pd_isin_cd", "manager_name", "cu_base_index",
+        "cu_strtegy", "expense_ratio_pct", "cu_charge_rt", "cu_lev_fector", "cu_inverse_short_yn",
+        "cu_index_tracking_yn", "cu_index_repl_mthd", "cu_etn_yn", "wu_inv_ast_type", "wu_inv_rgn",
+        "wu_core_yn", "du_last_aum", "du_last_nav", "du_clpr", "du_opr", "du_hpr", "du_lpr", "ru_mkt_price",
+        "du_er_1d", "du_vol_1d", "du_val_1d", "pd_lst_stk_cnt", "listing_date", "base_date",
     ],
     "v_fund_pub": [
-        "itm_no", "itm_nm", "fund_family", "product_type", "prvo_pbff_desc", "is_on_sale", "manager_name",
-        "or_attr_desc", "zrin_btyp_nm", "zrin_ptn_nm", "fd_ivst_rgn_desc", "ovrs_fd_desc", "bmrk_nm",
-        "is_hedged", "risk_grade", "han_clas_fee_type", "han_clas_sales_channel", "fd_nast_suma",
-        "fd_mm3_ern_r", "fd_mm6_ern_r", "fd_yr1_ern_r", "fd_yr3_ern_r", "base_date",
+        "itm_no", "itm_nm", "itm_abrv_nm", "itm_eng_nm", "fund_family", "product_type", "prvo_pbff_desc",
+        "is_on_sale", "sale_yn", "thco_sale_yn", "manager_name", "manager_source", "or_co_xtn_itt_cd",
+        "or_attr_desc", "zrin_btyp_nm", "zrin_ptn_nm", "zrin_attr_nms", "fd_ivst_rgn_desc", "ovrs_fd_desc",
+        "bmrk_nm", "bmrk_eng_nm", "curr_cd", "exchdg_yn", "is_hedged", "hdge_fd_yn", "ofsfd_yn", "int_dvd_desc",
+        "pers_corp_desc", "zrin_fd_ivst_risk_grd_nm", "risk_grade", "han_clas_nm", "han_clas_fee_type",
+        "han_clas_sales_channel", "han_clas_policies", "or_co_rwrd_r", "sale_co_rwrd_r", "trusc_rwrd_r",
+        "ofwk_trus_rwrd_r", "fd_nast_suma", "bns_bpr", "fd_wk1_ern_r", "fd_mm1_ern_r", "fd_mm3_ern_r",
+        "fd_mm6_ern_r", "fd_yr1_ern_r", "fd_mm18_ern_r", "fd_yr2_ern_r", "fd_yr3_ern_r", "fd_yr5_ern_r",
+        "fd_last_dstb_r", "zrin_dmst_stk_cmst_rt", "zrin_ovrs_stk_cmst_rt", "zrin_dmst_bd_cmst_rt",
+        "zrin_ovrs_bd_cmst_rt", "zrin_liqt_cmst_rt", "zrin_fd_cmst_rt", "zrin_etc_ast_cmst_rt",
+        "prfd_attr_search_text", "base_date",
     ],
 }
 
@@ -157,11 +185,15 @@ def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None =
         )
     if ontology is not None:
         parts.append(
-            "\n## 스키마 요약(자주 쓰는 컬럼만 · 컬럼: 한글 의미 (단위; 허용값))\n"
-            "여기 없는 컬럼이 필요하면 table_info 도구로 해당 뷰의 전체 정의를 받으세요."
+            "\n## 스키마(뷰의 전 컬럼 · 컬럼: 한글 의미 (단위; 허용값; 값 예시))\n"
+            "각 뷰의 컬럼은 여기에 모두 있습니다. 컬럼의 자세한 설명·주의사항이 필요하면 table_info 로 받으세요."
         )
         for view in VIEW_ID_NAME:
-            card = ontology.schema_card(view, columns=CORE_COLUMNS.get(view), compact=True)
+            cols = list(CORE_COLUMNS.get(view) or [])
+            # 온톨로지에 새 컬럼이 생겼는데 위 목록에 넣는 것을 잊어도 카드에서 사라지지 않도록,
+            # 목록에 없는 컬럼은 뒤에 붙인다. 컬럼이 카드에 없으면 모델에게는 없는 컬럼이다.
+            cols += [p.column for p in ontology.props_for(view) if p.column not in cols]
+            card = ontology.schema_card(view, columns=cols, compact=True)
             if hints:
                 lines = []
                 for ln in card.splitlines():

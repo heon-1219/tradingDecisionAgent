@@ -2,7 +2,7 @@
 # bond_kr.ttl — 국내채권 마스터 (v_bond_kr / PRBD01N001) TBox
 #
 # 목적
-#   국내채권 뷰의 51개 컬럼을 fp:DomesticBond 의 속성으로 문서화하고, 신용등급·중분류·
+#   국내채권 뷰의 50개 컬럼을 fp:DomesticBond 의 속성으로 문서화하고, 신용등급·중분류·
 #   금리구분·이자지급구분·모집구분·거래구분 열거형을 개체로 선언한다.
 #   loader.py 는 fp:sourceTable "v_bond_kr" + fp:sourceColumn 을 가진 속성만 스키마 카드에
 #   포함하므로 모든 컬럼이 이 파일에 1:1 로 대응한다.
@@ -139,6 +139,12 @@ fp:bondProductNo a owl:DatatypeProperty ;
     rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
     rdfs:subPropertyOf fp:productCode ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_no" .
+
+fp:bondLotSeq a owl:DatatypeProperty ;
+    rdfs:label "장외 판매 LOT 번호"@ko ;
+    rdfs:comment "장외 판매 LOT 일련번호 ('1'~'3' 문자열, 전 행 수록). pd_no 는 기본키가 아니다: 한 종목이 장내/장외 구분과 이 LOT 번호로 최대 4행까지 갈라지고, LOT 마다 매수수익률·단가가 실제로 다르다 (KR101501DCA3 = LOT1 3.37% / LOT2 3.47%). 장내 행은 전부 '1', LOT 2 이상은 장외 307행 뿐이다. 그래서 '몇 개'를 묻는 질의는 COUNT(DISTINCT pd_no) 를 쓴다."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:string ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "info_seq" .
 
 fp:bondName a owl:DatatypeProperty ;
     rdfs:label "상품명"@ko ;
@@ -328,6 +334,12 @@ fp:bondAppliedYield a owl:DatatypeProperty ;
     rdfs:comment "민간 채권평가사 평균 수익률 %. 매수 불가 종목에도 대부분 존재하여 시장 비교용."@ko ;
     rdfs:domain fp:DomesticBond ; rdfs:range xsd:decimal ; fp:unit "%" ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "applied_yield" .
+
+fp:bondHasBuyYield a owl:DatatypeProperty ;
+    rdfs:label "매수수익률 수록 여부"@ko ;
+    rdfs:comment "1 = buy_yield·after_tax_yield 가 실제로 수록된 행 (634행 / 326종목), 0 = 미수록 (21,248행). 수익률로 정렬·비교·추천하는 질의는 has_buy_yield = 1 을 함께 걸어야 값 없는 종목이 상위에 오지 않는다. is_sellable(상환 미도래, 21,866행) 과는 다른 조건이며 훨씬 좁다."@ko ;
+    rdfs:domain fp:DomesticBond ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_bond_kr" ; fp:sourceColumn "has_buy_yield" .
 
 fp:bondBuyYield a owl:DatatypeProperty ;
     rdfs:label "매수수익률"@ko ;

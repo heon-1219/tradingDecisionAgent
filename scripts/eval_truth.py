@@ -99,7 +99,18 @@ def score(item: dict, answer: str, truth: list[str], trace: str = "") -> tuple[b
         want = truth[0]
         try:
             num = float(want)
-            cands = {f"{num:,.0f}", f"{num:.0f}", f"{num:g}", f"{num:,.2f}".rstrip("0").rstrip(".")}
+            # 소수 기대값에 '반올림한 정수'를 후보로 넣으면 채점이 무너진다.
+            # G-008 의 정답은 0.65 인데 f"{0.65:,.0f}" 는 "1" 이므로, 숫자 1 이 한 번이라도 들어간
+            # 답은 내용과 무관하게 전부 통과했다("총보수는 0.12%입니다" 같은 오답도 '1'이 들어 있으면
+            # 정답 처리). 정수 형태 후보는 기대값이 실제로 정수일 때만 만들고, 소수일 때는 값이
+            # 보존되는 표기만 후보로 쓴다. (".2f" 를 무조건 넣으면 0.001 이 "0" 이 되어 같은 함정이 된다.)
+            cands = {f"{num:g}"}
+            if num.is_integer():
+                cands |= {f"{num:,.0f}", f"{num:.0f}"}
+            else:
+                two = f"{num:,.2f}"
+                if float(two.replace(",", "")) == num:
+                    cands.add(two)
         except ValueError:
             cands = {want}
         digits = {norm(c) for c in cands}

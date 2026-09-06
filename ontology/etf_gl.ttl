@@ -123,6 +123,24 @@ fp:etfGlIsOnSale a owl:DatatypeProperty ;
     rdfs:domain fp:ForeignListedProduct ; rdfs:range xsd:integer ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "is_on_sale" .
 
+fp:etfGlIsListed a owl:DatatypeProperty ;
+    rdfs:label "상장 유지 여부"@ko ;
+    rdfs:comment "해외ETF 원천에는 상장종료일 컬럼이 없어 is_on_sale 과 같은 값으로 채워진다 — 6,037행 전부 1. 국내ETF 의 is_listed 와 달리 상장폐지를 구분하지 못하므로 필터로 쓸 값이 아니다."@ko ;
+    rdfs:domain fp:ForeignListedProduct ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "is_listed" .
+
+fp:etfGlTradingHalt a owl:DatatypeProperty ;
+    rdfs:label "거래정지 여부"@ko ;
+    rdfs:comment "원천 문자열 '1' = 거래정지, '0' = 정상 거래. is_on_sale 의 유일한 구성요소다 (국내ETF 와 달리 판매여부는 계산에 쓰이지 않는다). 6,023행이 '0', 14행이 NULL(정상으로 간주) 이라 거래정지 종목은 실제로 한 건도 없다."@ko ;
+    rdfs:domain fp:ForeignListedProduct ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_tr_yn" .
+
+fp:etfGlSaleFlag a owl:DatatypeProperty ;
+    rdfs:label "판매여부"@ko ;
+    rdfs:comment "원천 문자열 '1' = 당사 판매 상품. 6,023행이 '1' 이고 나머지 14행은 NULL 이라 사실상 단일값이며, 이 컬럼으로는 상품이 걸러지지 않는다. 판매 여부는 is_on_sale 로 판단한다."@ko ;
+    rdfs:domain fp:ForeignListedProduct ; rdfs:range xsd:string ;
+    fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_sale_yn" .
+
 # ----------------------------------------------------------------------------
 # 5. 시장 / 통화 / 식별코드
 # ----------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Tools exposed to the LLM: typed schemas + executors that also capture evidence."""
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -19,6 +20,13 @@ VIEW_ID_NAME = {
     "v_etf_gl": ("ticker", "pd_nm"),
     "v_fund_pub": ("itm_no", "itm_nm"),
     "v_etf_constituent": ("etf_itm_no", "company_name"),
+}
+VIEW_LABEL = {
+    "v_bond_kr": "국내채권",
+    "v_etf_kr": "국내ETF/ETN",
+    "v_etf_gl": "해외ETF",
+    "v_fund_pub": "공모/사모펀드",
+    "v_etf_constituent": "국내ETF 편입종목",
 }
 SEMANTICS = {
     "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 한 종목이 여러 행일 수 있다(장내/장외 + 장외 판매 LOT info_seq, 최대 4행). 따라서 '몇 개'를 물으면 COUNT(DISTINCT pd_no) 를 쓴다. LOT 마다 매수수익률·단가가 다르므로 행 자체는 의미가 있다.",
@@ -274,8 +282,117 @@ class ToolRegistry:
                         f"AND {col} > 0 을 추가해 다시 조회하세요.")
         return out
 
+    # ------------------------------------------- SQL 오류를 '가르치는' 메시지로 바꾼다
+    # 이 자리는 도구 계층이지 가드가 아니다. RDB.query 는 ETL·평가 스크립트와 바로 위
+    # _true_total/_unit_warning 의 내부 재질의까지 함께 쓰는 범용 접근자여서, 가드에 LLM 용
+    # 안내문을 넣으면 사람이 읽을 로그와 내부 재시도 경로까지 오염된다. 뷰 카탈로그를 알고
+    # 있고 문자열이 그대로 모델에게 전달되는 곳은 이 계층이다.
+    #
+    # 근거(G-007): "no such column: pd_ticker" 는 무엇이 틀렸는지만 말하고 무엇이 맞는지는
+    # 말하지 않는다. 모델은 다시 추측할 수밖에 없고, 추측이 반복되면 8라운드가 사라진다.
+    _NO_COLUMN = re.compile(r"no such column:\s*(?:(?P<alias>[A-Za-z_]\w*)\.)?(?P<col>[A-Za-z_]\w*)", re.I)
+    _NO_TABLE = re.compile(r"no such table:\s*(?P<tbl>[A-Za-z_]\w*)", re.I)
+    # 컬럼 목록을 SQL 로 알아내려는 시도(PRAGMA/sqlite_master)는 가드가 막는다 — 막힌 이유가
+    # 아니라 대신 쓸 도구를 알려줘야 다음 라운드가 살아난다.
+    _CATALOG_SQL = re.compile(r"\b(pragma|sqlite_master|sqlite_schema|describe|show\s+columns)\b", re.I)
+    # 소스 시스템 접두어. 모델이 'pd_ticker' 라고 쓰고 뷰에는 'ticker' 만 있는 혼동이 실제로 났다.
+    _SRC_PREFIX = re.compile(r"^(?:pd|cu|du|wu|ru|fn|ref|etf|or|zrin|fd|std|bd|crd)_", re.I)
+    _MAX_COLS_SHOWN = 24   # 이보다 좁은 뷰는 전부 나열해도 컨텍스트를 해치지 않는다
+    _NEAR_COLS_SHOWN = 10  # 넓은 뷰는 근접 후보만 보이고 전체 개수를 알린다
+
+    def _view_columns(self, view: str) -> list[str]:
+        cache = getattr(self, "_colcache", None)
+        if cache is None:
+            cache = self._colcache = {}
+        if view not in cache:
+            try:
+                cache[view] = list(self.rdb.columns(view))
+            except Exception:  # noqa: BLE001 - 카탈로그 조회 실패가 오류 메시지를 삼키면 안 된다
+                cache[view] = []
+        return cache[view]
+
+    @classmethod
+    def _core_name(cls, col: str) -> str:
+        """접두어를 뗀 형태. 'pd_ticker' -> 'ticker', 'etf_itm_no' -> 'itm_no'."""
+        return cls._SRC_PREFIX.sub("", col.lower())
+
+    def _column_suggestions(self, wanted: str, cols: list[str], n: int = 4) -> list[str]:
+        """wanted 와 가장 가까운 실제 컬럼명. 접두어 혼동을 먼저, 그다음 편집거리."""
+        want, core = wanted.lower(), self._core_name(wanted)
+        out: list[str] = []
+        for c in cols:  # 접두어만 다른 경우를 최우선으로 올린다(G-007 의 pd_ticker -> ticker)
+            if c.lower() != want and self._core_name(c) == core:
+                out.append(c)
+        for c in difflib.get_close_matches(wanted, cols, n=n, cutoff=0.6):
+            if c not in out and c.lower() != want:
+                out.append(c)
+        by_core: dict[str, str] = {}
+        for c in cols:
+            by_core.setdefault(self._core_name(c), c)
+        for k in difflib.get_close_matches(core, list(by_core), n=n, cutoff=0.6):
+            if by_core[k] not in out and by_core[k].lower() != want:
+                out.append(by_core[k])
+        return out[:n]
+
+    def _referenced_views(self, sql: str) -> list[str]:
+        return [v for v in VIEW_ID_NAME if re.search(rf"\b{v}\b", sql, re.I)]
+
+    def _sql_error_hint(self, sql: str, msg: str) -> str:
+        """실패한 질의에 '무엇이 맞는지'를 덧붙인다. 더할 게 없으면 빈 문자열."""
+        m = self._NO_TABLE.search(msg)
+        if m:
+            bad = m.group("tbl")
+            near = difflib.get_close_matches(bad, list(VIEW_ID_NAME), n=1, cutoff=0.5)
+            head = f"\n'{bad}' 대신 {near[0]} 를 쓰세요. " if near else "\n"
+            return (head + "사용 가능한 뷰는 다음 5개뿐입니다: "
+                    + ", ".join(f"{v}({VIEW_LABEL[v]})" for v in VIEW_ID_NAME)
+                    + ". 컬럼 정의는 table_info 도구로 확인합니다.")
+        m = self._NO_COLUMN.search(msg)
+        if m:
+            bad, alias = m.group("col"), m.group("alias")
+            views = self._referenced_views(sql)
+            if alias:  # 별칭이 붙었으면 그 별칭이 가리키는 뷰만 본다 — JOIN 질의에서 정확도가 올라간다
+                am = re.search(rf"\b(v_\w+)\s+(?:as\s+)?{re.escape(alias)}\b", sql, re.I)
+                if am and am.group(1) in VIEW_ID_NAME:
+                    views = [am.group(1)]
+            if not views:
+                return ("\n질의가 참조한 뷰를 알 수 없습니다. 사용 가능한 뷰: "
+                        + ", ".join(VIEW_ID_NAME) + " (컬럼 정의는 table_info).")
+            best: list[str] = []
+            listing: list[str] = []
+            for v in views:
+                cols = self._view_columns(v)
+                if not cols:
+                    continue
+                sug = self._column_suggestions(bad, cols)
+                best += [f"{v}.{c}" for c in sug[:2]]
+                if len(cols) <= self._MAX_COLS_SHOWN:
+                    listing.append(f"- {v} 컬럼 {len(cols)}개: " + ", ".join(cols))
+                else:
+                    # 넓은 뷰를 통째로 실으면 컨텍스트를 잡아먹는다. 가까운 이름 + 총 개수만 준다.
+                    near = sug or difflib.get_close_matches(bad, cols, n=self._NEAR_COLS_SHOWN, cutoff=0.0)
+                    listing.append(
+                        f"- {v} 컬럼 {len(cols)}개 중 '{bad}' 와 가까운 이름: "
+                        + ", ".join(near[: self._NEAR_COLS_SHOWN])
+                        + f" (전체 목록은 table_info('{v}'))"
+                    )
+            out = ""
+            if best:
+                out += f"\n'{bad}' 대신 " + " 또는 ".join(best[:3]) + " 를 쓰세요."
+            if listing:
+                out += "\n" + "\n".join(listing)
+            return out
+        # 가드가 막은 카탈로그 조회: 막힌 이유가 아니라 대신 쓸 도구를 알려준다.
+        # (컬럼명을 몰라 PRAGMA 로 알아내려는 시도는 바로 이 막다른 길에서 나온다.)
+        if self._CATALOG_SQL.search(sql or ""):
+            return "\n컬럼 목록·기준일·판정 규칙은 SQL 이 아니라 table_info 도구로 조회하세요. 예: table_info(table='v_etf_kr')."
+        return ""
+
     def _t_sql_query(self, sql: str, purpose: str = "") -> ToolResult:
-        r = self.rdb.query(sql)
+        try:
+            r = self.rdb.query(sql)
+        except SQLGuardError as e:
+            return ToolResult(str(e) + self._sql_error_hint(sql, str(e)), True)
         view = next((v for v in VIEW_ID_NAME if v in r.sql), None)
         kname, base = self._meta_line(view) if view else (None, None)
         refs = []

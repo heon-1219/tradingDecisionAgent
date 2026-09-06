@@ -113,6 +113,12 @@ fp:etfKrIsOnSale a owl:DatatypeProperty ;
     rdfs:domain fp:DomesticListedProduct ; rdfs:range xsd:integer ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "is_on_sale" .
 
+fp:etfKrIsListed a owl:DatatypeProperty ;
+    rdfs:label "상장 유지 여부"@ko ;
+    rdfs:comment "1 = 상장 유지 (상장종료일 delisting_date 가 없거나 기준일보다 뒤), 0 = 상장폐지. 1,780행 중 1,541행이 1. is_on_sale 은 여기에 거래정지 여부(pd_tr_yn)까지 더한 값이라, 상장은 유지하지만 거래정지된 5종목은 is_listed=1 이면서 is_on_sale=0 이다. '구매 가능' 조건에는 is_on_sale 을 쓴다."@ko ;
+    rdfs:domain fp:DomesticListedProduct ; rdfs:range xsd:integer ;
+    fp:sourceTable "v_etf_kr" ; fp:sourceColumn "is_listed" .
+
 fp:etfKrSaleFlag a owl:DatatypeProperty ;
     rdfs:label "판매여부"@ko ;
     rdfs:comment "1 = 당사 판매, 0 = 미판매. is_on_sale 의 구성요소."@ko ;
