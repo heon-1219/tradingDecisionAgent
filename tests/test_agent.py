@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from finagent.agent.answer import CANNOT_PREFIX, Evidence, format_evidence, normalize_answer
+from finagent.agent.answer import (
+    CANNOT_PREFIX,
+    Evidence,
+    format_evidence,
+    normalize_answer,
+    strip_tool_call_syntax,
+)
 from finagent.agent.llm import StubLLM, ToolCall, Turn
 from finagent.agent.orchestrator import (
     Orchestrator,
@@ -196,6 +202,53 @@ def test_answer_helpers():
     assert normalize_answer("cannot_confirm", "해당 상품 없음").startswith("제공된 데이터로는 확인할 수 없습니다")
     assert normalize_answer("clarify", "어느 것").endswith("?")
     assert json.loads('{"a": 1}')["a"] == 1
+
+
+def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
+    """모델이 final_answer 를 '호출'하지 않고 그 구문을 answer 안에 글자로 써 보낸 실제 사례들.
+
+    기록된 54개 답변 중 6개가 이랬다. 껍데기만 벗기고 안의 본문은 반드시 살아남아야 한다 —
+    통째로 지우면 답이 사라지고, 그냥 두면 사용자가 도구 구문을 읽게 된다.
+    """
+    # G-006: 호출 구문이 답변 전체인 경우
+    assert strip_tool_call_syntax(
+        'final_answer(status="completed", answer="국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품은 총 22개입니다.")'
+    ) == "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품은 총 22개입니다."
+
+    # G-016: 진짜 문장 뒤에 호출 구문이 붙은 경우. 앞 문장도 안의 본문도 모두 남아야 한다.
+    g016 = ('제공된 데이터로는 확인할 수 없습니다. final_answer(status="cannot_confirm", '
+            'answer="제공된 데이터에서는 신용등급이 \'AAAA\'인 채권을 찾을 수 없습니다. '
+            '유효한 신용등급으로는 AAA, AA+, AA0, AA- 등이 있으니 이러한 등급을 가진 채권을 찾으시면 도움이 될 것 같습니다.")')
+    out = strip_tool_call_syntax(g016)
+    assert "final_answer" not in out and 'status=' not in out and 'answer="' not in out
+    assert out.startswith("제공된 데이터로는 확인할 수 없습니다. 제공된 데이터에서는 신용등급이 'AAAA'인 채권을 찾을 수 없습니다.")
+    assert out.endswith("도움이 될 것 같습니다.")
+
+    # G-043: 인자 안의 \n 이스케이프는 실제 줄바꿈으로 풀린다(목록이 한 줄로 뭉치지 않게)
+    g043 = ('final_answer(status="completed", answer="판매 중인 국내 ETF와 공모펀드를 통틀어 위험등급 1등급으로 '
+            '분류된 상품은 총 1,097개입니다.\\n\\n- 국내 ETF: 223개\\n- 공모펀드: 874개")')
+    out = strip_tool_call_syntax(g043)
+    assert "\\n" not in out and "- 국내 ETF: 223개\n- 공모펀드: 874개" in out
+
+    # G-054: 안내 문구 + 코드펜스로 감싼 경우. 껍데기 세 겹이 모두 벗겨져야 한다.
+    g054 = ('final_answer 도구를 사용하여 답변을 제출하겠습니다:\n\n```plaintext\n'
+            'final_answer(status="cannot_confirm", answer="제공된 데이터로는 총보수 정보를 찾을 수 없습니다.")\n```')
+    assert strip_tool_call_syntax(g054) == "제공된 데이터로는 총보수 정보를 찾을 수 없습니다."
+
+    # 출력 상한을 낮추면 구문이 닫히기 전에 잘릴 수 있다. 그 조각도 같은 방식으로 벗긴다.
+    assert strip_tool_call_syntax(
+        '제공된 데이터로는 확인할 수 없습니다. final_answer(status="cannot_confirm", answer="제공된 데이터로는 특정 상품을'
+    ) == "제공된 데이터로는 확인할 수 없습니다. 제공된 데이터로는 특정 상품을"
+
+    # ---- 손대면 안 되는 것들: 괄호·따옴표가 든 정상 답변(실제 기록 G-003 / G-009 / G-026) ----
+    for legit in (
+        "매수수익률이 수록된 채권 중 세후 운용수익률이 가장 높은 종목은 '국고채권 01500-5003(20-2)'이며, 수익률은 5.70%입니다.",
+        "해외 ETF 중 운용규모(AUM)가 가장 큰 상품은 Vanguard 500 Index Fund;ETF - 997,351,790,000원 (9,973억 5,179만원)입니다.",
+        "1. KB RISE 고배당증권상장지수투자신탁 (RISE 고배당)\n2. 삼성 KODEX 고배당주증권상장지수투자신탁 (KODEX 고배당주)",
+        '위험등급은 "매우높은위험(1등급)" 형태의 라벨로 제공됩니다.',
+    ):
+        assert strip_tool_call_syntax(legit) == legit, legit
+        assert normalize_answer("answered", legit) == legit, legit
 
 
 async def test_nonexistent_product_is_not_answered_as_a_similar_one(tiny_store, tmp_path):
@@ -471,6 +524,33 @@ async def test_wide_view_error_stays_bounded(tiny_store, tmp_path):
     assert "v_etf_gl.ticker" in msg
     assert f"컬럼 {len(wide)}개 중" in msg and "table_info('v_etf_gl')" in msg
     assert "col_59" not in msg and len(msg) < 400   # 전체를 쏟아붓지 않는다
+
+
+async def test_missing_column_says_what_to_do_not_just_what_is_wrong(tiny_store, tmp_path):
+    """119초 문항 재발 방지: du_er_1y FROM v_etf_gl 실패 직후 모델이 답 대신 '접근 방법'을 썼다.
+
+    v_etf_gl 에는 1년 수익률 컬럼이 없고 du_er_1d(1일)뿐이다. 철자가 가까워 제안은 나오지만
+    그 제안은 답이 될 수 없다 — 그래서 '무엇이 맞는지'만이 아니라 '그래서 무엇을 하라'가 필요하다.
+    """
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    s.tools._colcache = {"v_etf_gl": ["ticker", "pd_nm", "is_on_sale", "du_er_1d", "du_last_aum"]}
+    msg = s.tools._sql_error_hint(
+        "SELECT ticker, du_er_1y FROM v_etf_gl WHERE is_on_sale=1 ORDER BY du_er_1y DESC LIMIT 10",
+        "SQL 오류: no such column: du_er_1y",
+    )
+    assert "du_er_1d" in msg                       # 기존 동작: 가까운 컬럼은 계속 짚어 준다
+    assert "뜻" in msg and "같지는 않습니다" in msg  # 이름이 가까운 것 != 뜻이 같은 것
+    assert "제외" in msg                            # 대체 금지 → 그 상품군을 제외하고
+    assert "방법 설명 금지" in msg                   # 계획을 쓰지 말고 바로 답하라
+
+    # 근접 후보가 하나도 없을 때도 같은 지시가 붙는다
+    s.tools._colcache = {"v_etf_gl": ["ticker", "pd_nm"]}
+    bare = s.tools._sql_error_hint("SELECT zzz_qqq FROM v_etf_gl", "SQL 오류: no such column: zzz_qqq")
+    assert "제외" in bare and "방법 설명 금지" in bare
+
+    # 컬럼 오류가 아닌 실패에는 붙지 않는다
+    syn = await s.tools.execute("sql_query", {"sql": "SELECT pd_nm FROM v_etf_kr WHERE"})
+    assert syn.is_error and "방법 설명 금지" not in syn.content
 
 
 def test_call_key_defines_the_same_call():

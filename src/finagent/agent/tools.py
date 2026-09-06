@@ -300,6 +300,16 @@ class ToolRegistry:
     _MAX_COLS_SHOWN = 24   # 이보다 좁은 뷰는 전부 나열해도 컨텍스트를 해치지 않는다
     _NEAR_COLS_SHOWN = 10  # 넓은 뷰는 근접 후보만 보이고 전체 개수를 알린다
 
+    # 근거(119초 문항): "SELECT ... du_er_1y FROM v_etf_gl" 이 실패한 직후 모델이 궤도를 벗어나
+    # 답 대신 '접근 방법'을 쓰기 시작했다. 위의 제안은 'du_er_1d 를 쓰세요'라고 말하는데,
+    # 1일 수익률은 1년 수익률의 대체재가 아니다 — 이름이 가까운 것과 뜻이 같은 것은 다르다.
+    # 무엇이 맞는지만 알려주고 '그래서 무엇을 하라'를 말하지 않으면 그 다음 라운드가 계획 수립으로 샌다.
+    # 제안이 있을 때도 붙인다: du_er_1y 는 제안이 나오는데도 그 제안이 답이 될 수 없는 경우였다.
+    _NO_COLUMN_DIRECTIVE = (
+        "\n이름이 가깝다고 뜻(기간·단위)까지 같지는 않습니다. 그 뷰에서 뜻이 맞는 컬럼을 쓰고, 없으면 다른 기간·단위 값으로 "
+        "대체하지 말고 그 상품군을 비교에서 제외했다고 한 문장으로 밝힌 뒤 나머지 상품군으로 바로 답하세요(방법 설명 금지)."
+    )
+
     def _view_columns(self, view: str) -> list[str]:
         cache = getattr(self, "_colcache", None)
         if cache is None:
@@ -381,7 +391,7 @@ class ToolRegistry:
                 out += f"\n'{bad}' 대신 " + " 또는 ".join(best[:3]) + " 를 쓰세요."
             if listing:
                 out += "\n" + "\n".join(listing)
-            return out
+            return out + self._NO_COLUMN_DIRECTIVE
         # 가드가 막은 카탈로그 조회: 막힌 이유가 아니라 대신 쓸 도구를 알려준다.
         # (컬럼명을 몰라 PRAGMA 로 알아내려는 시도는 바로 이 막다른 길에서 나온다.)
         if self._CATALOG_SQL.search(sql or ""):

@@ -19,7 +19,19 @@ class Settings(BaseSettings):
     llm_provider: Literal["clova", "anthropic", "openai", "stub"] = "clova"
     llm_model: str = "HCX-005"
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
-    llm_max_tokens: int = 4096  # CLOVA function calling 은 1024 이상이어야 동작
+    # 지연은 출력 생성에 지배된다. 느린 두 문항을 라운드별로 계측하니 도구 실행은 0.53초/0.11초였고,
+    # 105초·119초의 대부분이 마지막 LLM 호출 한 번이었다(각각 53초·92.9초). 92.9초짜리 응답이 만든 것은
+    # 답이 아니라 "…상위 10개를 찾기 위해서는 다음과 같은 접근 방법을 사용할 수 있습니다" 라는 방법론
+    # 서술이었다. 데이터는 이미 두 라운드 전에 확보돼 있었다. 4096 이라는 천장이 그 서술을 가능하게 했다.
+    #
+    # 상한의 근거(측정):
+    #   * 기록된 답변 54개의 길이: 중앙값 108자, 95백분위 497자, 최대 610자(G-026, 월배당 ETF 9개 나열).
+    #   * CLOVA 토크나이저 실측 한국어 비율은 1.85~1.90자/토큰 → 최대 610자 = 321토큰.
+    #   * 현실적 최악: 교차질의 10행 표 + 근거 + evidence_refs 를 final_answer 인자로 직렬화 = 1,508자 = 813토큰.
+    #   * 1536 은 그 최악 대비 723토큰(약 1,340자) 여유이면서, 수천 토큰짜리 서술은 불가능하게 만든다.
+    #   * 1024 로 더 내리면 최악 대비 여유가 211토큰뿐이라 표가 한 행만 길어져도 잘린다.
+    # CLOVA function calling 은 1024 이상이어야 동작하므로 그 아래로는 내릴 수 없다(llm.MIN_TOOL_TOKENS).
+    llm_max_tokens: int = 1536
     clova_api_key: str | None = None
     clova_base_url: str = "https://clovastudio.stream.ntruss.com/v1/openai"
     # CLOVA 테스트앱은 요청 빈도 제한이 낮아 429 가 자주 난다. 재시도하지 않으면 그 문항은 통째로 실패한다.
