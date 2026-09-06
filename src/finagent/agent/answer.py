@@ -179,8 +179,47 @@ def strip_tool_call_syntax(text: str) -> str:
     return out
 
 
+# ------------------------------------------------------- 정보가 0인 맺음말
+# 기록된 54개 답변 중 8개가 "추가적인 정보가 필요하시면 …" 류의 문장으로 끝났다. 그 문장은 답에
+# 아무것도 더하지 않으면서 생성 시간을 쓴다(측정: 고정 2.7초 + 63토큰/초).
+#
+# 무엇을 지우면 안 되는가가 더 중요하다. 다음 중 하나라도 걸리면 남긴다:
+#   * 숫자·% 가 있는 문장 — 수치는 답의 본체다.
+#   * "투자 판단은 본인 책임" 류의 유의사항 — 지우면 고지가 사라진다(그 문구를 줄이는 일은
+#     프롬프트 규칙 4가 맡는다. 이미 나온 문장을 여기서 잘라내지는 않는다).
+#   * "…없습니다/않습니다/제외" 처럼 확인 불가·제외 사실을 말하는 문장.
+# 남는 것은 순수한 "더 필요하면 물어보세요"뿐이고, 그때만 지운다. 맨 뒤 문장만 최대 2개까지 본다.
+_OFFER_TRIGGER = re.compile(r"추가(?:적인)?\s*(?:정보|문의|사항|질문)|더\s*궁금|도움이\s*필요")
+_OFFER_CLOSE = re.compile(r"문의|말씀|연락|알려\s*주|권장|바랍니다|주세요|주십시오|드립니다")
+_OFFER_KEEP = re.compile(r"[0-9%]|책임|제외|없습니다|않습니다|아닙니다|못했습니다")
+
+
+def _last_sentence(text: str) -> tuple[int, str]:
+    """(문장 시작 위치, 문장). 뒤에서부터 가장 가까운 . ! ? 줄바꿈 을 경계로 삼는다."""
+    body = text.rstrip()
+    i = len(body) - 1
+    while i >= 0 and body[i] in ".!?\"')]”’":
+        i -= 1
+    j = i
+    while j >= 0 and body[j] not in ".!?\n":
+        j -= 1
+    return j + 1, body[j + 1:]
+
+
+def strip_closing_offer(text: str) -> str:
+    """맨 끝의 '추가 문의 바랍니다' 류 문장을 지운다. 사실·유의사항이 섞인 문장은 건드리지 않는다."""
+    for _ in range(2):
+        if not text.strip():
+            break
+        start, sent = _last_sentence(text)
+        if not (_OFFER_TRIGGER.search(sent) and _OFFER_CLOSE.search(sent)) or _OFFER_KEEP.search(sent):
+            break
+        text = text[:start].rstrip()
+    return text
+
+
 def normalize_answer(status: str, text: str) -> str:
-    text = strip_tool_call_syntax((text or "").strip()).strip()
+    text = strip_closing_offer(strip_tool_call_syntax((text or "").strip()).strip()).strip()
     if status == "cannot_confirm":
         if "확인할 수 없" not in text and "확인되지 않" not in text:
             text = f"{CANNOT_PREFIX} {text}".strip()

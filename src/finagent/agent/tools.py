@@ -49,6 +49,19 @@ class ToolResult:
 
 _UNITS = ((10**12, "조"), (10**8, "억"), (10**4, "만"))
 
+# graph_neighbors 가 관계마다 실제로 찍는 라벨 수(총 건수는 항상 그대로 보고한다).
+#
+# 40이던 것을 8로 줄인다.  측정: 삼성전자(관계 462건)는 1,501자, 미래에셋자산운용(9,056건)은
+# 1,504자를 한 호출에 쏟아냈고, 그 텍스트는 대화에 남아 이후 라운드마다 다시 전송된다.
+# 8이면 각각 455자·406자로 70%·73% 줄어든다(우주항공 1,281 -> 252자).
+#
+# 8인 이유: 이 목록은 정렬돼 있지 않다.  순자산·수익률·AUM "상위 N개"를 묻는 문항(T-001·T-002·
+# T-007·T-008·T-010·T-017·T-018)은 어차피 SQL 로만 풀 수 있으므로 라벨을 40개 찍어도 답이 되지
+# 않는다.  그래프가 실제로 답하는 것은 (a) 그 관계가 있는가 (b) 몇 건인가 (c) 어떤 것들인가의 예시
+# 셋이고, 개수를 명시한 평가 문항의 최대치는 5개다.  8은 그 위의 여유다.
+# 편입종목은 이제 v_etf_constituent(SQL)에 있어서 목록 자체를 그래프에서 길게 받을 이유도 없다.
+GRAPH_LABELS_SHOWN = 8
+
 
 def korean_magnitude(v: float) -> str:
     """25474813891225 -> '25조 4,748억'.
@@ -491,8 +504,11 @@ class ToolRegistry:
         for rel, items in nb.items():
             # report the untruncated total — the model quotes this number verbatim as its answer
             total = totals.get(rel, len(items))
-            shown = f"{total}건" + (f", 아래는 상위 {len(items)}건" if total > len(items) else "")
-            lines.append(f"{rel} ({shown}): " + ", ".join(x["label"] for x in items[:40]) + (" ..." if len(items) > 40 else ""))
+            head = items[:GRAPH_LABELS_SHOWN]
+            more = total > len(head)
+            # "상위"가 아니라 "예시": 이 목록에는 순서가 없다. 순자산·수익률 상위는 SQL 로만 나온다.
+            shown = f"{total}건" + (f", 예시 {len(head)}건" if more else "")
+            lines.append(f"{rel} ({shown}): " + ", ".join(x["label"] for x in head) + (" ..." if more else ""))
             refs += [x["label"] for x in items[:10]]
         return ToolResult(note + "\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(totals.values()) or sum(len(v) for v in nb.values()), refs[:30]))
 

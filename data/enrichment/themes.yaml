@@ -1,9 +1,13 @@
 # 투자 테마 사전. synonyms 는 상품명·기초지수·운용전략 텍스트·질문에 등장하는 한/영 표기.
+# 한글 별칭은 공백을 지운 텍스트의 부분문자열로 매칭되므로, 더 긴 별칭(다른 테마 또는 운용사 브랜드)과
+# 구간이 겹치면 버려진다(span shadowing).  '미국채' 안의 '국채', '메리츠' 안의 '리츠'가 이렇게 사라진다.
+# implies 는 그 규칙의 예외 선언이다: 긴 별칭이 짧은 테마의 뜻을 그대로 품고 있을 때만 적는다.
 - id: space_aero
   label_ko: 우주항공
   label_en: Space & Aerospace
-  synonyms: [우주, 우주항공, 우주테크, 항공우주, 우주산업, 스페이스, space, aerospace, satellite, space economy, final frontiers]
+  synonyms: [우주, 우주항공, 우주테크, 항공우주, 우주산업, 스페이스, 위성네트워크, space, aerospace, satellite, space economy, final frontiers]
   related: [defense]
+  implies: [tech]
 - id: defense
   label_ko: 방산
   label_en: Defense
@@ -18,6 +22,7 @@
   label_en: China Semiconductor
   synonyms: [중국반도체, 차이나반도체, 차이나AI반도체, China Semiconductor, china semiconductors]
   related: [semiconductor, china]
+  implies: [semiconductor, china]
 - id: battery
   label_ko: 2차전지
   label_en: Battery / EV
@@ -31,6 +36,7 @@
   label_ko: 인공지능
   label_en: Artificial Intelligence
   synonyms: [AI, 인공지능, 생성형AI, AI테크, Chat AI, artificial intelligence, generative ai]
+  implies: [tech]
 - id: dividend
   label_ko: 배당
   label_en: Dividend
@@ -84,10 +90,15 @@
   label_ko: S&P500
   label_en: S&P 500
   synonyms: [S&P500, S&P 500, SP500, 미국S&P500, 에스앤피500]
+  implies: [usa]
 - id: us_treasury
   label_ko: 미국채
   label_en: US Treasury
-  synonyms: [미국채, 미국국채, 미국채30년, 미국채10년, treasury, treasuries, US Treasury, T-bond]
+  # '국채'만으로는 어느 나라 국채인지 알 수 없다. 상품명에 실제로 쓰인 미국 국채 표기를 모두 별칭으로 둬야
+  # kr_treasury 의 '국채'가 이 구간에서 밀려난다.
+  synonyms: [미국채, 미국국채, 미국채30년, 미국채10년, 미국장기국채, 미국30년국채, 미국10년국채,
+             인플레이션국채, UST, treasury, treasuries, US Treasury, T-bond]
+  implies: [usa]
 - id: kr_treasury
   label_ko: 국고채
   label_en: Korea Treasury Bond
@@ -95,11 +106,12 @@
 - id: short_term_bond
   label_ko: 단기채/머니마켓
   label_en: Short-term Bond / Money Market
-  synonyms: [단기채, 초단기채, 머니마켓, CD금리, KOFR, 파킹, money market, ultra short]
+  synonyms: [단기채, 초단기채, 머니마켓, 통안채, CD금리, KOFR, 파킹, money market, ultra short]
 - id: mmf
   label_ko: MMF
   label_en: Money Market Fund
   synonyms: [MMF, 머니마켓펀드]
+  implies: [short_term_bond]
 - id: leverage
   label_ko: 레버리지
   label_en: Leveraged
@@ -111,7 +123,7 @@
 - id: esg
   label_ko: ESG
   label_en: ESG
-  synonyms: [ESG, 친환경, 탄소, 기후, clean energy, climate, sustainable]
+  synonyms: [ESG, 친환경, 탄소, 기후, 태양광, 신재생, clean energy, climate, sustainable, solar]
 - id: india
   label_ko: 인도
   label_en: India
@@ -135,7 +147,7 @@
 - id: korea
   label_ko: 국내/한국
   label_en: Korea
-  synonyms: [한국, 코리아, 국내, Korea, Korean]
+  synonyms: [한국, 코리아, 국내, KRX300, KRX100, KTOP30, Korea, Korean]
 - id: usa
   label_ko: 미국
   label_en: United States
@@ -168,19 +180,19 @@
 - id: infra
   label_ko: 인프라/데이터센터
   label_en: Infrastructure / Data Center
-  synonyms: [인프라, 데이터센터, 전력, 전력인프라, infrastructure, data center, utilities, power]
+  synonyms: [인프라, 데이터센터, 전력, 전력인프라, 광통신, infrastructure, data center, utilities, power]
 - id: auto
   label_ko: 자동차
   label_en: Automobile
-  synonyms: [자동차, 자동차산업, auto, automobile, automotive]
+  synonyms: [자동차, 자동차산업, 자율주행, 스마트카, 모빌리티, auto, automobile, automotive, autonomous driving]
 - id: entertainment
   label_ko: 미디어/엔터
   label_en: Media & Entertainment
-  synonyms: [미디어, 엔터, 엔터테인먼트, 게임, K-POP, 콘텐츠, media, entertainment, gaming]
+  synonyms: [미디어, 엔터, 엔터테인먼트, 게임, K-POP, 콘텐츠, 웹툰, 드라마, media, entertainment, gaming]
 - id: consumer
   label_ko: 소비재
   label_en: Consumer
-  synonyms: [소비재, 필수소비재, 경기소비재, 럭셔리, consumer, consumer discretionary, consumer staples, luxury]
+  synonyms: [소비재, 필수소비재, 경기소비재, 럭셔리, 화장품, 뷰티, consumer, consumer discretionary, consumer staples, luxury, cosmetics]
 - id: crypto
   label_ko: 가상자산/비트코인
   label_en: Crypto / Bitcoin
@@ -198,3 +210,38 @@
   label_ko: 연금
   label_en: Pension
   synonyms: [연금, 퇴직연금, 개인연금, IRP, pension, retirement]
+- id: indonesia
+  label_ko: 인도네시아
+  label_en: Indonesia
+  synonyms: [인도네시아, Indonesia]
+- id: metaverse
+  label_ko: 메타버스
+  label_en: Metaverse
+  synonyms: [메타버스, metaverse]
+  related: [tech]
+- id: group_stock
+  label_ko: 그룹주/지주회사
+  label_en: Chaebol Group / Holding Company
+  synonyms: [그룹주, 지주회사, 삼성그룹, 현대차그룹, 카카오그룹, 두산그룹, 한화그룹, LG그룹, 5대그룹]
+- id: hydrogen
+  label_ko: 수소
+  label_en: Hydrogen
+  synonyms: [수소, 수소경제, 수소차, hydrogen]
+  related: [esg]
+- id: silver
+  label_ko: 은
+  label_en: Silver
+  synonyms: [은선물, 은현물, 실버, silver]
+  related: [gold]
+- id: copper
+  label_ko: 구리
+  label_en: Copper
+  synonyms: [구리, copper]
+- id: agriculture
+  label_ko: 농산물
+  label_en: Agriculture
+  synonyms: [농산물, 콩선물, 옥수수, 밀선물, agriculture, corn, soybean, wheat]
+- id: factor
+  label_ko: 팩터/스마트베타
+  label_en: Factor / Smart Beta
+  synonyms: [스마트베타, 멀티팩터, 로우볼, 최소변동성, 저변동, 모멘텀, 퀄리티, smart beta, multifactor, low volatility, minimum volatility, momentum, quality]

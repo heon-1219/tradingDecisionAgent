@@ -278,16 +278,35 @@ fp:hasBenchmark a owl:ObjectProperty ;
     rdfs:comment "펀드 → 벤치마크 지수 (bmrk_nm)."@ko ;
     rdfs:domain fp:Fund ; rdfs:range fp:Index .
 
+# 정의역이 fp:DomesticETF 인 이유 — 측정된 사실이지 편의상의 좁힘이 아니다.
+#   v_etf_constituent 의 etf_itm_no 1,162개를 v_etf_kr.pd_itm_no 에 조인하면 1,162개 전부가
+#   product_type='국내ETF' 이고 국내ETN(545건)은 단 하나도 없다. 미매칭 행도 0이다.
+#   이전 정의역이던 fp:Product 는 채권·펀드·ETN 까지 덮으므로 "어느 상품군이 편입종목을 갖는가"에
+#   대해 아무 말도 하지 않았다. 그 제약은 rdfs:comment 의 "ETF → 구성종목 기업" 이라는 문장에만
+#   남아 있었고, 문장은 코드가 읽을 수 없다 — 그래서 오케스트레이터는 공모펀드 질문에도
+#   편입 상품 건수를 주입했다.
+#   v_etf_kr 의 컬럼 속성은 fp:DomesticListedProduct(ETF+ETN 공통)를 정의역으로 쓰지만, 그것은
+#   "이 컬럼은 두 상품유형이 함께 쓴다"는 사실이고 여기서 필요한 것은 "편입종목을 실제로 가진
+#   상품군"이다. 후자는 국내ETF 뿐이므로 fp:DomesticListedProduct 로 올리면 ETN 545건이
+#   편입종목을 가진 것처럼 읽힌다.
+#
+# rdfs:domain 만으로 충분한가 — 아니다. 정의역은 제약이 아니라 추론 규칙이다("hasConstituent 를
+#   가진 것은 국내ETF다"). 펀드에 편입종목을 붙이면 위반이 아니라 그 펀드가 국내ETF 로 추론된다.
+#   위반으로 잡으려면 제약이 따로 필요하므로 아래 7절에 fp:HoldingProductShape 을 둔다.
+#   둘의 역할이 다르다: domain 은 그래프 추론과 로더 조회(Ontology.holding_classes)의 근거이고,
+#   SHACL 은 적재가 잘못됐을 때 그것을 오류로 만든다.
 fp:hasConstituent a owl:ObjectProperty ;
     rdfs:label "구성종목"@ko , "has constituent"@en ;
-    rdfs:comment "ETF → 구성종목 기업. 큐레이션 CSV(constituents/*.csv)에서 적재되며 전 종목이 아닌 일부 ETF 만 커버. 비중은 fp:weightPct 또는 fp:weight_<company> 로 기록. 역관계 fp:constituentOf."@ko ;
-    rdfs:domain fp:Product ; rdfs:range fp:Company ;
+    rdfs:comment "국내ETF → 구성종목 기업. 원천은 v_etf_constituent(네이버금융 수집) 하나뿐이며 국내ETF 1,162 종목·22,599행을 덮는다. 해외ETF(v_etf_gl)·공모/사모펀드(v_fund_pub)·ETN 에는 보유 종목 컬럼 자체가 없다. 비중은 fp:weightPct 로 기록. 역관계 fp:constituentOf."@ko ;
+    rdfs:domain fp:DomesticETF ; rdfs:range fp:Company ;
+    fp:sourceTable "v_etf_constituent" ;
     owl:inverseOf fp:constituentOf .
 
 fp:constituentOf a owl:ObjectProperty ;
     rdfs:label "편입 ETF"@ko , "constituent of"@en ;
-    rdfs:comment "기업 → 해당 기업을 편입한 ETF. fp:hasConstituent 의 역관계."@ko ;
-    rdfs:domain fp:Company ; rdfs:range fp:Product ;
+    rdfs:comment "기업 → 해당 기업을 편입한 국내ETF. fp:hasConstituent 의 역관계이므로 치역도 fp:DomesticETF 다."@ko ;
+    rdfs:domain fp:Company ; rdfs:range fp:DomesticETF ;
+    fp:sourceTable "v_etf_constituent" ;
     owl:inverseOf fp:hasConstituent .
 
 fp:subsidiaryOf a owl:ObjectProperty ;
@@ -507,3 +526,17 @@ fp:ManagementCompanyShape a sh:NodeShape ;
         sh:path fp:name ;
         sh:minCount 1
     ] .
+
+# 편입종목을 가질 수 있는 상품군의 '제약' 형태.
+# fp:hasConstituent 의 rdfs:domain 은 추론 규칙이라 잘못된 적재를 막지 못하고 오히려 그 상품을
+# 국내ETF 로 만들어 버린다. 이 모양은 같은 사실을 위반으로 잡는다: hasConstituent 의 주어와
+# constituentOf 의 목적어는 반드시 fp:DomesticETF 여야 한다.
+# 로더(Ontology.holding_classes)는 domain/range 와 이 모양의 sh:class 를 함께 읽으므로,
+# 둘 중 하나만 고쳐도 "어느 상품군이 편입종목을 갖는가"의 답은 어긋나지 않는다.
+fp:HoldingProductShape a sh:NodeShape ;
+    rdfs:label "편입종목 보유 상품 제약"@ko ;
+    rdfs:comment "편입종목 데이터(v_etf_constituent)는 국내ETF 1,162 종목만 덮는다. 해외ETF·펀드·ETN 에 편입종목을 붙이는 적재는 오류다."@ko ;
+    sh:targetSubjectsOf fp:hasConstituent ;
+    sh:targetObjectsOf fp:constituentOf ;
+    sh:class fp:DomesticETF ;
+    sh:message "편입종목(fp:hasConstituent)을 가질 수 있는 상품은 국내ETF(fp:DomesticETF)뿐입니다 — 원천 v_etf_constituent 가 국내ETF 만 담습니다."@ko .

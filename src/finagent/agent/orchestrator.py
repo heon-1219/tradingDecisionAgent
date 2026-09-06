@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..models import AnswerResponse
+from ..ontology.loader import normalize_text as _nrm
 from .answer import CANNOT_PREFIX, Evidence, fallback_answer, format_evidence, format_trace, normalize_answer
 from .llm import LLMClient, ToolCall
 from .tools import ToolRegistry, ToolResult
@@ -133,6 +134,120 @@ def asks_holdings_without_data(question: str) -> bool:
     if not _HOLDING_WORD.search(q) or not _NO_HOLDING_SCOPE.search(q):
         return False
     return not _HOLDING_SCOPE_OK.search(q)
+
+
+# ---------------------------------------------------------------- 상품군 범위 감지 (온톨로지 주도)
+# 어느 상품군이 무엇을 갖는가 하는 '사실'은 온톨로지가 갖는다(클래스 계층, fp:hasConstituent 의
+# 정의역, 컬럼 속성의 fp:sourceTable). 여기 있는 것은 그 사실이 아니라 **한국어 표기 변형**뿐이다:
+# rdfs:label 이 '해외ETF' 라고만 적혀 있어서 '해외 상장 ETF'·'미국 ETF' 라는 말버릇을 못 잡는다.
+# 표기가 늘면 이 표에 줄이 늘고, 상품군의 성질이 바뀌면 TTL 이 바뀐다 — 섞이면 안 된다.
+_GROUP_ALIASES = {
+    "해외상장etf": "ForeignETF", "미국etf": "ForeignETF", "미국상장etf": "ForeignETF",
+    "해외상장etn": "ForeignETN", "국내상장etf": "DomesticETF", "국내상장etn": "DomesticETN",
+    "공모형펀드": "PublicFund", "사모형펀드": "PrivateFund", "원화채권": "DomesticBond",
+}
+
+
+def product_groups(question: str, ontology) -> list:
+    """The product groups (ontology classes) the question restricts itself to, most specific only.
+
+    '해외 ETF' must resolve to ForeignETF and *not* also to the bare 'ETF' that sits inside it — the
+    span-containment pass is what keeps '해외 ETF' from inheriting 국내ETF's holdings.
+    """
+    if ontology is None or getattr(ontology, "graph", None) is None:
+        return []
+    forms: list[tuple[str, object]] = []
+    for ci in ontology.descendants("Product"):
+        if ci.label_ko:
+            forms.append((_nrm(ci.label_ko), ci))
+        if re.fullmatch(r"[A-Z]{2,4}", ci.name):  # fp:ETF / fp:ETN — 로컬명이 곧 한국어 표기다
+            forms.append((ci.name.lower(), ci))
+    for surf, cname in _GROUP_ALIASES.items():
+        ci = ontology.class_info(cname)
+        if ci is not None:
+            forms.append((surf, ci))
+    q = _nrm(question)
+    spans: list[tuple[int, int, object]] = []
+    for surf, ci in forms:
+        if len(surf) < 2:
+            continue
+        i = q.find(surf)
+        while i >= 0:
+            spans.append((i, i + len(surf), ci))
+            i = q.find(surf, i + 1)
+    out, seen = [], set()
+    for a, b, ci in sorted(spans):
+        if any(x <= a and b <= y and (y - x) > (b - a) for x, y, _ in spans):
+            continue  # 더 긴 표기에 포함된 조각('해외ETF' 안의 'ETF')은 버린다
+        if ci.iri not in seen:
+            seen.add(ci.iri)
+            out.append(ci)
+    return out
+
+
+def group_name(ci) -> str:
+    """'국내ETF' / '상장지수증권(ETN)' — the acronym classes' Korean labels are the formal names."""
+    return f"{ci.label_ko}({ci.name})" if re.fullmatch(r"[A-Z]{2,4}", ci.name) else ci.label_ko
+
+
+def group_views(groups, ontology) -> dict:
+    """{class iri: {view, ...}} — a group's own source view, or its subclasses' when it is abstract."""
+    out = {}
+    for ci in groups:
+        views = {d.source_table for d in ontology.descendants(ci.name) if d.source_table}
+        if views:
+            out[ci.iri] = views
+    return out
+
+
+# ---------------------------------------------------------------- 정렬 기준 감지
+# "…기준", "…이 가장 높은/낮은/큰/작은", "TOP N", "상위/하위 N" 처럼 순위를 요구하는 표현에서
+# 기준이 되는 값 표현을 뽑는다. 뽑기만 하고 판단은 온톨로지(resolve_measure)가 한다.
+_CRITERION = [
+    re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*기준(?![일가])"),
+    re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:이|가)\s*가장\s*(?:높은|낮은|큰|작은|많은|적은|빠른|긴|짧은)"),
+    re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:이|가)\s*(?:높은|낮은|큰|작은|많은|적은)\s*순"),
+    re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:상위|하위)\s*\d+"),
+    re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:순으로|순위)"),
+]
+# 값이 아니라 대상을 가리키는 말. 이것들이 기준으로 잡히면 pd_nm·product_type 같은 문자열 컬럼에
+# 걸려 "정렬 기준은 상품명" 같은 헛소리를 주입한다.
+_CRIT_STOP = {"상품", "종목", "가지", "개수", "건수", "곳", "것", "기업", "회사", "펀드", "etf", "etn",
+              "채권", "상품군", "항목", "기준", "이름", "정보", "데이터", "조건", "구분", "현재", "지금"}
+# 기준 표현 앞에 붙는 기간 수식어 — '1년' '5년' '최근 3개월' '연초대비' 는 뒤 명사와 한 덩어리다.
+_PERIOD_TOKEN = re.compile(r"^(?:최근)?\s*(?:\d+\s*(?:일|주|주일|개월|달|년)|연초\s*대비|ytd)$", re.I)
+_COUNT_ASKED = re.compile(r"(?:top|상위|하위)\s*(\d+)|(\d+)\s*개(?!월)|(\d+)\s*(?:종목|건|가지)", re.I)
+
+
+def criterion_phrase(question: str) -> str | None:
+    """The measure phrase a ranking question sorts by, or None when the question ranks nothing.
+
+    The regexes capture greedily up to the ranking word, so the capture usually swallows the whole
+    clause ('국내 ETF와 공모펀드를 1년 수익률').  The measure is the tail of it: the last token, plus
+    the token before it when that one is a period ('1년' + '수익률').
+    """
+    q = question or ""
+    for pat in _CRITERION:
+        for m in pat.finditer(q):
+            toks = [t for t in re.split(r"\s+", m.group(1).strip()) if t]
+            if not toks:
+                continue
+            tail = toks[-1].strip("의은는이가을를도와과및,")
+            if len(toks) >= 3 and _PERIOD_TOKEN.match(f"{toks[-3]} {toks[-2]}"):
+                tail = f"{toks[-3]} {toks[-2]} {tail}"
+            elif len(toks) >= 2 and _PERIOD_TOKEN.match(toks[-2]):
+                tail = f"{toks[-2]} {tail}"
+            if len(_nrm(tail)) >= 2 and _nrm(tail) not in _CRIT_STOP:
+                return tail
+    return None
+
+
+def requested_count(question: str) -> int | None:
+    m = _COUNT_ASKED.search(question or "")
+    if not m:
+        return None
+    n = next((g for g in m.groups() if g), None)
+    return int(n) if n else None
 
 
 class _Steps(list):
@@ -290,6 +405,19 @@ class Orchestrator:
         self.system_prompt = system_prompt
         self.specs = tools.specs()
         self.base_date = (tools.meta.get("v_etf_kr") or {}).get("base_date") or "2026-08-21"
+        # 편입종목을 가진 상품 수. 주입문에 숫자를 적으려면 온톨로지가 아니라 데이터에서 세야 한다
+        # (온톨로지는 '어느 상품군이 갖는가'를 알지 '몇 개인가'를 모른다).
+        self.holding_product_count = self._count_holding_products()
+
+    def _count_holding_products(self) -> int | None:
+        view = self.ontology.holding_view() if self.ontology is not None else None
+        if not view or self.tools.rdb is None:
+            return None
+        try:
+            rows = self.tools.rdb.fetch_all(f"SELECT COUNT(DISTINCT etf_itm_no) FROM {view}")
+            return int(rows[0][0])
+        except Exception:  # noqa: BLE001 - a store without the view simply gets no number
+            return None
 
     @property
     def base_year(self) -> int:
@@ -320,6 +448,15 @@ class Orchestrator:
                 )
         whole = self.resolver.resolve(question, k=3) if not mentions else None
         comps = self.lexicon.match_companies(question)
+        groups = self._groups(question)
+        # 질문이 지목한 상품군 전부가 편입종목 데이터를 갖지 않는가. 이 판정의 근거는 프롬프트의
+        # 문장이 아니라 온톨로지다(fp:hasConstituent 의 정의역 = fp:DomesticETF).
+        holding_blind = bool(
+            groups and _HOLDING_WORD.search(question)
+            and self.ontology is not None
+            and not any(self.ontology.class_has_holdings(ci.name) for ci in groups)
+        )
+        holder_label = "/".join(c.label_ko for c in self.ontology.holding_classes()) if self.ontology is not None else ""
         for c in comps:
             subs = self.lexicon.subsidiaries_of(c.id)
             info = f"- 기업 '{c.name_ko}' ({c.name_en}{', 비상장' if c.not_listed else ''})"
@@ -328,12 +465,18 @@ class Orchestrator:
                 info += f", 모회사: {p.name_ko if p else c.parent}"
             if subs:
                 info += ", 자회사: " + ", ".join(s.name_ko for s in subs)
-            if self.tools.kg is not None:
-                cons = self.tools.kg.neighbors(c.name_ko, relation="constituentOf", limit=100).get("constituentOf", [])
-                info += f", 편입 상품 {len(cons)}건(그래프)" if cons else ", 편입 상품 없음(그래프)"
+            if self.tools.kg is not None and not holding_blind:
+                # ★ 건수는 totals 로 받는다. 예전에는 limit=100 으로 자른 목록의 len 을 적어서
+                #   삼성전자(실제 238건)가 언제나 '100건' 으로 주입됐다 — 상한이 답이 된 것이다.
+                totals: dict[str, int] = {}
+                self.tools.kg.neighbors(c.name_ko, relation="constituentOf", limit=1, totals=totals)
+                n = totals.get("constituentOf", 0)
+                info += f", 편입 {holder_label or '상품'} {n}건(그래프)" if n else ", 편입 상품 없음(그래프)"
             if c.note:
                 info += f". 비고: {c.note}"
             lines.append(info)
+        if holding_blind:
+            lines.append(self._no_holdings_note(groups, holder_label))
         themes = self.lexicon.match_themes(question)
         for t in themes:
             cnt = ""
@@ -370,6 +513,9 @@ class Orchestrator:
             lines.append(f"- '최근 {n}개월' = {cutoff.isoformat()} ~ {self.base_date} (데이터 기준일 기준)")
         if whole is not None and whole.products and whole.products[0].score >= 60:
             lines.append("- 질문 전체와 유사한 상품: " + "; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in whole.products[:3]))
+        crit_phrase = criterion_phrase(question)
+        crit = self._criterion_lines(question, groups)
+        lines += crit
         if invalid:
             lines.insert(0, "- ⚠ 온톨로지 위반: " + " / ".join(invalid))
         text = "[사전 분석 — 참고용, 최종 판단은 도구로 확인]\n" + ("\n".join(lines) if lines else "- 특기사항 없음")
@@ -377,10 +523,120 @@ class Orchestrator:
             "사전분석: 상품언급 " + (", ".join(mentions) if mentions else "없음")
             + (f"; 기업 {', '.join(c.name_ko for c in comps)}" if comps else "")
             + (f"; 테마 {', '.join(t.label_ko for t in themes)}" if themes else "")
+            + (f"; 상품군 {', '.join(group_name(ci) for ci in groups)}" if groups else "")
+            + ("; 편입데이터 없는 상품군" if holding_blind else "")
+            + (f"; 정렬기준 '{crit_phrase}'" if crit else "")
             + (f"; 온톨로지 위반 {len(invalid)}건" if invalid else "")
             + (f"; 미존재 상품 {len(unresolved)}건" if unresolved else "")
         )
         return PreAnalysis(text, invalid, mentions, steps, unresolved)
+
+    # ------------------------------------------------------------ pre-analysis helpers
+    def _groups(self, question: str) -> list:
+        try:
+            return product_groups(question, self.ontology)
+        except Exception:  # noqa: BLE001 - a hint must never take the answer down with it
+            log.exception("product group detection failed")
+            return []
+
+    def _no_holdings_note(self, groups, holder_label: str) -> str:
+        """The fact to inject instead of a holdings count, when the scope has no holdings data.
+
+        Every number here is read, not remembered: the class from fp:hasConstituent's domain, the
+        view from its fp:sourceTable, the product count from that view.
+        """
+        view = self.ontology.holding_view() or "편입종목 뷰"
+        named = ", ".join(f"{group_name(ci)}({', '.join(sorted(v))})" for ci, v in
+                          ((ci, group_views([ci], self.ontology).get(ci.iri) or {"해당 뷰 없음"}) for ci in groups))
+        cnt = f" {self.holding_product_count:,}종목" if self.holding_product_count else ""
+        return (
+            f"- ⚠ 편입종목 데이터 범위: {named} 에는 보유·편입 종목 데이터가 없습니다. "
+            f"편입종목은 {view} 하나뿐이고 대상은 {holder_label or '국내ETF'}{cnt} 입니다"
+            f"(온톨로지 fp:hasConstituent 의 정의역 = {', '.join(c.name for c in self.ontology.holding_classes())}). "
+            f"따라서 이 상품군으로 한정된 'X를 보유한 …' 질문은 '0건'이 아니라 **제공된 데이터로 확인할 수 없음**입니다. "
+            f"이름이나 테마가 비슷한 상품을 보유 상품인 것처럼 제시하면 오답입니다."
+        )
+
+    def _criterion_lines(self, question: str, groups) -> list[str]:
+        """Ontology-resolved ranking criterion, or [] when the question ranks nothing.
+
+        Silence is the default and the common case: 순위를 묻지 않는 질문에는 한 줄도 붙지 않는다.
+        """
+        if self.ontology is None:
+            return []
+        try:
+            phrase = criterion_phrase(question)
+            if not phrase:
+                return []
+            res = self.ontology.resolve_measure(phrase)
+            out: list[str] = []
+            if res.status == "resolved":
+                cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
+                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in res.hits[:6])
+                out.append(f"- 정렬 기준 '{phrase}' → 온톨로지 라벨 조회 결과 {cols}. 이 컬럼으로 정렬하고 NULL·0 은 후보에서 제외하세요.")
+                out += self._missing_in_groups(res, groups)
+            elif res.status == "period_missing":
+                have = ", ".join(sorted({f"{h.prop.table}.{h.prop.column}({h.prop.label_ko})"
+                                         for h in res.other_periods if h.period})[:6])
+                out.append(
+                    f"- 정렬 기준 '{phrase}': 요청한 기간({res.period})의 컬럼이 온톨로지에 없습니다. "
+                    f"같은 개념의 다른 기간 컬럼: {have or '없음'}. 기간을 바꿔 답하려면 그 사실을 답변에 밝히세요."
+                )
+            elif res.status == "ambiguous":
+                cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko})" for h in res.hits[:10])
+                out.append(
+                    f"- 정렬 기준 '{phrase}' 는 온톨로지에서 {len({(h.prop.table, h.prop.column) for h in res.hits})}개 컬럼에 대응해 "
+                    f"하나로 확정되지 않습니다: {cols}. 임의로 하나를 고르지 말고, 어느 것인지 되묻거나 "
+                    f"고른 기준을 답변 첫 문장에 명시하세요."
+                )
+            elif res.status == "weak":
+                cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
+                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in res.hits[:4])
+                out.append(
+                    f"- 정렬 기준 '{phrase}' 는 온톨로지 라벨과 정확히 일치하는 컬럼이 없습니다. 근접 후보: {cols}. "
+                    f"**라벨이 없다고 데이터에 없는 것이 아닙니다** — table_info 로 확인한 뒤 판단하세요."
+                )
+            if out:
+                n = requested_count(question)
+                if n is not None:
+                    out.append(f"- 요청 개수: {n}개 (LIMIT {n})")
+            return out
+        except Exception:  # noqa: BLE001
+            log.exception("criterion resolution failed")
+            return []
+
+    def _missing_in_groups(self, res, groups) -> list[str]:
+        """Which of the named product groups do *not* carry the resolved criterion.
+
+        Three rungs, strongest first.  An absence is only asserted on the bottom rung, when neither
+        a same-concept-other-period column nor a loose label/comment probe turns anything up in that
+        view — because a label miss is not proof of absence (v_etf_gl.du_last_aum is labelled 'AUM',
+        not '순자산', and reporting 해외ETF as having no 순자산 would be a wrong 'cannot confirm').
+        """
+        have = set(res.views)
+        out: list[str] = []
+        for ci in groups:
+            for view in sorted(group_views([ci], self.ontology).get(ci.iri, set())):
+                if view in have:
+                    continue
+                other = sorted({f"{h.prop.column}({h.prop.label_ko})" for h in res.other_periods
+                                if h.prop.table == view and h.period})
+                if other:
+                    out.append(
+                        f"  ⚠ {group_name(ci)}({view})에는 '{res.period} {res.base}' 컬럼이 없습니다 — 같은 개념은 "
+                        f"{', '.join(other[:4])} 뿐입니다. 순위 비교에서 제외하고 그 사실을 답변에 밝히세요(값을 0으로 채우지 마세요)."
+                    )
+                    continue
+                probe = self.ontology.measure_candidates_in(res.base, view)
+                if probe:
+                    cand = ", ".join(f"{h.prop.column}({h.prop.label_ko})" for h in probe[:3])
+                    out.append(
+                        f"  · {group_name(ci)}({view})에는 라벨이 같은 컬럼이 없습니다. 관련 후보: {cand}. "
+                        f"없다고 단정하지 말고 table_info 로 확인하세요."
+                    )
+                else:
+                    out.append(f"  ⚠ {group_name(ci)}({view})에는 이 기준에 해당하는 컬럼이 없습니다. 순위 비교에서 제외하고 그 사실을 밝히세요.")
+        return out
 
     # ------------------------------------------------------------ main loop
     async def answer(self, question_id: str, question: str, on_event=None) -> AnswerResponse:

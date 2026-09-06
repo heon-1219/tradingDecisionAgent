@@ -11,6 +11,7 @@ from finagent.agent.answer import (
     Evidence,
     format_evidence,
     normalize_answer,
+    strip_closing_offer,
     strip_tool_call_syntax,
 )
 from finagent.agent.llm import StubLLM, ToolCall, Turn
@@ -21,7 +22,7 @@ from finagent.agent.orchestrator import (
     asks_holdings_without_data,
 )
 from finagent.agent.prompts import build_system_prompt
-from finagent.agent.tools import ToolRegistry
+from finagent.agent.tools import GRAPH_LABELS_SHOWN, ToolRegistry
 from finagent.api import create_app
 from finagent.config import Settings
 from finagent.kb.docs import DocStore
@@ -656,3 +657,83 @@ async def test_two_different_calls_both_run_untouched(tiny_store, tmp_path):
     assert "동일 호출" not in resp.think_trace
     assert not any("동일한 호출입니다" in c for c in llm.tool_contents)
     assert resp.retrieved_context.count("[근거") == 2
+
+
+def test_closing_offer_is_stripped_but_facts_and_caveats_survive():
+    """기록된 54개 답변 중 8개가 "추가적인 정보가 필요하시면 …"으로 끝났다.
+
+    그 문장은 정보가 0인데 생성 시간을 쓴다(측정: 고정 2.7초 + 63토큰/초). 실제로 지워지는 것은
+    54개 중 6개고 나머지 48개는 바이트 단위로 그대로다. 지우면 안 되는 것이 더 중요하다 —
+    수치가 든 문장, "투자 판단은 본인 책임" 같은 유의사항, "…없습니다" 같은 확인 불가 사실.
+    """
+    # 실제 기록에서 지워지는 문장들 (G-021 / G-022 / G-009 / G-043 / G-054)
+    assert strip_closing_offer(
+        "혹시 이 중에서 찾고 계신 상품이 있는지 확인 부탁드립니다. 추가적인 정보가 필요하시면 말씀해 주세요."
+    ) == "혹시 이 중에서 찾고 계신 상품이 있는지 확인 부탁드립니다."
+    assert strip_closing_offer(
+        "그 중 어떤 상품도 질문하신 상품과 일치하지 않습니다. 추가적인 정보가 필요하시면 다시 문의해 주세요."
+    ) == "그 중 어떤 상품도 질문하신 상품과 일치하지 않습니다."
+    assert strip_closing_offer(
+        "각 ETF의 운용규모는 미국 달러(USD) 기준입니다. 투자 결정 시 추가적인 정보를 확인하는 것을 권장드립니다."
+    ) == "각 ETF의 운용규모는 미국 달러(USD) 기준입니다."
+    assert strip_closing_offer(
+        "위험등급 정보는 'risk_grade' 열을 통해 확인하였습니다. 투자 결정 시에는 추가적인 정보를 고려하시기 바랍니다."
+    ) == "위험등급 정보는 'risk_grade' 열을 통해 확인하였습니다."
+    assert strip_closing_offer(
+        "총보수 정보는 도구에서 반환되지 않았습니다. "
+        "추가적인 정보가 필요하다면 직접 금융기관의 웹사이트를 방문하거나 고객 서비스에 문의하시는 것을 권장드립니다."
+    ) == "총보수 정보는 도구에서 반환되지 않았습니다."
+
+    # ---- 손대면 안 되는 것들 ----
+    keep = (
+        # 유의사항이 같은 문장에 섞여 있으면 통째로 남긴다(G-020 / G-037 실제 기록).
+        "투자 판단은 본인의 책임 하에 이루어져야 하며, 추가적인 정보가 필요하신 경우 개별 ETF의 세부 사항을 확인하시기 바랍니다.",
+        "투자 판단은 본인의 책임이며, 추가적인 정보는 제공된 도구들을 통해 더욱 상세히 확인할 수 있습니다.",
+        # 수치가 든 문장은 답의 본체다
+        "조건에 맞는 종목은 15,837개이며 그중 상위 5개는 아래와 같습니다.",
+        "추가적인 정보로 순자산은 4조 1,402억원입니다.",
+        # 확인 불가·제외 사실
+        "해외ETF는 1년 수익률이 제공되지 않아 비교에서 제외했습니다.",
+        "제공된 데이터로는 확인할 수 없습니다.",
+        # 그냥 안내가 아닌 마지막 문장
+        "이 상품의 총보수는 0.05%입니다.",
+    )
+    for t in keep:
+        assert strip_closing_offer(t) == t, t
+        assert normalize_answer("answered", t) == t, t
+
+    # 파이프라인에 실제로 물려 있고, 빈 답을 만들지 않는다
+    assert normalize_answer("answered", "총 22개입니다. 추가적인 정보가 필요하시면 문의해 주세요.") == "총 22개입니다."
+    assert normalize_answer("answered", "추가적인 정보가 필요하시면 문의해 주세요.") == CANNOT_PREFIX
+
+
+async def test_graph_neighbors_shows_few_labels_but_the_true_total(tiny_store, tmp_path):
+    """라벨은 8개만 찍고 총 건수는 그대로 보고한다.
+
+    잘린 개수를 총계로 보고한 것이 예전의 실제 버그였다(에코프로비엠 42건이 60건 상한으로 보고됨).
+    라벨 40개는 삼성전자 한 번 호출에 1,501자였고 그 텍스트는 이후 모든 라운드에 다시 실려 나간다.
+    """
+    class _FakeKG:
+        def __init__(self, n):
+            self.n = n
+
+        def neighbors(self, entity, relation=None, limit=50, totals=None):
+            if totals is not None:
+                totals["constituentOf"] = self.n
+            return {"constituentOf": [{"iri": f"d:etf/{i}", "label": f"ETF{i:03d}"} for i in range(min(self.n, limit))]}
+
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    s.tools.kg = _FakeKG(229)
+    r = await s.tools.execute("graph_neighbors", {"entity": "삼성전자"})
+    assert "229건" in r.content and r.evidence.row_count == 229      # 총계는 잘리지 않는다
+    assert r.content.count("ETF") == GRAPH_LABELS_SHOWN == 8         # 라벨은 8개만
+    assert "ETF007" in r.content and "ETF008" not in r.content
+    assert "예시 8건" in r.content and r.content.rstrip().endswith("...")
+    assert "상위" not in r.content                                    # 정렬돼 있지 않으므로 '상위'라 부르지 않는다
+    assert len(r.content) < 200                                       # 40개 시절 삼성전자는 1,501자였다
+
+    # 총계가 상한 이하면 아무것도 잘리지 않고 "예시" 표기도 붙지 않는다
+    s.tools.kg = _FakeKG(3)
+    r3 = await s.tools.execute("graph_neighbors", {"entity": "에코프로"})
+    assert "3건" in r3.content and "예시" not in r3.content and "..." not in r3.content
+    assert r3.content.count("ETF") == 3
