@@ -1,25 +1,25 @@
 # ============================================================================
-# etf_gl.ttl — 해외 ETF/ETN 마스터 (v_etf_gl / PREF02N001) TBox
+# etf_gl.ttl — foreign ETF/ETN master (v_etf_gl / PREF02N001) TBox
 #
-# 목적
-#   해외ETF마스터 뷰의 36개 컬럼을 fp:ForeignListedProduct (해외ETF+해외ETN 공통) 의 속성으로 문서화하고
-#   거래소(fp:Exchange), 지수복제방식(fp:ReplicationMethod), 자산군(fp:AssetClass) 열거형을 연결한다.
+# Purpose
+#   Documents the 36 columns of the foreign-ETF master view as properties of fp:ForeignListedProduct (shared by foreign ETF+ETN)
+#   and links the exchange (fp:Exchange), index-replication-method (fp:ReplicationMethod) and asset-class (fp:AssetClass) enumerations.
 #
 # TBox / ABox
-#   인스턴스는 런타임에 SQLite v_etf_gl 로부터 생성된다 (d:etf_gl/<pd_itm_no>).
-#   product_type 이 '해외ETN' 이면 fp:ForeignETN, 아니면 fp:ForeignETF.
-#   fp:sourceTable "v_etf_gl" 은 fp:ForeignETF / fp:ForeignETN / fp:ForeignListedProduct 가 함께
-#   보유하지만 fp:sourceId 는 fp:ForeignETF 만 가진다. loader._table_infos 가 sourceId 보유 클래스를
-#   우선하므로 스키마 카드 헤더는 '해외ETF' 로 유지된다.
+#   Instances are generated at runtime from SQLite v_etf_gl (d:etf_gl/<pd_itm_no>).
+#   product_type '해외ETN' becomes fp:ForeignETN, anything else fp:ForeignETF.
+#   fp:sourceTable "v_etf_gl" is carried by fp:ForeignETF / fp:ForeignETN / fp:ForeignListedProduct alike,
+#   but only fp:ForeignETF has fp:sourceId. loader._table_infos prefers the class that has a sourceId,
+#   so the schema-card header stays '해외ETF'.
 #
-# 데이터 특성 (2026-08-22 기준 — 다른 뷰보다 하루 늦음)
-#   - 모든 텍스트 컬럼(상품명, 운용사, 기초지수, 운용전략, 지역, 자산군)은 영문. 한글 질의는
-#     영문 키워드로 번역 후 LIKE 검색 (예: '반도체' → 'Semiconductor').
-#   - 기초지수 결측 센티널: 'Index is not provided by Management Company',
-#     'Index is not available on Lipper database' 등은 지수 미제공을 뜻하므로 지수로 취급하지 않는다.
-#   - expense_ratio_pct 는 전 종목 수록 (국내ETF 와 달리 보수 비교가 완전함).
-#   - cu_lev_fector NULL = 비레버리지.
-#   - 통화는 USD, 시장은 US (NYSE Arca / NASDAQ / NYSE).
+# Data characteristics (as of 2026-08-22 — one day later than the other views)
+#   - Every text column (product name, manager, underlying index, strategy, region, asset class) is in English. Korean
+#     questions are translated to English keywords before a LIKE search (e.g. '반도체' → 'Semiconductor').
+#   - Missing-index sentinels: 'Index is not provided by Management Company',
+#     'Index is not available on Lipper database' etc. mean no index was provided and are not treated as indices.
+#   - expense_ratio_pct is present for every product (unlike domestic ETFs, fee comparison is complete).
+#   - cu_lev_fector NULL = not leveraged.
+#   - Currency is USD, market is US (NYSE Arca / NASDAQ / NYSE).
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -30,7 +30,7 @@
 @prefix sh:   <http://www.w3.org/ns/shacl#> .
 
 # ----------------------------------------------------------------------------
-# 1. 테이블 클래스
+# 1. Table classes
 # ----------------------------------------------------------------------------
 
 fp:ForeignListedProduct a owl:Class ;
@@ -53,7 +53,7 @@ fp:ForeignETN a owl:Class ;
     fp:sourceTable "v_etf_gl" .
 
 # ----------------------------------------------------------------------------
-# 2. 열거형: 거래소
+# 2. Enumeration: exchange
 # ----------------------------------------------------------------------------
 
 fp:Exchange a owl:Class ;
@@ -67,7 +67,7 @@ fp:Exchange_101 a fp:Exchange ; fp:code "101" ; fp:gradeRank 4 ; rdfs:label "기
 fp:Exchange_102 a fp:Exchange ; fp:code "102" ; fp:gradeRank 5 ; rdfs:label "기타(102)"@ko ; rdfs:comment "기타 시장 코드. 거래소명 미확정."@ko .
 
 # ----------------------------------------------------------------------------
-# 3. 열거형: 지수 복제방식
+# 3. Enumeration: index replication method
 # ----------------------------------------------------------------------------
 
 fp:ReplicationMethod a owl:Class ;
@@ -80,7 +80,7 @@ fp:ReplicationMethod_Swap      a fp:ReplicationMethod ; fp:code "Swap"      ; rd
 fp:ReplicationMethod_Other     a fp:ReplicationMethod ; fp:code "Other"     ; rdfs:label "기타"@ko , "Other"@en .
 
 # ----------------------------------------------------------------------------
-# 4. 컬럼 속성 — 식별 / 명칭 / 상태
+# 4. Column properties — identification / naming / status
 # ----------------------------------------------------------------------------
 
 fp:etfGlRic a owl:DatatypeProperty ;
@@ -142,7 +142,7 @@ fp:etfGlSaleFlag a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_sale_yn" .
 
 # ----------------------------------------------------------------------------
-# 5. 시장 / 통화 / 식별코드
+# 5. Market / currency / identifier codes
 # ----------------------------------------------------------------------------
 
 fp:hasEtfGlExchange a owl:ObjectProperty ;
@@ -171,7 +171,7 @@ fp:etfGlIsin a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "pd_isin_cd" .
 
 # ----------------------------------------------------------------------------
-# 6. 운용사 / 지수 / 전략
+# 6. Manager / index / strategy
 # ----------------------------------------------------------------------------
 
 fp:etfGlManagerName a owl:DatatypeProperty ;
@@ -194,7 +194,7 @@ fp:etfGlStrategyText a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_strtegy" .
 
 # ----------------------------------------------------------------------------
-# 7. 보수 / 구조
+# 7. Fees / structure
 # ----------------------------------------------------------------------------
 
 fp:etfGlExpenseRatio a owl:DatatypeProperty ;
@@ -242,7 +242,7 @@ fp:etfGlIsEtn a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "cu_etn_yn" .
 
 # ----------------------------------------------------------------------------
-# 8. 자산군 / 지역
+# 8. Asset class / region
 # ----------------------------------------------------------------------------
 
 fp:hasEtfGlAssetClass a owl:ObjectProperty ;
@@ -264,7 +264,7 @@ fp:etfGlIsCore a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "wu_core_yn" .
 
 # ----------------------------------------------------------------------------
-# 9. 규모 / 가격 / 수익률 / 유동성
+# 9. Size / price / returns / liquidity
 # ----------------------------------------------------------------------------
 
 fp:etfGlAum a owl:DatatypeProperty ;
@@ -349,7 +349,7 @@ fp:etfGlBaseDate a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_gl" ; fp:sourceColumn "base_date" .
 
 # ----------------------------------------------------------------------------
-# 10. SHACL 제약
+# 10. SHACL constraints
 # ----------------------------------------------------------------------------
 
 fp:ForeignETFShape a sh:NodeShape ;

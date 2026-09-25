@@ -9,11 +9,11 @@ from .search import Hit, SearchIndex, _strip_generic, norm_title, tokenize
 
 
 def mention_resolves(mention: str, title: str) -> bool:
-    """언급과 후보 상품명이 사실상 같은 것을 가리키는지.
+    """Whether a mention and a candidate product name effectively refer to the same thing.
 
-    'KODEX AI로봇' vs 'KODEX 로봇액티브'는 서로 포함하지 않으므로 불일치(= 존재하지 않는 상품),
-    '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100', '국민성장펀드' vs
-    '미래에셋국민참여형국민성장혼합자산투자신탁…'은 일치로 본다(운용사 접두어·일반 접미사 차이일 뿐).
+    'KODEX AI로봇' vs 'KODEX 로봇액티브' do not contain each other, so they do not match (= a product
+    that does not exist); '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100' and '국민성장펀드' vs
+    '미래에셋국민참여형국민성장혼합자산투자신탁…' count as matches (they differ only by a manager prefix / generic suffix).
     """
     m, t = norm_title(mention), norm_title(title)
     core = _strip_generic(m)
@@ -31,36 +31,36 @@ class Resolution:
 
     @property
     def resolved(self) -> bool:
-        """언급된 상품이 실재하는가. exact 보다 느슨하되, 이름이 비슷할 뿐인 다른 상품은 배제한다."""
+        """Does the mentioned product actually exist?  Looser than ``exact``, but rules out a different product that merely has a similar name."""
         return self.exact or any(mention_resolves(self.mention, h.title) for h in self.products[:3])
 
     def summary(self, max_products: int = 5) -> str:
         parts = []
         if self.products:
             parts.append(
-                ("정확히 일치하는 상품: " if self.exact else "유사 상품 후보(정확 일치 아님): ")
+                ("Exact product match: " if self.exact else "Similar product candidates (not an exact match): ")
                 + "; ".join(f"[{h.table}] {h.title} (id={h.id}, score={h.score:.1f})" for h in self.products[:max_products])
             )
             if not self.resolved:
                 parts.append(
-                    f"⚠ '{self.mention}' 이라는 상품은 데이터에 존재하지 않습니다. 위 후보는 이름이 비슷할 뿐 "
-                    "다른 상품이므로, 그중 하나를 질문의 상품인 것처럼 답하면 오답입니다. "
-                    "존재하지 않음을 밝히고 후보를 제시하며 되물으세요."
+                    f"⚠ No product named '{self.mention}' exists in the data. The candidates above only have similar "
+                    "names and are different products, so answering as if one of them were the product in the question is wrong. "
+                    "State that it does not exist, present the candidates and ask the user which one they meant."
                 )
         else:
-            parts.append("상품명 일치/유사 후보 없음")
+            parts.append("No exact or similar product-name candidates")
         if self.companies:
             parts.append(
-                "기업: "
+                "Companies: "
                 + ", ".join(
-                    f"{c.name_ko}({c.name_en}{', 비상장' if c.not_listed else ''}{', 모회사=' + c.parent if c.parent else ''})"
+                    f"{c.name_ko}({c.name_en}{', unlisted' if c.not_listed else ''}{', parent=' + c.parent if c.parent else ''})"
                     for c in self.companies
                 )
             )
         if self.managers:
-            parts.append("운용사: " + ", ".join(m.canonical for m in self.managers))
+            parts.append("Managers: " + ", ".join(m.canonical for m in self.managers))
         if self.themes:
-            parts.append("테마: " + ", ".join(f"{t.label_ko}/{t.label_en}" for t in self.themes))
+            parts.append("Themes: " + ", ".join(f"{t.label_ko}/{t.label_en}" for t in self.themes))
         return "\n".join(parts)
 
 

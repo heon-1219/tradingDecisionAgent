@@ -65,7 +65,7 @@ class Hit:
 # by a word.  The 100%-filled classification columns used to sit in the payload only, which meant
 # '변동금리 채권' or '액티브 ETF' — the vocabulary the source itself uses — matched nothing lexically
 # even though every row carries the value.  They are indexed now, and the equivalent concept is
-# indexed for every view that has it (전략·상품유형·통화·시장구분) rather than for one view only.
+# indexed for every view that has it (strategy, product type, currency, market segment) rather than for one view only.
 INDEX_SPECS: dict[str, tuple[str, str, list[str], list[str], str | None]] = {
     "v_bond_kr": (
         "pd_no", "pd_nm",
@@ -95,17 +95,18 @@ INDEX_SPECS: dict[str, tuple[str, str, list[str], list[str], str | None]] = {
         ["itm_no", "itm_nm", "fund_family", "manager_name", "product_type", "is_on_sale", "or_attr_desc", "zrin_ptn_nm", "bmrk_nm", "fd_nast_suma", "zrin_fd_ivst_risk_grd_nm", "fd_ivst_rgn_desc"],
         None,
     ),
-    # 편입종목.  '삼성전자를 보유한 ETF' 는 SQL 로 풀 수 있지만, 종목명이 어느 색인에도 없으면
-    # 그 이름을 검색으로 확인할 방법이 없어 "제공된 데이터로 확인 불가" 로 답하게 된다.
-    # is_cash=1 행(885건)은 색인에서 뺀다: 원화현금·설정현금액 같은 현금성 항목이라 기업이 아니고,
-    # company_code 가 전부 NULL 이며, 제목이 '현금' 계열 단어라 종목 검색 결과를 밀어낸다.
-    # 행 자체는 스토어와 SQL 에 그대로 남아 있으므로 비중 합계는 달라지지 않는다.
+    # Holdings.  '삼성전자를 보유한 ETF' can be solved in SQL, but if the stock name is in no index there is
+    # no way to confirm that name by search, and the answer becomes "제공된 데이터로 확인 불가" (cannot confirm).
+    # is_cash=1 rows (885) are left out of the index: cash-like items such as 원화현금·설정현금액 are not
+    # companies, their company_code is always NULL, and their '현금'-family titles push stock hits down.
+    # The rows themselves stay in the store and in SQL, so weight totals do not change.
     #
-    # etf_name 은 payload 에만 두고 text 에서는 뺀다.  편입종목 문서는 21,714건이 각각 소속 ETF 의
-    # 이름을 통째로 지니는데, BM25 는 짧은 문서를 선호하므로 ETF 이름의 단어로 검색하면 마스터의
-    # ETF 본체보다 그 ETF 를 담은 편입종목 행이 먼저 올라온다.  '액티브' 검색이 상위 20건 중 19건을
-    # 편입종목으로 채워 '1Q 200액티브' 같은 실제 상품을 밀어냈다.  text 에서 빼면 0/20 이 되고
-    # 상품이 1위로 돌아오며, payload 에 남아 있으므로 결과에는 어느 ETF 의 보유 종목인지 그대로 보인다.
+    # etf_name is kept in the payload only, not in the text.  Each of the 21,714 holding documents carries its
+    # ETF's full name, and BM25 favours short documents, so searching for words of an ETF name surfaced the
+    # holding rows of that ETF ahead of the ETF itself in the master.  A search for '액티브' filled 19 of the
+    # top 20 with holdings and pushed out real products such as '1Q 200액티브'.  Dropping it from the text
+    # makes that 0/20 and puts the product back at rank 1; since it stays in the payload, the results still
+    # show which ETF a holding belongs to.
     "v_etf_constituent": (
         "etf_itm_no", "company_name",
         ["company_name", "company_code"],

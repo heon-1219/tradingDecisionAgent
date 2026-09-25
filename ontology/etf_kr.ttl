@@ -1,23 +1,23 @@
 # ============================================================================
-# etf_kr.ttl — 국내 ETF/ETN 마스터 (v_etf_kr / PREF01N001) TBox
+# etf_kr.ttl — domestic ETF/ETN master (v_etf_kr / PREF01N001) TBox
 #
-# 목적
-#   국내ETF마스터 뷰의 58개 컬럼을 fp:DomesticListedProduct (국내ETF+국내ETN 공통) 의 속성으로 문서화하고
-#   운용전략(fp:Strategy), 위험등급(fp:hasRiskGrade → fp:RiskGrade), 분배주기
-#   (fp:etfKrDividendCycle → fp:DistributionCycle) 열거형을 연결한다.
+# Purpose
+#   Documents the 58 columns of the domestic-ETF master view as properties of fp:DomesticListedProduct (shared by domestic ETF+ETN)
+#   and links the strategy (fp:Strategy), risk-grade (fp:hasRiskGrade → fp:RiskGrade) and distribution-cycle
+#   (fp:etfKrDividendCycle → fp:DistributionCycle) enumerations.
 #
 # TBox / ABox
-#   ETF/ETN 인스턴스는 런타임에 SQLite v_etf_kr 로부터 생성된다 (d:etf_kr/<pd_itm_no>).
-#   product_type 이 '국내ETN' 이면 fp:DomesticETN, 아니면 fp:DomesticETF 로 타입이 부여된다.
-#   fp:sourceTable "v_etf_kr" 은 fp:DomesticETF / fp:DomesticETN / fp:DomesticListedProduct 가
-#   함께 보유하지만 fp:sourceId 는 fp:DomesticETF 하나만 가진다. loader._table_infos 가 sourceId
-#   보유 클래스를 우선하므로 스키마 카드 헤더는 '국내ETF' 로 유지된다 (이 불변식을 깨면 카드가 바뀐다).
+#   ETF/ETN instances are generated at runtime from SQLite v_etf_kr (d:etf_kr/<pd_itm_no>).
+#   product_type '국내ETN' is typed fp:DomesticETN, anything else fp:DomesticETF.
+#   fp:sourceTable "v_etf_kr" is carried by fp:DomesticETF / fp:DomesticETN / fp:DomesticListedProduct
+#   alike, but only fp:DomesticETF has fp:sourceId. loader._table_infos prefers the class that has a sourceId,
+#   so the schema-card header stays '국내ETF' (break this invariant and the card changes).
 #
-# 데이터 희소성 (2026-08-21 기준)
-#   - cu_charge_rt(총보수) 는 ETF 의 약 18% 에만 수록, ETN 은 미수록. 보수 비교 시 NULL 제외 명시.
-#   - cu_base_index(기초지수) 일부 종목만, ref_base_index(Refinitiv) 약 68% 수록.
-#   - pd_dvid_cycl 공백 = 미분배. delisting_date '9999-12-31' = 상장 중.
-#   - 대표 표시명은 pd_abrv_nm (예: 'KODEX 로봇액티브'), pd_nm 은 집합투자기구 정식명.
+# Data sparsity (as of 2026-08-21)
+#   - cu_charge_rt (total fee) is present for only ~18% of ETFs and for no ETN. Exclude NULLs explicitly when comparing fees.
+#   - cu_base_index (underlying index) is present for some products only; ref_base_index (Refinitiv) for ~68%.
+#   - pd_dvid_cycl blank = no distribution. delisting_date '9999-12-31' = still listed.
+#   - The display name is pd_abrv_nm (e.g. 'KODEX 로봇액티브'); pd_nm is the fund's formal (collective investment vehicle) name.
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -28,7 +28,7 @@
 @prefix sh:   <http://www.w3.org/ns/shacl#> .
 
 # ----------------------------------------------------------------------------
-# 1. 테이블 클래스
+# 1. Table classes
 # ----------------------------------------------------------------------------
 
 fp:DomesticListedProduct a owl:Class ;
@@ -51,7 +51,7 @@ fp:DomesticETN a owl:Class ;
     fp:sourceTable "v_etf_kr" .
 
 # ----------------------------------------------------------------------------
-# 2. 열거형: 운용전략
+# 2. Enumeration: strategy
 # ----------------------------------------------------------------------------
 
 fp:Strategy a owl:Class ;
@@ -64,7 +64,7 @@ fp:Strategy_액티브   a fp:Strategy ; fp:code "액티브"   ; rdfs:label "액�
 fp:Strategy_C        a fp:Strategy ; fp:code "C"        ; rdfs:label "C(분류 미상)"@ko ; rdfs:comment "C = 원천 분류 미상 코드. 실물/합성 판단 불가이므로 답변 시 '분류 정보 없음' 으로 처리."@ko .
 
 # ----------------------------------------------------------------------------
-# 3. 컬럼 속성 — 식별 / 명칭 / 판매상태
+# 3. Column properties — identification / naming / sale status
 # ----------------------------------------------------------------------------
 
 fp:etfKrIsin a owl:DatatypeProperty ;
@@ -132,7 +132,7 @@ fp:etfKrTradingHalt a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_tr_yn" .
 
 # ----------------------------------------------------------------------------
-# 4. 운용사 / 전략 / 지수
+# 4. Manager / strategy / index
 # ----------------------------------------------------------------------------
 
 fp:etfKrManagerName a owl:DatatypeProperty ;
@@ -173,7 +173,7 @@ fp:etfKrRefBaseIndex a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "ref_base_index" .
 
 # ----------------------------------------------------------------------------
-# 5. 보수
+# 5. Fees
 # ----------------------------------------------------------------------------
 
 fp:etfKrTotalExpenseRatio a owl:DatatypeProperty ;
@@ -190,7 +190,7 @@ fp:etfKrOtherExpenseRatio a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "cu_charge_etc_rt" .
 
 # ----------------------------------------------------------------------------
-# 6. 자산군 / 지역 / 분류
+# 6. Asset class / region / classification
 # ----------------------------------------------------------------------------
 
 fp:etfKrAssetType a owl:DatatypeProperty ;
@@ -224,7 +224,7 @@ fp:etfKrIsCore a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "wu_core_yn" .
 
 # ----------------------------------------------------------------------------
-# 7. 위험 / 연금
+# 7. Risk / pension
 # ----------------------------------------------------------------------------
 
 fp:etfKrRiskGradeName a owl:DatatypeProperty ;
@@ -252,7 +252,7 @@ fp:etfKrPensionRiskType a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_pen_risk_nm" .
 
 # ----------------------------------------------------------------------------
-# 8. 규모 / 가격
+# 8. Size / price
 # ----------------------------------------------------------------------------
 
 fp:etfKrNetAssets a owl:DatatypeProperty ;
@@ -305,7 +305,7 @@ fp:etfKrTrackingError a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_chas_errt" .
 
 # ----------------------------------------------------------------------------
-# 9. 수익률 / 변동성
+# 9. Returns / volatility
 # ----------------------------------------------------------------------------
 
 fp:etfKrReturn1D a owl:DatatypeProperty ;
@@ -369,7 +369,7 @@ fp:etfKrVolatility1Y a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_vlty_1y" .
 
 # ----------------------------------------------------------------------------
-# 10. 유동성
+# 10. Liquidity
 # ----------------------------------------------------------------------------
 
 fp:etfKrVolume1D a owl:DatatypeProperty ;
@@ -391,7 +391,7 @@ fp:etfKrAvgTradingValue1M a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "du_val_1m" .
 
 # ----------------------------------------------------------------------------
-# 11. 분배금
+# 11. Distributions
 # ----------------------------------------------------------------------------
 
 fp:etfKrDividendCycle a owl:ObjectProperty ;
@@ -426,7 +426,7 @@ fp:etfKrDividendPayMonths a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "pd_dvid_pay_months" .
 
 # ----------------------------------------------------------------------------
-# 12. 상장 정보 / 채권형 지표 / 기준일
+# 12. Listing info / bond-type metrics / base date
 # ----------------------------------------------------------------------------
 
 fp:etfKrListingDate a owl:DatatypeProperty ;
@@ -468,7 +468,7 @@ fp:etfKrBaseDate a owl:DatatypeProperty ;
     fp:sourceTable "v_etf_kr" ; fp:sourceColumn "base_date" .
 
 # ----------------------------------------------------------------------------
-# 13. SHACL 제약
+# 13. SHACL constraints
 # ----------------------------------------------------------------------------
 
 fp:DomesticETFShape a sh:NodeShape ;

@@ -1,26 +1,26 @@
 #!/usr/bin/env python
-"""벡터(의미) 색인 감사 — "Vector 레그가 실제로 무엇을 하는가"를 숫자로 답한다.
+"""Vector (semantic) index audit — answers "what does the vector leg actually do?" with numbers.
 
-기술제안서 부록의 "평가 재현 절차"로 쓸 수 있도록, LLM 을 한 번도 호출하지 않고 결정적으로
-(고정 시드) 돌아가게 만들었다.  스토어는 읽기 전용으로만 열고, vector_cache.npz 는 서명이
-일치할 때만 읽으며 **어떤 경우에도 새로 쓰지 않는다**.
+Built to run deterministically (fixed seed) without a single LLM call, so that it can serve as the
+"evaluation reproduction procedure" in the technical proposal's appendix.  The store is opened read-only,
+vector_cache.npz is read only when its signature matches, and **it is never written, under any circumstances**.
 
-측정 항목
-  A. 색인 구성      — 소스별 문서 수, 문서 텍스트 표본, 길이 분포
-  B. 검색 품질      — 정답이 자명한 자동 생성 질의로 recall@1/5/10 · MRR
-  C. BM25 vs 벡터   — 어휘 단독 / 벡터 단독 / 실제 결합(hybrid_search) 비교, 벡터 구제 사례
-  D. 캐시 무결성    — 현재 문서 집합으로 계산한 서명과 캐시 서명의 일치 여부
-  E. 도구 호출 실측 — data/eval/*.jsonl 의 think_trace 에서 도구별 호출 횟수
-  G. 외부 문서      — search_documents 대상 청크 목록과 주최측 예시 문항 응답 가능성
+What it measures
+  A. Index composition  — documents per source, sample document texts, length distribution
+  B. Retrieval quality  — recall@1/5/10 · MRR on auto-generated queries whose answer is self-evident
+  C. BM25 vs vector     — lexical only / vector only / the actual combination (hybrid_search), cases the vector rescues
+  D. Cache integrity    — whether the signature computed from the current document set matches the cached one
+  E. Tool-call counts   — measured calls per tool, from the think_trace in data/eval/*.jsonl
+  G. External documents — the chunks search_documents searches, and whether the organizers' example questions can be answered
 
-사용법
-  python scripts/audit_vector.py                    # 전 섹션 (약 15분: B/C 의 질의 1,000여 개가 대부분)
-  python scripts/audit_vector.py --sections ADEG    # 색인 구성·캐시·도구호출·문서 (약 1분)
-  python scripts/audit_vector.py --sections BC      # 검색 품질만 (약 14분)
-  python scripts/audit_vector.py --n 40 --seed 0    # 상품군별 질의 수 / 시드 (기본 40, 시드 0)
+Usage
+  python scripts/audit_vector.py                    # all sections (~15 min, mostly the 1,000-odd queries of B/C)
+  python scripts/audit_vector.py --sections ADEG    # index composition, cache, tool calls, documents (~1 min)
+  python scripts/audit_vector.py --sections BC      # retrieval quality only (~14 min)
+  python scripts/audit_vector.py --n 40 --seed 0    # queries per product family / seed (default 40, seed 0)
 
-측정된 기준값(2026-09-06, 문서 75,089개): 어휘색인 구축 9~18초, TF-IDF fit 9.4초,
-캐시 로드 1.0초, 벡터 상주 메모리 174MB(matrix 115MB + components 59MB).
+Measured baselines (2026-09-06, 75,089 documents): lexical index build 9~18 s, TF-IDF fit 9.4 s,
+cache load 1.0 s, resident vector memory 174MB (matrix 115MB + components 59MB).
 """
 from __future__ import annotations
 
@@ -56,13 +56,13 @@ SUB = "-" * 100
 
 PRODUCT_VIEWS = ["v_bond_kr", "v_etf_kr", "v_etf_gl", "v_fund_pub"]
 VIEW_LABEL = {
-    "v_bond_kr": "국내채권",
-    "v_etf_kr": "국내ETF/ETN",
-    "v_etf_gl": "해외ETF",
-    "v_fund_pub": "공모/사모펀드",
-    "v_etf_constituent": "국내ETF 편입종목",
+    "v_bond_kr": "domestic bonds",
+    "v_etf_kr": "domestic ETF/ETN",
+    "v_etf_gl": "overseas ETF",
+    "v_fund_pub": "public/private funds",
+    "v_etf_constituent": "domestic ETF constituents",
 }
-# 검색에 쓰는 표면형(코드/티커)이 그 뷰의 색인 text 에 들어 있는가 — INDEX_SPECS 에서 읽어 확인한다.
+# Is the surface form used for search (code/ticker) in that view's indexed text? — checked by reading INDEX_SPECS.
 CODE_COL = {
     "v_bond_kr": "pd_no",
     "v_etf_kr": "pd_ticker",
@@ -71,7 +71,7 @@ CODE_COL = {
 }
 
 
-# --------------------------------------------------------------------------- 공통
+# --------------------------------------------------------------------------- common
 def pct(x: float) -> str:
     return f"{100.0 * x:5.1f}%"
 
@@ -87,7 +87,7 @@ def table(rows: list[list[str]], head: list[str]) -> str:
 
 
 def corpus_signature(docs, dims: int, max_df: float) -> str:
-    """vector.VectorIndex.build 와 **동일한** 서명 계산 (문서 텍스트까지 해싱)."""
+    """Signature computed **exactly** as vector.VectorIndex.build does (hashes the document texts too)."""
     sep = bytes([31])
     h = hashlib.sha1(f"{len(docs)}|{dims}|{max_df}".encode("utf-8"))
     for d in docs:
@@ -97,7 +97,7 @@ def corpus_signature(docs, dims: int, max_df: float) -> str:
 
 
 def load_indexes(settings, *, allow_slow_rebuild: bool):
-    """어휘 색인 + 벡터 색인.  캐시 서명이 일치할 때만 cache_path 를 넘겨 **쓰기를 원천 차단**한다."""
+    """Lexical index + vector index.  cache_path is passed only when the cache signature matches, **ruling out writes at the source**."""
     t0 = time.time()
     rdb = RDB(settings.store_path, row_limit=settings.sql_row_limit, timeout_sec=settings.sql_timeout_sec)
     index = SearchIndex.from_rdb(rdb)
@@ -114,7 +114,7 @@ def load_indexes(settings, *, allow_slow_rebuild: bool):
             cache_path=settings.vector_cache_path, log_fn=lambda *a: None,
         )
     elif allow_slow_rebuild:
-        # 서명 불일치 → 캐시를 절대 갱신하지 않도록 cache_path 없이 메모리에서만 다시 만든다.
+        # signature mismatch → rebuild in memory only, without cache_path, so the cache is never updated.
         vectors = VectorIndex.build(
             index.docs, dims=settings.vector_dims, max_df=settings.vector_max_df,
             cache_path=None, log_fn=lambda *a: None,
@@ -149,7 +149,7 @@ def inspect_cache(settings, signature: str, n_docs: int):
 # --------------------------------------------------------------------------- A
 def section_a(rdb, index, settings, t_lex, t_vec, vectors, seed: int) -> None:
     print(BAR)
-    print("A. 색인에 무엇이 들어 있는가")
+    print("A. What is in the index")
     print(BAR)
     by_table = collections.Counter(d.table for d in index.docs)
     meta = rdb.meta()
@@ -157,27 +157,27 @@ def section_a(rdb, index, settings, t_lex, t_vec, vectors, seed: int) -> None:
     for view in [*PRODUCT_VIEWS, "v_etf_constituent"]:
         raw = rdb.scalar(f"SELECT COUNT(*) FROM {view}")
         where = INDEX_SPECS[view][4]
-        note = f"필터 {where}" if where else "-"
+        note = f"filter {where}" if where else "-"
         rows.append([view, VIEW_LABEL[view], f"{raw:,}", f"{by_table.get(view, 0):,}",
                      str(meta.get(view, {}).get("base_date") or "-"), note])
-    print(table(rows, ["뷰", "상품군", "원천 행수", "색인 문서수", "기준일", "행 필터"]))
-    print(f"\n합계: 색인 문서 {sum(by_table.values()):,}개 / 원천 행 "
-          f"{sum(rdb.scalar(f'SELECT COUNT(*) FROM {v}') for v in by_table):,}개")
-    print(f"어휘색인 구축 {t_lex:.1f}초 · 벡터색인 적재 {t_vec:.1f}초"
+    print(table(rows, ["view", "family", "source rows", "indexed docs", "base date", "row filter"]))
+    print(f"\ntotal: {sum(by_table.values()):,} indexed docs / "
+          f"{sum(rdb.scalar(f'SELECT COUNT(*) FROM {v}') for v in by_table):,} source rows")
+    print(f"lexical index build {t_lex:.1f}s · vector index load {t_vec:.1f}s"
           + (f" (backend={vectors.stats.backend}, dims={vectors.stats.dims}, cached={vectors.stats.cached})"
-             if vectors is not None else " (벡터 없음)"))
+             if vectors is not None else " (no vectors)"))
 
-    print(f"\n{SUB}\n문서 텍스트 표본 (소스별 3건, 임베딩에 실제로 들어가는 문자열)\n{SUB}")
+    print(f"\n{SUB}\nsample document texts (3 per source, the exact strings that go into the embedding)\n{SUB}")
     rng = random.Random(seed)
     for view in [*PRODUCT_VIEWS, "v_etf_constituent"]:
         pool = [d for d in index.docs if d.table == view]
-        print(f"\n[{view}] {VIEW_LABEL[view]} — text 컬럼: {', '.join(INDEX_SPECS[view][2])}")
+        print(f"\n[{view}] {VIEW_LABEL[view]} — text columns: {', '.join(INDEX_SPECS[view][2])}")
         for d in rng.sample(pool, min(3, len(pool))):
             body = f"{d.title} {d.text}"
-            print(f"  id={d.id} | len={len(body)}자")
+            print(f"  id={d.id} | len={len(body)} chars")
             print(f"    {body[:300]}{'…' if len(body) > 300 else ''}")
 
-    print(f"\n{SUB}\n문서 길이 분포 (title + text, 문자 수)\n{SUB}")
+    print(f"\n{SUB}\ndocument length distribution (title + text, in characters)\n{SUB}")
     rows = []
     short_total = 0
     for view in [*PRODUCT_VIEWS, "v_etf_constituent"]:
@@ -192,26 +192,26 @@ def section_a(rdb, index, settings, t_lex, t_vec, vectors, seed: int) -> None:
         ])
     lens_all = sorted(len(f"{d.title} {d.text}") for d in index.docs)
     n = len(lens_all)
-    rows.append(["(전체)", f"{n:,}", str(min(lens_all)), str(lens_all[n // 10]),
+    rows.append(["(all)", f"{n:,}", str(min(lens_all)), str(lens_all[n // 10]),
                  str(int(statistics.median(lens_all))), str(lens_all[int(n * 0.9)]), str(max(lens_all)),
                  f"{short_total:,} ({100*short_total/n:.1f}%)"])
-    print(table(rows, ["뷰", "문서", "최소", "p10", "중앙값", "p90", "최대", "20자 이하"]))
+    print(table(rows, ["view", "docs", "min", "p10", "median", "p90", "max", "<=20 chars"]))
 
     dup = collections.Counter(f"{d.title} {d.text}" for d in index.docs)
     ndup = sum(c - 1 for c in dup.values() if c > 1)
-    print(f"\n완전히 동일한 텍스트를 가진 중복 문서: {ndup:,}개 "
-          f"(고유 텍스트 {len(dup):,} / 전체 {len(index.docs):,})")
+    print(f"\nduplicate documents with exactly identical text: {ndup:,} "
+          f"(unique texts {len(dup):,} / total {len(index.docs):,})")
     top = [(t, c) for t, c in dup.most_common(5)]
     for t, c in top:
         print(f"  x{c:4d}  {t[:90]}")
 
 
-# --------------------------------------------------------------------------- B/C 질의 생성
+# --------------------------------------------------------------------------- B/C query generation
 _SPLIT = re.compile(r"[\s()\[\]·,/]+")
 
 
 def abbrev_of(title: str) -> str | None:
-    """'TIGER 미국나스닥100' -> '미국나스닥100' (브랜드 토큰 제거), 공백이 없으면 중간 구간을 자른다."""
+    """'TIGER 미국나스닥100' -> '미국나스닥100' (brand token dropped); with no spaces, cut out a middle span."""
     s = str(title or "").strip()
     toks = [t for t in _SPLIT.split(s) if t]
     if len(toks) >= 2 and len("".join(toks[1:])) >= 3:
@@ -226,7 +226,7 @@ def abbrev_of(title: str) -> str | None:
 
 
 def typo_of(s: str, rng: random.Random) -> str | None:
-    """한 글자 삭제 또는 인접 두 글자 교환 — 어휘검색이 깨지는 전형적 상황."""
+    """Delete one character or swap two adjacent ones — the typical case where lexical search breaks."""
     s = str(s or "").strip()
     if len(s) < 6:
         return None
@@ -237,18 +237,18 @@ def typo_of(s: str, rng: random.Random) -> str | None:
 
 
 def make_queries(rdb, index, lexicon: Lexicon, n: int, seed: int) -> dict[str, list[dict]]:
-    """정답이 자명한 질의를 데이터에서 자동 생성한다.  각 항목: {query, kind, view, gold(fn), label}"""
+    """Auto-generate queries with a self-evident answer from the data.  Each item: {query, kind, view, gold(fn), label}"""
     rng = random.Random(seed)
     out: dict[str, list[dict]] = collections.defaultdict(list)
 
-    # ---- 상품 유형 3종: 정식명칭 / 코드·티커 / 부분명(약칭)
+    # ---- the three product query types: full name / code/ticker / partial name (abbreviation)
     for view in PRODUCT_VIEWS:
         idc, titlec = INDEX_SPECS[view][0], INDEX_SPECS[view][1]
         code = CODE_COL[view]
         cols = list(dict.fromkeys([idc, titlec, code]))
         rows = [dict(zip(cols, r)) for r in
                 rdb.fetch_all(f"SELECT {', '.join(cols)} FROM {view} WHERE {titlec} IS NOT NULL AND {titlec} <> ''")]
-        # 같은 이름이 여러 상품에 걸치면 '정답 1개'가 성립하지 않으므로 고유 제목만 쓴다.
+        # When one name spans several products there is no 'single right answer', so only unique titles are used.
         by_title = collections.Counter(norm(r[titlec]) for r in rows)
         uniq = [r for r in rows if by_title[norm(r[titlec])] == 1]
         rng.shuffle(uniq)
@@ -260,7 +260,7 @@ def make_queries(rdb, index, lexicon: Lexicon, n: int, seed: int) -> dict[str, l
         for r in uniq:
             if picked >= n:
                 break
-            out["정식명칭"].append({"query": str(r[titlec]), "kind": "정식명칭", "view": view,
+            out["full name"].append({"query": str(r[titlec]), "kind": "full name", "view": view,
                                     "gold": gold_for(r[idc]), "label": str(r[titlec])})
             picked += 1
 
@@ -271,7 +271,7 @@ def make_queries(rdb, index, lexicon: Lexicon, n: int, seed: int) -> dict[str, l
             v = r.get(code)
             if v in (None, "") or len(str(v)) < 3:
                 continue
-            out["코드·티커"].append({"query": str(v), "kind": "코드·티커", "view": view,
+            out["code/ticker"].append({"query": str(v), "kind": "code/ticker", "view": view,
                                      "gold": gold_for(r[idc]), "label": f"{v} → {r[titlec]}"})
             picked += 1
 
@@ -282,27 +282,27 @@ def make_queries(rdb, index, lexicon: Lexicon, n: int, seed: int) -> dict[str, l
             ab = abbrev_of(str(r[titlec]))
             if not ab:
                 continue
-            out["부분명(약칭)"].append({"query": ab, "kind": "부분명(약칭)", "view": view,
+            out["partial name (abbrev.)"].append({"query": ab, "kind": "partial name (abbrev.)", "view": view,
                                         "gold": gold_for(r[idc]), "label": f"{ab} → {r[titlec]}"})
             picked += 1
 
-    # ---- 편입종목명 → 그 종목을 담은 편입종목 문서
+    # ---- constituent name → the constituent documents that hold that stock
     comps = [c for (c,) in rdb.fetch_all(
         "SELECT DISTINCT company_name FROM v_etf_constituent WHERE is_cash=0 AND company_name IS NOT NULL")]
     rng.shuffle(comps)
     for c in comps[: n * 2]:
-        if len(out["편입종목명"]) >= n * 2:
+        if len(out["constituent name"]) >= n * 2:
             break
         nm = norm(c)
 
         def gold_c(h, nm=nm):
             return h.table == "v_etf_constituent" and norm(h.payload.get("company_name")) == nm
 
-        out["편입종목명"].append({"query": str(c), "kind": "편입종목명", "view": "v_etf_constituent",
+        out["constituent name"].append({"query": str(c), "kind": "constituent name", "view": "v_etf_constituent",
                                   "gold": gold_c, "label": str(c)})
 
-    # ---- 테마어 → 그 테마를 이름에 드러낸 상품
-    # 정답 정의: 상품 제목(정규화)에 그 테마의 별칭이 들어 있는 상품.  ASCII 별칭은 단어 경계로 본다.
+    # ---- theme term → products that show the theme in their name
+    # Gold definition: products whose (normalized) title contains one of the theme's aliases.  ASCII aliases match on word boundaries.
     prod_titles = [(i, d) for i, d in enumerate(index.docs) if d.table in PRODUCT_VIEWS]
     ntitles = [(norm(d.title), str(d.title).lower(), d.table, str(d.id)) for _, d in prod_titles]
 
@@ -324,38 +324,38 @@ def make_queries(rdb, index, lexicon: Lexicon, n: int, seed: int) -> dict[str, l
         for s in hit_sets.values():
             gold_keys |= s
         if len(gold_keys) < 3:
-            continue  # 이름으로 그 테마임을 알 수 있는 상품이 사실상 없는 테마는 정답 정의가 성립하지 않는다
+            continue  # a theme with practically no product recognisable by name has no workable gold definition
 
         def gold_t(h, keys=frozenset(gold_keys)):
             return (h.table, str(h.id)) in keys
 
         for a in aliases:
-            out["테마어"].append({"query": a, "kind": "테마어", "view": "*", "gold": gold_t,
-                                  "label": f"{a} (테마 {th.id}, 정답 {len(gold_keys)}건)",
+            out["theme term"].append({"query": a, "kind": "theme term", "view": "*", "gold": gold_t,
+                                  "label": f"{a} (theme {th.id}, gold {len(gold_keys)})",
                                   "theme": th.id, "alias_direct": len(hit_sets[a])})
-    rng.shuffle(out["테마어"])
-    # 별칭 수만큼 늘어나면 수백 개가 되어 재현 실행이 너무 길어진다. 유형별 최소 40개는 유지한다.
-    out["테마어"] = out["테마어"][: max(n, 40) * 2]
+    rng.shuffle(out["theme term"])
+    # One query per alias would mean hundreds, making the reproduction run far too long. Keep at least 40 per type.
+    out["theme term"] = out["theme term"][: max(n, 40) * 2]
 
-    # ---- 오타 (정식명칭 변형) — 어휘검색이 실패하는 지점
-    for q in list(out["정식명칭"]):
+    # ---- typos (variants of full names) — where lexical search fails
+    for q in list(out["full name"]):
         t = typo_of(q["query"], rng)
         if t:
-            out["오타"].append({**q, "query": t, "kind": "오타", "label": f"{t}  (원본: {q['query']})"})
+            out["typo"].append({**q, "query": t, "kind": "typo", "label": f"{t}  (original: {q['query']})"})
 
-    # ---- 유의어 공백 (표기가 데이터에 아예 없는 테마 별칭) — 의미 검색만 건질 수 있는 지점
-    for q in out["테마어"]:
+    # ---- synonym gap (theme aliases whose spelling never appears in the data) — where only semantic search can help
+    for q in out["theme term"]:
         if q.get("alias_direct", 1) == 0:
-            out["유의어공백"].append({**q, "kind": "유의어공백"})
+            out["synonym gap"].append({**q, "kind": "synonym gap"})
 
     return out
 
 
-# --------------------------------------------------------------------------- B/C 실행
+# --------------------------------------------------------------------------- B/C run
 def run_modes(index, vectors, query: str, k: int = 10):
     lex = index.search(query, k=max(k, 20))
     vec = vectors.search(query, k=max(k, 20)) if vectors is not None else []
-    hyb = hybrid_search(lex, vec, k=k)  # tools._t_search_products 와 동일한 호출
+    hyb = hybrid_search(lex, vec, k=k)  # same call as tools._t_search_products
     return lex[:k], vec[:k], hyb
 
 
@@ -397,20 +397,20 @@ def print_scores(title: str, per_mode: dict) -> None:
     rows = [[m, str(s["n"]), pct(s["r1"]), pct(s["r5"]), pct(s["r10"]), f"{s['mrr']:.3f}"]
             for m, s in per_mode.items()]
     print(f"\n{title}")
-    print(table(rows, ["모드", "질의수", "recall@1", "recall@5", "recall@10", "MRR"]))
+    print(table(rows, ["mode", "queries", "recall@1", "recall@5", "recall@10", "MRR"]))
 
 
 def section_bc(index, vectors, rdb, lexicon, n: int, seed: int, k: int = 10) -> None:
     print(f"\n{BAR}")
-    print("B/C. 검색 품질 — 어휘(BM25) / 벡터(TF-IDF+LSA) / 실제 결합(hybrid_search) 비교")
+    print("B/C. Retrieval quality — lexical (BM25) vs vector (TF-IDF+LSA) vs the actual combination (hybrid_search)")
     print(BAR)
     qs = make_queries(rdb, index, lexicon, n=n, seed=seed)
-    print("생성된 질의 (정답은 데이터에서 자동 도출):")
-    print(table([[kind, f"{len(v):,}"] for kind, v in qs.items()], ["유형", "질의 수"]))
+    print("generated queries (gold answers derived automatically from the data):")
+    print(table([[kind, f"{len(v):,}"] for kind, v in qs.items()], ["type", "queries"]))
 
     all_detail: list[dict] = []
     summary_rows = []
-    for kind in ["정식명칭", "코드·티커", "부분명(약칭)", "편입종목명", "테마어", "오타", "유의어공백"]:
+    for kind in ["full name", "code/ticker", "partial name (abbrev.)", "constituent name", "theme term", "typo", "synonym gap"]:
         items = qs.get(kind) or []
         if not items:
             continue
@@ -418,15 +418,15 @@ def section_bc(index, vectors, rdb, lexicon, n: int, seed: int, k: int = 10) -> 
         per_mode, detail = eval_set(index, vectors, items, k=k)
         all_detail += detail
         print(f"\n{SUB}")
-        print(f"[{kind}]  질의 {len(items)}개 · {time.time()-t0:.1f}초")
+        print(f"[{kind}]  queries {len(items)} · {time.time()-t0:.1f}s")
         print(SUB)
         print_scores("", per_mode)
         for m in ("lexical", "vector", "hybrid"):
             s = per_mode[m]
             summary_rows.append([kind, m, str(s["n"]), pct(s["r1"]), pct(s["r5"]), pct(s["r10"]), f"{s['mrr']:.3f}"])
 
-        # 상품군별 분해 (상품 3유형만)
-        if kind in ("정식명칭", "코드·티커", "부분명(약칭)"):
+        # breakdown by product family (the three product query types only)
+        if kind in ("full name", "code/ticker", "partial name (abbrev.)"):
             rows = []
             for view in PRODUCT_VIEWS:
                 sub = [d for d in detail if d["view"] == view]
@@ -435,17 +435,17 @@ def section_bc(index, vectors, rdb, lexicon, n: int, seed: int, k: int = 10) -> 
                 for m, key in (("lexical", "lex"), ("vector", "vec"), ("hybrid", "hyb")):
                     s = score([d[key] for d in sub])
                     rows.append([view, m, str(s["n"]), pct(s["r1"]), pct(s["r10"]), f"{s['mrr']:.3f}"])
-            print("\n상품군별 분해")
-            print(table(rows, ["뷰", "모드", "질의수", "recall@1", "recall@10", "MRR"]))
+            print("\nbreakdown by product family")
+            print(table(rows, ["view", "mode", "queries", "recall@1", "recall@10", "MRR"]))
 
     print(f"\n{BAR}")
-    print("종합 비교표 (전 유형)")
+    print("Overall comparison (all types)")
     print(BAR)
-    print(table(summary_rows, ["유형", "모드", "질의수", "recall@1", "recall@5", "recall@10", "MRR"]))
+    print(table(summary_rows, ["type", "mode", "queries", "recall@1", "recall@5", "recall@10", "MRR"]))
 
-    # ---- 벡터가 실제로 무엇을 더했는가
+    # ---- what the vector actually added
     print(f"\n{BAR}")
-    print("C-핵심. 벡터가 BM25 위에 더한 것 / 뺏은 것")
+    print("C-core. What the vector added on top of BM25 / what it took away")
     print(BAR)
     rescue = [d for d in all_detail if d["lex"] is None and d["vec"] is not None]
     hyb_gain = [d for d in all_detail if d["lex"] is None and d["hyb"] is not None]
@@ -453,84 +453,85 @@ def section_bc(index, vectors, rdb, lexicon, n: int, seed: int, k: int = 10) -> 
     rank_up = [d for d in all_detail if d["lex"] and d["hyb"] and d["hyb"] < d["lex"]]
     rank_down = [d for d in all_detail if d["lex"] and d["hyb"] and d["hyb"] > d["lex"]]
     print(table([
-        ["전체 질의", f"{len(all_detail):,}"],
-        ["어휘 실패 & 벡터 성공 (top-10)", f"{len(rescue):,}"],
-        ["어휘 실패 & 결합 성공 = 실제 구제", f"{len(hyb_gain):,}"],
-        ["어휘 성공 & 결합 실패 = 결합이 잃은 것", f"{len(hyb_loss):,}"],
-        ["결합이 순위를 올린 질의", f"{len(rank_up):,}"],
-        ["결합이 순위를 내린 질의", f"{len(rank_down):,}"],
-    ], ["항목", "건수"]))
+        ["all queries", f"{len(all_detail):,}"],
+        ["lexical miss & vector hit (top-10)", f"{len(rescue):,}"],
+        ["lexical miss & hybrid hit = actual rescue", f"{len(hyb_gain):,}"],
+        ["lexical hit & hybrid miss = lost by the combination", f"{len(hyb_loss):,}"],
+        ["queries the combination ranked higher", f"{len(rank_up):,}"],
+        ["queries the combination ranked lower", f"{len(rank_down):,}"],
+    ], ["item", "count"]))
     if hyb_gain:
-        print("\n실제 구제 사례 (어휘 top-10 실패 → 결합 top-10 성공):")
+        print("\nactual rescues (lexical top-10 miss → hybrid top-10 hit):")
         for d in hyb_gain[:20]:
-            print(f"  [{d['kind']}] {d['label'][:70]}  | 벡터순위={d['vec']} 결합순위={d['hyb']} "
-                  f"| 어휘 1위='{str(d['lex_top'])[:34]}'")
+            print(f"  [{d['kind']}] {d['label'][:70]}  | vector rank={d['vec']} hybrid rank={d['hyb']} "
+                  f"| lexical #1='{str(d['lex_top'])[:34]}'")
     else:
-        print("\n실제 구제 사례: 0건 — 어휘가 실패한 질의를 결합 결과가 건진 경우가 한 건도 없다.")
+        print("\nactual rescues: 0 — the combined result never recovered a single query that lexical search missed.")
     if hyb_loss:
-        print("\n결합이 잃은 사례 (어휘 top-10 성공 → 결합 top-10 실패):")
+        print("\ncases lost by the combination (lexical top-10 hit → hybrid top-10 miss):")
         for d in hyb_loss[:20]:
-            print(f"  [{d['kind']}] {d['label'][:70]}  | 어휘순위={d['lex']}")
+            print(f"  [{d['kind']}] {d['label'][:70]}  | lexical rank={d['lex']}")
 
-    # ---- README/제안서가 근거로 드는 개별 프로브를 그대로 재현한다
+    # ---- reproduce verbatim the individual probes the README/proposal cite as evidence
     print(f"\n{BAR}")
-    print("C-2. 문서에 인용된 프로브 재현 (README '벡터 품질 조정' 절의 예시)")
+    print("C-2. Reproducing the probes cited in the docs (examples from the README's 'vector quality tuning' passage)")
     print(BAR)
     for q in ["space exploration satellite", "China semiconductor ETF", "차이나 반도체",
               "배터리 양극재 관련 상품", "우주항공", "월배당 커버드콜", "야놀자를 보유한 국내 ETF"]:
         lex, vec, hyb = run_modes(index, vectors, q, k=5)
-        print(f"\n질의: {q}")
-        print("  어휘 :", " | ".join(f"{h.title[:34]}" for h in lex[:5]) or "(0건)")
-        print("  벡터 :", " | ".join(f"{h.title[:34]}" for h in vec[:5]) or "(0건)")
-        print("  결합 :", " | ".join(f"{h.title[:34]}" for h in hyb[:5]) or "(0건)")
+        print(f"\nquery: {q}")
+        print("  lexical:", " | ".join(f"{h.title[:34]}" for h in lex[:5]) or "(0 hits)")
+        print("  vector :", " | ".join(f"{h.title[:34]}" for h in vec[:5]) or "(0 hits)")
+        print("  hybrid :", " | ".join(f"{h.title[:34]}" for h in hyb[:5]) or "(0 hits)")
 
 
 # --------------------------------------------------------------------------- D
 def section_d(settings, sig: str, cache_ok: bool, info: dict, index, vectors) -> None:
     print(f"\n{BAR}")
-    print("D. 캐시 무결성")
+    print("D. Cache integrity")
     print(BAR)
     rows = [
-        ["캐시 경로", info.get("path", "-")],
-        ["존재", str(info.get("exists"))],
-        ["크기", f"{info.get('size_mb', '-')} MB"],
-        ["저장 키", ", ".join(info.get("keys", []) or [])],
-        ["현재 문서집합으로 계산한 서명", sig],
-        ["캐시에 저장된 서명", str(info.get("cache_signature", "-"))],
-        ["서명 일치", str(info.get("signature_match"))],
-        ["dims 일치", f"{info.get('cache_dims')} vs {settings.vector_dims} → {info.get('dims_match')}"],
-        ["행수 일치", f"{info.get('matrix_shape', ('-',))[0]} vs {len(index.docs)} → {info.get('rows_match')}"],
-        ["matrix / components 형상", f"{info.get('matrix_shape')} / {info.get('components_shape')}"],
-        ["종합 판정", "유효 (그대로 사용 가능)" if cache_ok else "낡음 (재빌드 필요)"],
+        ["cache path", info.get("path", "-")],
+        ["exists", str(info.get("exists"))],
+        ["size", f"{info.get('size_mb', '-')} MB"],
+        ["stored keys", ", ".join(info.get("keys", []) or [])],
+        ["signature computed from the current doc set", sig],
+        ["signature stored in the cache", str(info.get("cache_signature", "-"))],
+        ["signature match", str(info.get("signature_match"))],
+        ["dims match", f"{info.get('cache_dims')} vs {settings.vector_dims} → {info.get('dims_match')}"],
+        ["row count match", f"{info.get('matrix_shape', ('-',))[0]} vs {len(index.docs)} → {info.get('rows_match')}"],
+        ["matrix / components shape", f"{info.get('matrix_shape')} / {info.get('components_shape')}"],
+        ["verdict", "valid (usable as is)" if cache_ok else "stale (rebuild needed)"],
     ]
-    print(table(rows, ["항목", "값"]))
+    print(table(rows, ["item", "value"]))
 
-    print("\n검증 경로 점검 (vector.VectorIndex.build 의 캐시 수용 조건):")
+    print("\nvalidation path check (the conditions under which vector.VectorIndex.build accepts the cache):")
     for line in [
-        "  1) signature == 계산된 서명   — 문서 수 + dims + max_df + **모든 문서 텍스트**의 SHA1",
-        "  2) dims 일치",
-        "  3) components.shape[1] == 현재 TF-IDF 어휘 폭  (행렬곱 차원 불일치를 막는 안전장치)",
-        "  4) matrix.shape[0] == 문서 수",
-        "  네 조건 중 하나라도 어긋나면 warning 후 재빌드한다. 조건을 우회해 캐시를 쓰는 경로는 없다",
-        "  (kb/vector.py 안에서 np.load 를 호출하는 지점은 이 한 곳뿐).",
+        "  1) signature == computed signature   — SHA1 of doc count + dims + max_df + **every document text**",
+        "  2) dims match",
+        "  3) components.shape[1] == current TF-IDF vocabulary width  (safeguard against a matmul dimension mismatch)",
+        "  4) matrix.shape[0] == doc count",
+        "  If any of the four fails, it logs a warning and rebuilds. No path uses the cache while bypassing these checks",
+        "  (this is the only place in kb/vector.py that calls np.load).",
     ]:
         print(line)
 
     if vectors is not None:
-        # 캐시가 실제로 살아 있는지: 임의 질의가 예외 없이 정상 차원으로 돌아오는지 확인
+        # Is the cache actually live: check that an arbitrary query comes back without exceptions and with the right dimensions
         probe = vectors.search("반도체 ETF", k=5)
-        print(f"\n실사용 확인: vectors.search('반도체 ETF') → {len(probe)}건, "
+        print(f"\nlive check: vectors.search('반도체 ETF') → {len(probe)} hits, "
               f"backend={vectors.stats.backend}, dims={vectors.stats.dims}, cached={vectors.stats.cached}")
         m = vectors.matrix
         nrm = np.linalg.norm(m, axis=1)
         zero = int((nrm < 1e-6).sum())
-        print(f"행렬: {m.shape} {m.dtype} · L2노름 중앙값 {float(np.median(nrm)):.3f} · 영벡터 문서 {zero:,}개 "
+        print(f"matrix: {m.shape} {m.dtype} · median L2 norm {float(np.median(nrm)):.3f} · zero-vector docs {zero:,} "
               f"({100.0*zero/max(1,m.shape[0]):.2f}%)")
         if zero:
-            print("  ⚠ 영벡터 문서는 어떤 질의로도 벡터검색에 걸리지 않는다 (max_df 로 토큰이 전부 잘린 문서).")
+            print("  ⚠ zero-vector documents can never be found by vector search, whatever the query (documents whose tokens were all cut by max_df).")
 
 
 # --------------------------------------------------------------------------- E
+# These match the Korean think_trace lines ("라운드 N: tool(...)") recorded in data/eval/*.jsonl.
 _ROUND = re.compile(r"라운드\s*\d+:\s*([a-z_]+)\s*\(")
 _NOTOOL = re.compile(r"라운드\s*\d+:\s*도구 호출 없이")
 KNOWN_TOOLS = ["sql_query", "search_products", "search_documents", "resolve_entity",
@@ -562,42 +563,42 @@ def parse_traces(path: pathlib.Path):
 
 def section_e(root: pathlib.Path) -> None:
     print(f"\n{BAR}")
-    print("E. 도구가 실제로 불리는가 — 기록된 실행에서 다시 센 값")
+    print("E. Do the tools actually get called? — recounted from recorded runs")
     print(BAR)
     truth = parse_traces(root / "data" / "eval" / "truth_results.jsonl")
     fail = parse_traces(root / "data" / "eval" / "fail_results.jsonl")
     fail_ids = {r["qid"] for r in fail}
-    # fail_results 는 truth_results 의 일부 문항을 더 최신으로 다시 돌린 것 → 최신본 우선
+    # fail_results re-ran some of the truth_results questions more recently → the latest run wins
     merged = [r for r in truth if r["qid"] not in fail_ids] + fail
 
-    for name, recs in (("truth_results.jsonl (54문항)", truth), ("fail_results.jsonl (재실행)", fail),
-                       ("병합 = 문항별 최신 실행", merged)):
+    for name, recs in (("truth_results.jsonl (54 questions)", truth), ("fail_results.jsonl (re-run)", fail),
+                       ("merged = latest run per question", merged)):
         c = collections.Counter(t for r in recs for t in r["calls"])
         rows = [[t, f"{c.get(t, 0):,}", f"{sum(1 for r in recs if t in r['calls']):,}"] for t in KNOWN_TOOLS]
         other = [t for t in c if t not in KNOWN_TOOLS]
         for t in other:
-            rows.append([f"{t} (미등록)", f"{c[t]:,}", "-"])
-        print(f"\n{SUB}\n{name} — 문항 {len(recs)}개, 도구 호출 {sum(c.values())}회, "
-              f"'도구 호출 없이 텍스트 응답' 라운드 {sum(r['no_tool_rounds'] for r in recs)}회\n{SUB}")
-        print(table(rows, ["도구", "호출 횟수", "이 도구를 쓴 문항 수"]))
+            rows.append([f"{t} (unregistered)", f"{c[t]:,}", "-"])
+        print(f"\n{SUB}\n{name} — questions {len(recs)}, tool calls {sum(c.values())}, "
+              f"'text reply without a tool call' rounds {sum(r['no_tool_rounds'] for r in recs)}\n{SUB}")
+        print(table(rows, ["tool", "calls", "questions using this tool"]))
 
-    print(f"\n{SUB}\n벡터 계열 도구 (search_products / search_documents / resolve_entity) 호출 상세\n{SUB}")
+    print(f"\n{SUB}\ncall details for the vector-family tools (search_products / search_documents / resolve_entity)\n{SUB}")
     hits = [r for r in merged if any(t in r["calls"] for t in ("search_products", "search_documents", "resolve_entity"))]
     if not hits:
-        print("호출 0회 — 54문항 전체에서 한 번도 불리지 않았다.")
+        print("0 calls — never called once across all 54 questions.")
     for r in hits:
         print(f"\n  {r['qid']} · ok={r['ok']} · {r['question'][:70]}")
         for line in r["trace"].splitlines():
             if any(t in line for t in ("search_products", "search_documents", "resolve_entity")):
                 print(f"    {line.strip()[:150]}")
-        print(f"    최종 답변: {r['answer'][:150]}")
-        print(f"    근거(retrieved_context)에 검색 근거 포함? "
-              f"{'예' if ('search' in r['context'] or '문서' in r['context']) else '아니오'}")
+        print(f"    final answer: {r['answer'][:150]}")
+        print(f"    does the evidence (retrieved_context) include search evidence? "
+              f"{'yes' if ('search' in r['context'] or '문서' in r['context']) else 'no'}")
 
-    # 참고: 각 문항이 몇 라운드를 썼는지 (도구를 부를 기회가 있었는가)
+    # For reference: how many rounds each question used (did it even get a chance to call a tool?)
     rounds = collections.Counter(len(r["calls"]) for r in merged)
-    print(f"\n문항별 도구 호출 횟수 분포: "
-          + ", ".join(f"{k}회={v}문항" for k, v in sorted(rounds.items())))
+    print(f"\ndistribution of tool calls per question: "
+          + ", ".join(f"{k} calls={v} questions" for k, v in sorted(rounds.items())))
 
 
 # --------------------------------------------------------------------------- G
@@ -611,48 +612,48 @@ ORG_EXAMPLES = [
 
 def section_g(settings) -> None:
     print(f"\n{BAR}")
-    print("G. 외부 문서 저장소 (search_documents 의 대상)")
+    print("G. External document store (what search_documents searches)")
     print(BAR)
     ds = DocStore.load(settings.docs_dir)
-    print(f"경로: {settings.docs_dir}")
-    print(f"청크 수: {len(ds)}개 · 원본 파일 {len(set(c.doc_id for c in ds.chunks))}개")
+    print(f"path: {settings.docs_dir}")
+    print(f"chunks: {len(ds)} · source files {len(set(c.doc_id for c in ds.chunks))}")
     rows = []
     for i, c in enumerate(ds.chunks):
-        rows.append([str(i), c.doc_id[:28], (c.title or "")[:26], (c.heading or "(머리말)")[:40],
+        rows.append([str(i), c.doc_id[:28], (c.title or "")[:26], (c.heading or "(preamble)")[:40],
                      str(len(c.text)), c.source[:26] or "-", c.as_of or "-"])
-    print(table(rows, ["#", "파일", "문서 제목", "섹션(heading)", "글자수", "출처", "기준일"]))
+    print(table(rows, ["#", "file", "doc title", "section (heading)", "chars", "source", "as of"]))
 
-    print(f"\n{SUB}\n주최측 예시 문항으로 검색했을 때 실제로 나오는 것\n{SUB}")
+    print(f"\n{SUB}\nwhat actually comes back when searching with the organizers' example questions\n{SUB}")
     for q in ORG_EXAMPLES:
         hits = ds.search(q, k=3)
-        print(f"\n질의: {q}")
+        print(f"\nquery: {q}")
         if not hits:
-            print("  (0건)")
+            print("  (0 hits)")
             continue
         for c in hits:
             body = c.text.replace("\n", " ")[:180]
-            print(f"  - [{c.score:7.2f}] {c.title} › {c.heading}  (출처 {c.source or '-'}, 기준 {c.as_of or '-'})")
+            print(f"  - [{c.score:7.2f}] {c.title} › {c.heading}  (source {c.source or '-'}, as of {c.as_of or '-'})")
             print(f"      {body}…")
 
 
 # --------------------------------------------------------------------------- main
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--sections", default="ABCDEG", help="실행할 섹션 문자 (기본 ABCDEG)")
-    ap.add_argument("--n", type=int, default=40, help="상품 유형별·상품군별 질의 수 (기본 40)")
+    ap.add_argument("--sections", default="ABCDEG", help="letters of the sections to run (default ABCDEG)")
+    ap.add_argument("--n", type=int, default=40, help="queries per product query type and per product family (default 40)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--allow-slow-rebuild", action="store_true",
-                    help="캐시 서명이 어긋날 때 메모리에서 벡터 색인을 다시 만든다(수 분). 캐시 파일은 어떤 경우에도 쓰지 않는다.")
+                    help="if the cache signature does not match, rebuild the vector index in memory (takes minutes). The cache file is never written, under any circumstances.")
     args = ap.parse_args()
     sec = set(args.sections.upper())
 
     root = pathlib.Path(__file__).resolve().parents[1]
     settings = get_settings()
     print(BAR)
-    print("fin-agent 벡터 색인 감사 — LLM 미호출 · 스토어 읽기 전용 · 캐시 쓰기 없음")
+    print("fin-agent vector index audit — no LLM calls · store read-only · no cache writes")
     print(f"store={settings.store_path}  backend={settings.vector_backend}  dims={settings.vector_dims}  "
-          f"max_df={settings.vector_max_df} (기본 {DEFAULT_MAX_DF})  seed={args.seed}  n={args.n}")
+          f"max_df={settings.vector_max_df} (default {DEFAULT_MAX_DF})  seed={args.seed}  n={args.n}")
     print(BAR)
 
     need_index = bool(sec & set("ABCD"))
@@ -665,8 +666,8 @@ def main() -> int:
         rdb, index, vectors, sig, cache_ok, info, t_lex, t_vec = load_indexes(
             settings, allow_slow_rebuild=args.allow_slow_rebuild)
         if vectors is None:
-            print("\n⚠ 벡터 색인을 만들지 않았다(캐시 서명 불일치 + --allow-slow-rebuild 미지정). "
-                  "B/C 는 어휘 단독 결과만 의미가 있다.\n")
+            print("\n⚠ The vector index was not built (cache signature mismatch and no --allow-slow-rebuild). "
+                  "Only the lexical-only results of B/C are meaningful.\n")
 
     lexicon = Lexicon.load(settings.enrichment_dir)
 

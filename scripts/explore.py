@@ -58,15 +58,15 @@ def main() -> int:
     if a.command == "health":
         m = st.rdb.meta()
         for view, info in m.items():
-            print(f"{view:12} {info['korean_name']:10} 기준일 {info['base_date']}  {info['row_count']:,}행")
-        print(f"\n어휘 색인   {len(st.index.docs):,} 문서")
+            print(f"{view:12} {info['korean_name']:10} base date {info['base_date']}  {info['row_count']:,} rows")
+        print(f"\nlexical index   {len(st.index.docs):,} docs")
         if st.vectors is not None:
-            print(f"벡터 색인   {st.vectors.stats.docs:,} 문서 · {st.vectors.stats.dims}차원 · {st.vectors.stats.backend}"
-                  f"{' (캐시)' if st.vectors.stats.cached else ''}")
+            print(f"vector index    {st.vectors.stats.docs:,} docs · {st.vectors.stats.dims} dims · {st.vectors.stats.backend}"
+                  f"{' (cached)' if st.vectors.stats.cached else ''}")
         if st.kg is not None:
-            print(f"지식그래프  {st.kg.size:,} 트리플 (명시 {st.kg.asserted_triples:,} + 추론 {st.kg.inferred_triples:,})")
-        print(f"외부 문서   {len(st.docs)} 청크")
-        print(f"온톨로지    {len(st.ontology.graph):,} 트리플" if getattr(st.ontology, "graph", None) is not None else "온톨로지    미로딩")
+            print(f"knowledge graph {st.kg.size:,} triples (asserted {st.kg.asserted_triples:,} + inferred {st.kg.inferred_triples:,})")
+        print(f"external docs   {len(st.docs)} chunks")
+        print(f"ontology        {len(st.ontology.graph):,} triples" if getattr(st.ontology, "graph", None) is not None else "ontology        not loaded")
         return 0
 
     if not a.arg:
@@ -90,11 +90,11 @@ def main() -> int:
         else:  # pre
             print(st.orchestrator.pre_analyze(a.arg).text)
             return 0
-        print(("[오류] " if r.is_error else "") + r.content)
+        print(("[error] " if r.is_error else "") + r.content)
         if r.evidence is not None:
             e = r.evidence
-            print(f"\n-- 근거로 기록되는 내용 --\n종류 {e.kind} · 테이블 {e.table} · 기준일 {e.base_date} · 건수 {e.row_count}")
-            print(f"실행 내용: {e.detail}")
+            print(f"\n-- what gets recorded as evidence --\nkind {e.kind} · table {e.table} · base date {e.base_date} · rows {e.row_count}")
+            print(f"executed: {e.detail}")
         return 0
 
     return asyncio.run(run())

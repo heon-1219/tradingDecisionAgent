@@ -1,15 +1,16 @@
-"""LLM 연결을 한 번의 호출로 점검한다 — 서버·색인 없이 5초면 끝난다.
+"""Check the LLM connection with a single call - no server or index needed, done in a few seconds.
 
-서비스앱 키로 바꿨을 때, 모델명을 바꿨을 때, 429 가 계속 날 때 가장 먼저 돌릴 것.
-확인하는 것: 인증 / 모델 접근 / **function calling 동작 여부** / 응답 지연 / 429 여부.
+Run it first after changing the key or the model, or whenever calls keep failing.
+It checks: authentication / model access / **whether function calling works** / latency / 429s.
 
   python scripts/check_llm.py
-  python scripts/check_llm.py --model HCX-005 --repeat 5   # 연속 호출로 요청 빈도 제한 확인
+  python scripts/check_llm.py --model gemini-3.8-flash --repeat 5   # back-to-back calls to probe rate limits
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import pathlib
 import sys
 import time
@@ -25,32 +26,60 @@ from finagent.config import get_settings  # noqa: E402
 
 PING_TOOL = ToolSpec(
     "get_bond_count",
-    "조건에 맞는 국내 채권 개수를 반환합니다. 개수를 묻는 질문에는 반드시 이 도구를 사용하세요.",
+    "Returns the number of domestic bonds that match a condition. Always use this tool for questions that ask how many.",
     {
         "type": "object",
-        "properties": {"grade": {"type": "string", "description": "신용등급 (예: AA-)"}},
+        "properties": {"grade": {"type": "string", "description": "Credit rating (e.g. AA-)"}},
         "required": ["grade"],
     },
 )
 
 
+def key_and_endpoint(s) -> tuple[str | None, str, str]:
+    """The configured key, where it came from, and the endpoint for the active provider."""
+    if s.llm_provider == "gemini":
+        env = next((v for v in ("GEMINI_API_KEY", "GOOGLE_API_KEY") if os.environ.get(v)), None)
+        source = f"environment variable {env} (overrides .env)" if env else ".env"
+        return s.gemini_api_key, source, s.gemini_base_url
+    if s.llm_provider == "anthropic":
+        return s.anthropic_api_key, "ANTHROPIC_API_KEY", "(Anthropic default)"
+    if s.llm_provider == "openai":
+        return s.openai_api_key, "OPENAI_API_KEY", s.openai_base_url or "(OpenAI default)"
+    return None, "-", "-"
+
+
+def hint(msg: str, model: str) -> str | None:
+    low = msg.lower()
+    if any(s in low for s in ("valid api key", "api key not valid", "api_key_invalid", "authentication")) or "401" in msg:
+        return ("The key was rejected. Create a new one at https://aistudio.google.com/apikey. "
+                "If GEMINI_API_KEY is also exported in your shell, that value overrides .env.")
+    if "403" in msg or "permission" in low:
+        return "The key is valid but not allowed to call this API (restricted key or disabled Generative Language API)."
+    if "404" in msg or "notfound" in low:
+        return f"Check the model name '{model}' (see https://ai.google.dev/gemini-api/docs/models) and the endpoint."
+    if "429" in msg or "ratelimit" in low or "resource_exhausted" in low:
+        return "Rate limited. Free-tier keys allow only a few requests per minute; wait, or raise REQUEST_MIN_INTERVAL_SEC."
+    if "503" in msg or "overloaded" in low or "unavailable" in low:
+        return "The model is overloaded right now; try again shortly."
+    return None
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=None, help="설정 대신 사용할 모델명")
-    ap.add_argument("--repeat", type=int, default=1, help="연속 호출 횟수(요청 빈도 제한 확인용)")
+    ap.add_argument("--model", default=None, help="model name to use instead of the configured one")
+    ap.add_argument("--repeat", type=int, default=1, help="number of back-to-back calls (to probe rate limits)")
     a = ap.parse_args()
 
     s = get_settings()
     if a.model:
         s = s.model_copy(update={"llm_model": a.model})
-    key = s.clova_api_key or s.openai_api_key or s.anthropic_api_key
-    base = s.clova_base_url if s.llm_provider == "clova" else (s.openai_base_url or "(제공자 기본값)")
+    key, source, endpoint = key_and_endpoint(s)
 
-    print(f"제공자   {s.llm_provider}")
-    print(f"모델     {s.llm_model}")
-    print(f"엔드포인트 {base}")
-    print(f"API 키   {'설정됨 (' + key[:6] + '…' + key[-4:] + ')' if key else '❌ 없음 — .env 를 확인하세요'}")
-    print(f"max_tokens {s.llm_max_tokens}" + ("  ⚠ CLOVA function calling 은 1024 이상 필요" if s.llm_max_tokens < 1024 else ""))
+    print(f"provider   {s.llm_provider}")
+    print(f"model      {s.llm_model}")
+    print(f"endpoint   {endpoint}")
+    print(f"API key    {'set (…' + key[-4:] + ') from ' + source if key else 'MISSING - add it to .env (see .env.example)'}")
+    print(f"effort     {s.llm_effort}   max_tokens {s.llm_max_tokens}")
     if not key and s.llm_provider != "stub":
         return 2
     print("-" * 68)
@@ -59,9 +88,9 @@ async def main() -> int:
     ok = rate_limited = 0
     for i in range(1, a.repeat + 1):
         conv = llm.start(
-            "너는 금융상품 분석가다. 개수를 묻는 질문에는 반드시 get_bond_count 도구를 사용한다.",
+            "You are a financial-product analyst. For questions that ask how many, always use the get_bond_count tool.",
             [PING_TOOL],
-            "신용등급 AA- 이상인 채권은 몇 개야?",
+            "How many bonds are rated AA- or higher?",
         )
         t0 = time.time()
         turn = await conv.step()
@@ -70,38 +99,32 @@ async def main() -> int:
         if turn.stop_reason == "error":
             msg = turn.text
             rate_limited += "429" in msg or "RateLimit" in msg
-            print(f"{i}. ❌ {sec:.1f}s  {msg[:150]}")
-            if "401" in msg or "Authentication" in msg:
-                print("     → 키가 거부되었습니다. 서비스앱 키를 CLOVA_API_KEY 에 'Bearer ' 없이 넣었는지 확인하세요.")
-            elif "404" in msg or "NotFound" in msg:
-                print(f"     → 모델명 '{s.llm_model}' 또는 엔드포인트를 확인하세요.")
-            elif "429" in msg:
-                print("     → 요청 빈도 제한. 서비스앱 한도를 확인하거나 호출 간격을 늘리세요.")
+            print(f"{i}. FAIL {sec:.1f}s  {msg[:180]}")
+            h = hint(msg, s.llm_model)
+            if h:
+                print(f"     -> {h}")
             continue
 
         if turn.tool_calls:
             call = turn.tool_calls[0]
-            print(f"{i}. ✅ {sec:.1f}s  function calling 동작 — {call.name}({call.input})")
+            print(f"{i}. OK   {sec:.1f}s  function calling works - {call.name}({call.input})")
             ok += 1
         else:
-            print(f"{i}. ⚠ {sec:.1f}s  도구를 부르지 않고 텍스트로만 답했습니다: {turn.text[:90]!r}")
-            print("     → max_tokens(≥1024), tools 전달, 모델의 function calling 지원 여부를 확인하세요.")
+            print(f"{i}. WARN {sec:.1f}s  answered in text without calling the tool: {turn.text[:90]!r}")
+            print("     -> check that tools are passed and that the model supports function calling.")
 
     print("-" * 68)
     toks, reqs, reset = rate_state.get("tokens"), rate_state.get("requests"), rate_state.get("reset_s")
     if toks is not None or reqs is not None:
-        print(f"남은 한도  요청 {reqs if reqs is not None else '?'} 건 · 토큰 {toks if toks is not None else '?'} "
-              f"· 리셋까지 {reset if reset is not None else '?'}초")
-        if toks is not None:
-            tier = "서비스앱으로 보입니다" if toks >= 100000 else ("테스트앱으로 보입니다" if toks <= 60000 else "판단 보류")
-            print(f"           → TPM 규모상 {tier} (테스트앱 3만~6만 / 서비스앱 12만~30만)")
+        print(f"quota left  requests {reqs if reqs is not None else '?'} · tokens {toks if toks is not None else '?'} "
+              f"· resets in {reset if reset is not None else '?'}s")
     else:
-        print("남은 한도  헤더가 오지 않았습니다(x-ratelimit-*). 한도는 콘솔에서 확인하세요.")
+        print("quota left  not reported in response headers (Gemini shows quotas in Google AI Studio).")
     if ok == a.repeat:
-        print(f"정상: {ok}/{a.repeat} 호출에서 도구 호출 확인. 서버를 띄우고 eval_truth 를 돌려도 됩니다.")
+        print(f"Healthy: tool call confirmed in {ok}/{a.repeat} calls. You can start the server and run the evaluation.")
     else:
-        print(f"주의: 도구 호출 성공 {ok}/{a.repeat}" + (f", 429 {rate_limited}건" if rate_limited else ""))
-        print("이 상태로는 Agent 가 데이터를 조회하지 못해 대부분의 문항을 '확인 불가'로 답합니다.")
+        print(f"Warning: tool calls succeeded in {ok}/{a.repeat}" + (f", 429s: {rate_limited}" if rate_limited else ""))
+        print("In this state the agent cannot query the data and will answer most questions with 'cannot confirm'.")
     return 0 if ok == a.repeat else 1
 
 

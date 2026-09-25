@@ -3,13 +3,14 @@ from finagent.models import AnswerResponse
 
 
 def test_settings_defaults(monkeypatch):
-    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    for var in ("LLM_PROVIDER", "LLM_MODEL", "GEMINI_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
     s = Settings(_env_file=None)
-    # 대회 규정: 답변 파이프라인은 NCP HyperCLOVA X 필수 → 기본값이 clova 여야 한다
-    assert s.llm_provider == "clova"
-    assert s.llm_model == "HCX-005"
-    assert s.clova_base_url.endswith("/v1/openai")
-    # 주최측 공지: 300초 초과는 미응답 처리
+    # English edition: Google Gemini, through its OpenAI-compatible endpoint, is the default provider
+    assert s.llm_provider == "gemini"
+    assert s.llm_model == "gemini-3.8-flash"
+    assert s.gemini_base_url.rstrip("/").endswith("/v1beta/openai")
+    # Kept from the competition contract: anything over 300 s counts as no answer
     assert s.time_budget_sec == 120 and s.time_budget_sec < 300
     assert s.max_tool_rounds == 8
     assert s.store_path.name == "products.db"

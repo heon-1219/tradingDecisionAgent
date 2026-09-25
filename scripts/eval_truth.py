@@ -1,13 +1,13 @@
 """Score answers against a computed answer key.
 
-The organizers never published an evaluation question set or answers ("예시질문(참고용 질의set)은 본
-자료에 포함되지 않습니다"), so there is nothing official to grade against.  This builds the next best
+The organizers never published an evaluation question set or answers ("the sample questions (reference
+query set) are not included in this material"), so there is nothing official to grade against.  This builds the next best
 thing: questions whose correct answer is *derivable from the delivered data itself* — a count, a name,
 a top-N list — computed by SQL or by a graph lookup at scoring time.  That gives a real accuracy
 number instead of a subjective read of the answers.
 
-  python scripts/eval_truth.py --compute                      # 정답 키만 계산해서 출력 (LLM 불필요)
-  python scripts/eval_truth.py --base http://127.0.0.1:8000   # 서버에 물어보고 채점
+  python scripts/eval_truth.py --compute                      # compute and print the answer key only (no LLM needed)
+  python scripts/eval_truth.py --base http://127.0.0.1:8000   # ask the server and grade the answers
 
 Checks are deliberately loose about formatting: numbers match with or without thousands separators,
 names match after whitespace/case normalisation, and an "cannot_confirm" item passes when the answer
@@ -37,14 +37,15 @@ from finagent.kb.graph import KG  # noqa: E402
 from finagent.kb.lexicon import Lexicon  # noqa: E402
 from finagent.kb.rdb import RDB  # noqa: E402
 
-# "없습니다" 를 그대로 넣으면 "값이 없는 종목은 제외했습니다" 같은 정상 답변까지 확인불가로 세어 버린다.
-# 반대로 빼 두면 "Kimi 관련 투자상품은 없습니다" 처럼 존재를 정확히 부정한 답을 오답으로 세게 되므로
-# (실제로 G-018 이 그렇게 채점됐다), 주어가 상품·데이터일 때만 부정을 인정한다.
+# Adding "없습니다" ("there is none") as-is would count normal answers such as "값이 없는 종목은 제외했습니다"
+# ("items with no value were excluded") as cannot-confirm.  Leaving it out instead grades an answer that correctly
+# denies existence, like "Kimi 관련 투자상품은 없습니다" ("there are no Kimi-related products"), as wrong
+# (G-018 was actually graded that way), so a negation counts only when its subject is a product or the data.
 DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없")
 DECLINE_RX = re.compile(r"(상품|종목|펀드|ETF|ETN|채권|데이터|정보|결과)[^.\n]{0,12}?없(습니다|음|어요)")
 CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인")
-# 시스템 장애로 생성된 대체 답변. 문구상 '확인할 수 없습니다'로 시작하므로 그냥 두면
-# 확인불가 문항이 전부 통과한 것처럼 보인다 — 실제로는 모델이 판단조차 못 한 것이다.
+# Fallback answers produced by a system failure.  Their wording starts with '확인할 수 없습니다' ("cannot be
+# confirmed"), so left alone every cannot-confirm item would look like a pass — when the model never even got to judge.
 ERROR_MARKERS = ("시스템 처리 중 문제가 발생", "<요청 실패", "내부 오류")
 
 
@@ -86,24 +87,25 @@ def compute_truth(item: dict, rdb: RDB, kg: KG | None) -> list[str]:
 def score(item: dict, answer: str, truth: list[str], trace: str = "") -> tuple[bool, str]:
     check = item.get("check")
     if is_infra_error(answer, trace):
-        return False, "시스템 오류 — 모델이 답하지 못함(채점 불가)"
+        return False, "system error — the model did not answer (cannot be graded)"
     a_norm = norm(answer)
     if check == "cannot_confirm":
         declined = any(d in answer for d in DECLINE) or bool(DECLINE_RX.search(answer))
         asked_back = any(c in answer for c in CLARIFY) and "?" in answer
         ok = declined or asked_back
-        return ok, "확인불가 명시" if declined else ("역질문" if asked_back else "없음 — 답을 지어냈을 가능성")
+        return ok, "explicit cannot-confirm" if declined else ("asked back" if asked_back else "neither — the answer may be made up")
     if not truth:
-        return False, "정답 키 계산 실패"
+        return False, "answer key computation failed"
     if check == "number":
         want = truth[0]
         try:
             num = float(want)
-            # 소수 기대값에 '반올림한 정수'를 후보로 넣으면 채점이 무너진다.
-            # G-008 의 정답은 0.65 인데 f"{0.65:,.0f}" 는 "1" 이므로, 숫자 1 이 한 번이라도 들어간
-            # 답은 내용과 무관하게 전부 통과했다("총보수는 0.12%입니다" 같은 오답도 '1'이 들어 있으면
-            # 정답 처리). 정수 형태 후보는 기대값이 실제로 정수일 때만 만들고, 소수일 때는 값이
-            # 보존되는 표기만 후보로 쓴다. (".2f" 를 무조건 넣으면 0.001 이 "0" 이 되어 같은 함정이 된다.)
+            # Offering a 'rounded integer' as a candidate for a decimal expected value breaks the grading.
+            # G-008's answer is 0.65, but f"{0.65:,.0f}" is "1", so every answer containing the digit 1 even
+            # once passed regardless of content (a wrong answer like "총보수는 0.12%입니다" also counted as correct
+            # because it contains a '1').  Integer-form candidates are made only when the expected value really
+            # is an integer; for decimals only notations that preserve the value are used.  (Always adding ".2f"
+            # would turn 0.001 into "0" — the same trap.)
             cands = {f"{num:g}"}
             if num.is_integer():
                 cands |= {f"{num:,.0f}", f"{num:.0f}"}
@@ -115,14 +117,14 @@ def score(item: dict, answer: str, truth: list[str], trace: str = "") -> tuple[b
             cands = {want}
         digits = {norm(c) for c in cands}
         ok = any(d and d in a_norm for d in digits)
-        return ok, f"기대값 {want} " + ("포함" if ok else "미포함")
+        return ok, f"expected {want} " + ("found" if ok else "not found")
     if check == "text":
         ok = norm(truth[0])[:14] in a_norm
-        return ok, f"'{truth[0][:28]}' " + ("포함" if ok else "미포함")
+        return ok, f"'{truth[0][:28]}' " + ("found" if ok else "not found")
     if check == "text_all":
         found = [t for t in truth if norm(t)[:14] in a_norm]
-        return len(found) == len(truth), f"{len(found)}/{len(truth)}개 포함"
-    return False, f"알 수 없는 check: {check}"
+        return len(found) == len(truth), f"{len(found)}/{len(truth)} found"
+    return False, f"unknown check: {check}"
 
 
 def main() -> int:
@@ -130,10 +132,10 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--file", default=str(ROOT / "data/eval/groundtruth.jsonl"))
     ap.add_argument("--out", default=str(ROOT / "data/eval/truth_results.jsonl"))
-    ap.add_argument("--compute", action="store_true", help="정답 키만 계산하고 종료 (서버·LLM 불필요)")
+    ap.add_argument("--compute", action="store_true", help="compute the answer key and exit (no server or LLM needed)")
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--delay", type=float, default=0.0,
-                    help="문항 사이 대기(초). CLOVA 테스트앱은 요청 빈도 제한이 낮아 429 가 날 수 있다.")
+                    help="seconds to wait between questions. Free-tier API keys have low rate limits and can return 429.")
     a = ap.parse_args()
 
     items = [json.loads(l) for l in Path(a.file).read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -145,13 +147,13 @@ def main() -> int:
     truths = {i["question_id"]: compute_truth(i, rdb, kg) for i in items}
 
     if a.compute:
-        print(f"{'ID':8} {'난이도':4} 정답 키")
+        print(f"{'ID':8} {'lvl':4} answer key")
         print("-" * 92)
         for i in items:
             t = truths[i["question_id"]]
-            shown = "(확인불가로 답해야 정답)" if i.get("check") == "cannot_confirm" else " | ".join(x[:44] for x in t) or "계산 실패"
+            shown = "(correct only if it answers cannot-confirm)" if i.get("check") == "cannot_confirm" else " | ".join(x[:44] for x in t) or "computation failed"
             print(f"{i['question_id']:8} {i.get('difficulty','-'):4} {shown}")
-        print(f"\n{len(items)}문항 · 정답 키 계산 완료. 서버를 띄운 뒤 --compute 없이 실행하면 채점합니다.")
+        print(f"\n{len(items)} questions · answer key computed. Start the server and run without --compute to grade.")
         return 0
 
     rows, passed = [], 0
@@ -162,6 +164,7 @@ def main() -> int:
                 r = client.get(f"{a.base}/answer", params={"question_id": i["question_id"], "question": i["question"]})
                 body = r.json()
             except Exception as e:  # noqa: BLE001
+                # "<요청 실패" ("request failed") stays Korean: ERROR_MARKERS matches on it
                 body = {"answer": f"<요청 실패: {e}>", "retrieved_context": "", "think_trace": ""}
             sec = time.time() - t0
             ok, why = score(i, body.get("answer", ""), truths[i["question_id"]], body.get("think_trace", ""))
@@ -178,13 +181,13 @@ def main() -> int:
     slow = sum(1 for r in rows if r["seconds"] >= 300)
     errs = sum(1 for r in rows if is_infra_error(r["answer"], r["think_trace"]))
     graded = n - errs
-    print(f"\n정답률 {passed}/{n} ({passed / n * 100:.0f}%) · 평균 {sum(r['seconds'] for r in rows) / n:.1f}초 · 300초 초과 {slow}건")
+    print(f"\naccuracy {passed}/{n} ({passed / n * 100:.0f}%) · avg {sum(r['seconds'] for r in rows) / n:.1f}s · over 300s: {slow}")
     if errs:
-        pct = f"{passed / graded * 100:.0f}%" if graded else "측정 불가"
-        print(f"⚠ 시스템 오류 {errs}건(LLM 429·타임아웃 등)은 모델 실력과 무관합니다. "
-              f"실제로 채점된 문항은 {graded}건, 그 기준 정답률은 {pct} 입니다. "
-              f"오류를 먼저 없앤 뒤 다시 측정하세요.")
-    print(f"상세 결과 → {a.out}")
+        pct = f"{passed / graded * 100:.0f}%" if graded else "not measurable"
+        print(f"⚠ {errs} system errors (LLM 429, timeouts, etc.) have nothing to do with the model's ability. "
+              f"{graded} questions were actually graded; accuracy on those is {pct}. "
+              f"Get rid of the errors first, then measure again.")
+    print(f"detailed results → {a.out}")
     return 0
 
 

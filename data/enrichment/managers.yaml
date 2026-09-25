@@ -1,5 +1,5 @@
-# 운용사/발행사 정규화 사전. canonical = 정규화 이름, aliases = 원천 데이터·상품명·질문에 등장하는 표기.
-# 원천: pref01n001.cu_fund_mgmt_co (국내ETF/ETN), pref02n001.cu_fund_mgmt_co (해외ETF), prfd01n001.itm_nm 접두어 (펀드)
+# Manager/issuer normalization lexicon. canonical = normalized name, aliases = spellings found in the source data, product names and questions.
+# Sources: pref01n001.cu_fund_mgmt_co (domestic ETF/ETN), pref02n001.cu_fund_mgmt_co (foreign ETF), prfd01n001.itm_nm prefix (funds)
 - id: mirae_am
   canonical: 미래에셋자산운용
   group: 미래에셋

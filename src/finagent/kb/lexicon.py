@@ -1,7 +1,7 @@
 """Curated lexicons (managers, themes, companies) loaded from YAML and simple matchers.
 
 These are the hand-maintained "entity resolution" layer: they map the many surface forms found in
-product names and user questions (브랜드명, 약칭, 영문명, 한자명 ...) to canonical entities that the
+product names and user questions (brand names, abbreviations, English names, Hanja names ...) to canonical entities that the
 knowledge graph and the agent can reason about.
 """
 from __future__ import annotations

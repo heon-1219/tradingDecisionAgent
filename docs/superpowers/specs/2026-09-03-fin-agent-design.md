@@ -1,12 +1,12 @@
-# 금융상품 Agent (Financial Product Analyst) — Design Spec
+# Financial Product Agent (Financial Product Analyst) — Design Spec
 
 Date: 2026-09-03
-Target: 제10회 2026 미래에셋증권 AI Festival, 예선 제출 (마감 2026-09-06 23:59), 평가 API 운영 2026-09-07 ~ 09-20.
+Target: 10th Mirae Asset Securities AI Festival 2026, preliminary-round submission (deadline 2026-09-06 23:59), evaluation API live 2026-09-07 ~ 09-20.
 
 ## 1. Goal
 
 A single HTTP service exposing `GET /answer` that answers natural-language questions about four
-provided product master tables (국내채권 / 국내ETF / 해외ETF / 공모펀드) using evidence from the data,
+provided product master tables (domestic bonds / domestic ETFs / foreign ETFs / public funds) using evidence from the data,
 and explicitly declines (or asks a clarifying question) when the data cannot confirm an answer.
 
 Scoring drivers this design targets:
@@ -15,13 +15,13 @@ Scoring drivers this design targets:
 |---|---|---|
 | 40% | API answer accuracy, evidence, latency | Federated retrieval (SQL + graph + lexical/vector), ontology-validated filters, explicit evidence block, 50s time budget |
 | 20% | Source code + `ontology/*.ttl` | Clean `src/` package, reproducible ETL, five Turtle files that the runtime actually loads |
-| 40% | Technical proposal | Architecture is legible: 적재 → 온톨로지 → 그래프/색인 → 검색 → 생성. `docs/` carries diagrams and reproduction steps |
+| 40% | Technical proposal | Architecture is legible: ingestion → ontology → graph/index → retrieval → generation. `docs/` carries diagrams and reproduction steps |
 
 ## 2. Assumptions (decisions made without user input)
 
 1. **LLM provider**: Anthropic Claude by default (`LLM_PROVIDER=anthropic`), switchable to any
    OpenAI-compatible endpoint (`LLM_PROVIDER=openai`, covers OpenAI, Gemini's OpenAI-compatible API,
-   NCP CLOVA Studio, vLLM). Keys come from `.env`. The organizers said LLM usage rules are "추후 공지";
+   NCP CLOVA Studio, vLLM). Keys come from `.env`. The organizers said LLM usage rules are "to be announced";
    the abstraction lets the team switch in minutes.
 2. **Runtime**: Python 3.11+ (developed on 3.14), FastAPI + uvicorn, deployed as one Docker
    container on the team's NCP VM. Optional Caddy sidecar for HTTPS.
@@ -36,20 +36,20 @@ Scoring drivers this design targets:
 
 | Table | Rows | Key | Base date | Notes |
 |---|---|---|---|---|
-| PRBD01N001 국내채권 | 21,882 | (pd_no, pd_exg_mkt, info_seq) | 2026-08-21 | 634 rows are actually sellable (장외 · 온오프 겸용 · buy_yield present); 국공채 have no credit grade |
-| PREF01N001 국내ETF | 1,780 | pd_itm_no | 2026-08-21 | 1,235 ETF + 545 ETN; 총보수(cu_charge_rt) only 12% populated; Korean labels |
-| PREF02N001 해외ETF | 6,037 | pd_itm_no (RIC) | 2026-08-22 | All US-listed; English names + ~300-char strategy text; 총보수·AUM fully populated |
-| PRFD01N001 공모펀드 | 23,676 | itm_no | 2026-08-21 | 공모 14,716 / 사모 8,960; 판매중 10,962; many share classes of one fund; fee columns have undocumented units |
+| PRBD01N001 domestic bonds | 21,882 | (pd_no, pd_exg_mkt, info_seq) | 2026-08-21 | 634 rows are actually sellable (OTC · online/offline dual channel · buy_yield present); government/public bonds have no credit grade |
+| PREF01N001 domestic ETFs | 1,780 | pd_itm_no | 2026-08-21 | 1,235 ETF + 545 ETN; total expense ratio (cu_charge_rt) only 12% populated; Korean labels |
+| PREF02N001 foreign ETFs | 6,037 | pd_itm_no (RIC) | 2026-08-22 | All US-listed; English names + ~300-char strategy text; total expense ratio · AUM fully populated |
+| PRFD01N001 public funds | 23,676 | itm_no | 2026-08-21 | public offering 14,716 / private placement 8,960; on sale 10,962; many share classes of one fund; fee columns have undocumented units |
 
 Sample-question coverage:
 
-- "판매가능 원화채권 AA- 이상" → SQL only (78 rows). Easy.
-- "국민성장펀드 구조·투자전략 동향" → 4 share classes exist; 동향 needs external documents. Medium.
-- "캠브리콘 편입 중국반도체 ETF" → needs constituents (not in data). External fetch + graph.
-- "에코프로 자회사 편입 ETF 중 순자산 큰 상품의 위험요인" → constituents + corporate graph + SQL.
-- "KODEX AI로봇 ETF" → does not exist (KODEX 로봇액티브, RISE AI&로봇 do) → clarify/decline.
-- "신용등급 AAAA" → invalid per ontology enumeration → decline, state valid grades.
-- "Kimi 관련 투자상품" → no entity match → decline.
+- "판매가능 원화채권 AA- 이상" (sellable KRW bonds rated AA- or higher) → SQL only (78 rows). Easy.
+- "국민성장펀드 구조·투자전략 동향" (National Growth Fund structure, investment strategy, trends) → 4 share classes exist; the "trends" part needs external documents. Medium.
+- "캠브리콘 편입 중국반도체 ETF" (China semiconductor ETFs holding Cambricon) → needs constituents (not in data). External fetch + graph.
+- "에코프로 자회사 편입 ETF 중 순자산 큰 상품의 위험요인" (risk factors of the largest-net-asset ETFs holding EcoPro subsidiaries) → constituents + corporate graph + SQL.
+- "KODEX AI로봇 ETF" (KODEX AI Robot ETF) → does not exist (KODEX 로봇액티브, RISE AI&로봇 do) → clarify/decline.
+- "신용등급 AAAA" (credit rating AAAA) → invalid per ontology enumeration → decline, state valid grades.
+- "Kimi 관련 투자상품" (Kimi-related investment products) → no entity match → decline.
 
 ## 4. Approaches considered
 
@@ -59,7 +59,7 @@ Sample-question coverage:
   (`sql_query`, `search_products`, `graph_query`, `resolve_entity`, `search_documents`) with a time
   budget; deterministic pre-checks (entity resolution, ontology validation) run before the first LLM
   call to cut round-trips and catch unanswerable cases early.
-- **C. Fixed pipeline (classifier → templates)**: most predictable latency, but brittle on 상 difficulty
+- **C. Fixed pipeline (classifier → templates)**: most predictable latency, but brittle on hard-difficulty
   questions and hard to extend in four days.
 
 B is chosen; C's guardrails (time budget, validators, forced final answer) are folded in.
@@ -144,11 +144,11 @@ GET /answer?question_id&question
 - `bond_kr.ttl` (`fp:DomesticBond`): `fp:CreditGrade` enumeration (AAA … D, with ordering
   `fp:gradeRank`), bond type/interest type/offering type individuals, coupon, maturity, duration,
   yields, sellable channel.
-- `etf_kr.ttl` (`fp:DomesticETF`, `fp:DomesticETN`): strategy (실물복제/합성복제/액티브),
+- `etf_kr.ttl` (`fp:DomesticETF`, `fp:DomesticETN`): strategy (실물복제/합성복제/액티브 = physical replication/synthetic replication/active),
   leverage factor, returns by period, volatility, dividend fields, pension eligibility.
 - `etf_gl.ttl` (`fp:ForeignETF`): expense ratio, AUM, exchange, replication method,
   inverse/leverage flags, strategy text.
-- `fund_pub.ttl` (`fp:PublicFund`, `fp:ShareClass`, `fp:FundFamily`): 운용속성, 제로인 유형,
+- `fund_pub.ttl` (`fp:PublicFund`, `fp:ShareClass`, `fp:FundFamily`): management attributes, Zeroin fund type,
   benchmark, hedge flag, class fee type/channel, fee components (units flagged as unverified).
 
 Every datatype property carries `fp:sourceColumn` + `fp:sourceTable` so `ontology/loader.py`
@@ -167,12 +167,12 @@ Final answer status is one of:
 
 - `answered`: evidence rows exist; answer cites product codes/names, numbers with units, base date.
 - `cannot_confirm`: named entity unresolved, ontology-invalid constraint, or zero rows after
-  reasonable retries. Answer states "제공된 데이터로는 확인할 수 없습니다" and what was checked.
+  reasonable retries. Answer states "제공된 데이터로는 확인할 수 없습니다" ("this cannot be confirmed from the provided data") and what was checked.
 - `clarify`: ambiguous mention (several near matches) or missing condition. Answer asks one
   precise question and lists candidates.
 
 Hard rules in the system prompt: no return forecasts, no definitive recommendations, only numbers
-from tool results, always mention 기준일.
+from tool results, always mention the base date.
 
 ### 5.7 Response contract (from the PDF)
 
@@ -192,7 +192,7 @@ from tool results, always mention 기준일.
 
 Budget 50s (configurable). Startup pre-loads everything. Tool calls in one LLM turn execute
 concurrently. When the budget is nearly exhausted the orchestrator forces `final_answer` with the
-evidence gathered so far. Target: 하 ≤ 15s, 중 ≤ 30s, 상 ≤ 50s.
+evidence gathered so far. Target: easy ≤ 15s, medium ≤ 30s, hard ≤ 50s.
 
 ### 5.9 Error handling
 
@@ -212,9 +212,9 @@ evidence gathered so far. Target: 하 ≤ 15s, 중 ≤ 30s, 상 ≤ 50s.
 
 ## 6. Deliverables in this repo
 
-`src/`, `ontology/*.ttl` (5 files), `requirements.txt`, `README.md` (환경 구성 · 실행 명령 · API 명세),
+`src/`, `ontology/*.ttl` (5 files), `requirements.txt`, `README.md` (environment setup · run commands · API spec),
 `Dockerfile`, `docker-compose.yml`, `.env.example`, `docs/api_spec.md`, `docs/proposal_outline.md`
-(skeleton for the 기술제안서 with architecture/flow diagrams), `scripts/` (store build, constituent
+(skeleton for the technical proposal with architecture/flow diagrams), `scripts/` (store build, constituent
 fetcher, doc parser, eval runner), `tests/`.
 
 ## 7. Out of scope

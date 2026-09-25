@@ -1,5 +1,5 @@
-# 기업(편입종목·기초자산·질문에 등장하는 회사) 사전. parent = 모회사 id (자회사 관계), not_listed = 비상장.
-# 질문 예시 대응: 에코프로 자회사(에코프로비엠·에코프로에이치엔·에코프로머티리얼즈), 캠브리콘(중국 AI 반도체), Kimi(Moonshot AI, 비상장)
+# Company lexicon (companies that appear as holdings, underlying assets or in questions). parent = parent-company id (subsidiary relation), not_listed = unlisted.
+# Covers the sample questions: 에코프로 subsidiaries (에코프로비엠, 에코프로에이치엔, 에코프로머티리얼즈), 캠브리콘 (Chinese AI semiconductors), Kimi (Moonshot AI, unlisted)
 - id: ecopro
   name_ko: 에코프로
   name_en: EcoPro

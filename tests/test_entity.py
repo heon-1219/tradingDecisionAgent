@@ -21,7 +21,7 @@ def test_resolver_marks_unknown_product_as_inexact_with_candidates():
     r = EntityResolver(_idx(), Lexicon.load(ENRICH)).resolve("KODEX AI로봇 ETF 정보 알려줘")
     assert not r.exact
     assert r.products[0].title == "KODEX 로봇액티브"
-    assert "유사 상품 후보" in r.summary()
+    assert "Similar product candidates" in r.summary()
 
 
 def test_extract_product_mentions():
@@ -48,12 +48,12 @@ def test_resolver_company_and_theme():
 
 
 def test_resolution_flags_nonexistent_product_in_summary():
-    """도구 출력과 사전분석이 같은 기준으로 '존재하지 않음'을 경고해야 한다."""
+    """The tool output and the pre-analysis must warn 'does not exist' by the same criterion."""
     lx = Lexicon.load(ENRICH)
     r = EntityResolver(_idx(), lx).resolve("KODEX AI로봇")
-    assert not r.resolved and "존재하지 않습니다" in r.summary()
+    assert not r.resolved and "exists in the data" in r.summary()
     ok = EntityResolver(_idx(), lx).resolve("KODEX 로봇액티브")
-    assert ok.resolved and "존재하지 않습니다" not in ok.summary()
+    assert ok.resolved and "exists in the data" not in ok.summary()
 
 
 def test_mention_resolves_tolerates_prefix_and_suffix():

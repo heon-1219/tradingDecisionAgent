@@ -1,10 +1,11 @@
-"""한 문항이 답까지 가는 과정을 단계별로 전부 펼쳐 보여준다.
+"""Lay out, step by step, everything one question goes through on its way to an answer.
 
-`think_trace` 는 채점 서버에 보내는 요약본이라 도구에 넘긴 인자와 도구가 돌려준 원문이 빠져 있다.
-이 스크립트는 그 사이를 다 열어서, 어느 단계에서 무슨 값이 나왔고 그게 무슨 뜻인지 확인할 수 있게 한다.
+`think_trace` is the summary sent to the grading server, so it leaves out the arguments passed to tools and
+the raw text the tools returned.  This script opens up everything in between, so you can see which value
+came out at which step and what it means.
 
   python scripts/trace.py "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"
-  python scripts/trace.py --id G-015 --full        # 도구 출력을 자르지 않고 전부
+  python scripts/trace.py --id G-015 --full        # show tool output in full, untruncated
 """
 from __future__ import annotations
 
@@ -32,21 +33,21 @@ SUB = "-" * 96
 
 
 def head(n: int, title: str) -> None:
-    print(f"\n{BAR}\n[단계 {n}] {title}\n{BAR}")
+    print(f"\n{BAR}\n[step {n}] {title}\n{BAR}")
 
 
 def clip(s: str, limit: int | None) -> str:
     s = str(s)
     if limit is None or len(s) <= limit:
         return s
-    return s[:limit] + f"\n… (총 {len(s):,}자 중 {limit:,}자만 표시 — 전부 보려면 --full)"
+    return s[:limit] + f"\n… (showing {limit:,} of {len(s):,} chars — use --full to see everything)"
 
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("question", nargs="?", help="질문 (생략하면 --id 로 평가셋에서 가져옴)")
-    ap.add_argument("--id", default=None, help="groundtruth.jsonl 의 question_id")
-    ap.add_argument("--full", action="store_true", help="도구 출력을 자르지 않는다")
+    ap.add_argument("question", nargs="?", help="the question (if omitted, taken from the eval set via --id)")
+    ap.add_argument("--id", default=None, help="question_id in groundtruth.jsonl")
+    ap.add_argument("--full", action="store_true", help="do not truncate tool output")
     a = ap.parse_args()
 
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -58,20 +59,20 @@ async def main() -> int:
                 question, truth = d["question"], d
                 break
     if not question:
-        print("질문을 주거나 --id 를 지정하세요."); return 2
+        print("Give a question or pass --id."); return 2
     limit = None if a.full else 1400
 
     logging.basicConfig(level=logging.WARNING)
     s = get_settings()
-    print(f"질문   {question}")
-    print(f"모델   {s.llm_provider}/{s.llm_model} · 예산 {s.time_budget_sec:.0f}초 · 최대 {s.max_tool_rounds}라운드")
+    print(f"question  {question}")
+    print(f"model     {s.llm_provider}/{s.llm_model} · budget {s.time_budget_sec:.0f}s · max {s.max_tool_rounds} rounds")
     if truth:
-        print(f"정답키 난이도={truth.get('difficulty')} · {truth.get('check')} · {truth.get('note') or ''}")
+        print(f"truth key difficulty={truth.get('difficulty')} · {truth.get('check')} · {truth.get('note') or ''}")
 
     t0 = time.time()
     st = AppState.load(s, llm=make_llm(s))
     ndocs = getattr(st.index, "size", None) or len(getattr(st.index, "docs", []) or [])
-    print(f"적재   {time.time() - t0:.1f}초 · 어휘색인 {ndocs:,}문서 · 벡터 {len(st.vectors) if st.vectors else 0:,}문서 · 그래프 {len(st.kg.graph):,}트리플")
+    print(f"loaded    {time.time() - t0:.1f}s · lexical index {ndocs:,} docs · vector {len(st.vectors) if st.vectors else 0:,} docs · graph {len(st.kg.graph):,} triples")
 
     # --- wrap the tool layer so every call and its full result is visible ------------------------
     calls: list[dict] = []
@@ -89,43 +90,43 @@ async def main() -> int:
 
     st.tools.execute = spy  # type: ignore[method-assign]
 
-    head(1, "사전 분석 — LLM 호출 전에 결정적으로 계산하는 것")
+    head(1, "Pre-analysis — what is computed deterministically before any LLM call")
     pre = st.orchestrator.pre_analyze(question)
-    if pre is None:  # 이름이 다르면 실제 실행 결과의 trace 로 대체
-        print("(사전분석 함수를 직접 부를 수 없어 실행 후 trace 로 확인합니다)")
+    if pre is None:  # if the name differs, fall back to the trace of the actual run
+        print("(the pre-analysis function cannot be called directly; check the trace after the run instead)")
     else:
-        print(f"상품명 후보 : {pre.mentions or '없음'}")
-        print(f"미해결 상품 : {[m for m, _ in pre.unresolved] or '없음'}")
-        print(f"온톨로지 위반: {pre.invalid or '없음'}")
-        print(f"\n프롬프트에 주입되는 블록:\n{SUB}\n{clip(pre.text, limit)}\n{SUB}")
+        print(f"name candidates    : {pre.mentions or 'none'}")
+        print(f"unresolved products: {[m for m, _ in pre.unresolved] or 'none'}")
+        print(f"ontology violations: {pre.invalid or 'none'}")
+        print(f"\nblock injected into the prompt:\n{SUB}\n{clip(pre.text, limit)}\n{SUB}")
 
-    head(2, "에이전트 실행 — LLM 이 도구를 고르고 부르는 구간")
+    head(2, "Agent run — the stretch where the LLM picks and calls tools")
     t1 = time.time()
     resp = await st.orchestrator.answer(qid, question)
     elapsed = time.time() - t1
 
     for i, c in enumerate(calls, 1):
         ev = c["evidence"]
-        print(f"\n{SUB}\n도구 {i}. {c['name']}  ({c['sec']:.2f}초){'  ← 오류' if c['error'] else ''}")
-        print(f"인자: {json.dumps(c['args'], ensure_ascii=False)}")
+        print(f"\n{SUB}\ntool {i}. {c['name']}  ({c['sec']:.2f}s){'  ← error' if c['error'] else ''}")
+        print(f"args: {json.dumps(c['args'], ensure_ascii=False)}")
         if ev is not None:
-            print(f"근거: 종류={ev.kind} 테이블={ev.korean_name or ev.table or '-'} 기준일={ev.base_date or '-'} 행수={ev.row_count}")
-        print(f"돌려준 값:\n{clip(c['content'], limit)}")
+            print(f"evidence: kind={ev.kind} table={ev.korean_name or ev.table or '-'} base_date={ev.base_date or '-'} rows={ev.row_count}")
+        print(f"returned:\n{clip(c['content'], limit)}")
     if not calls:
-        print("(도구를 한 번도 부르지 않았습니다)")
+        print("(no tool was called)")
 
-    head(3, "최종 응답 — 채점 서버가 받는 5개 필드")
+    head(3, "Final response — the 5 fields the grading server receives")
     m = re.search(r"status=(\w+)", resp.think_trace)
-    print(f"status            : {m.group(1) if m else '(trace 에 없음)'}   ← 응답 5필드에는 없고 내부 상태입니다")
-    print(f"소요               : {elapsed:.1f}초")
+    print(f"status            : {m.group(1) if m else '(not in trace)'}   ← internal state, not one of the 5 response fields")
+    print(f"elapsed           : {elapsed:.1f}s")
     print(f"\nanswer:\n{SUB}\n{resp.answer}\n{SUB}")
     print(f"\nthink_trace:\n{SUB}\n{resp.think_trace}\n{SUB}")
     print(f"\nretrieved_context:\n{SUB}\n{clip(resp.retrieved_context, limit)}\n{SUB}")
 
     if truth:
-        head(4, "정답 대조")
-        print(f"기대: {truth.get('expect')}")
-        print(f"판정 기준: {truth.get('check')}")
+        head(4, "Check against the answer key")
+        print(f"expected : {truth.get('expect')}")
+        print(f"criterion: {truth.get('check')}")
     return 0
 
 

@@ -50,11 +50,12 @@ TEXT_CODE_COLS: dict[str, list[str]] = {
 }
 
 
-# 운용사 기관코드로 쓰이지 않는 자리표시자.  '99999999' 는 27행에만 붙어 있고 그 행들의 상품명에서
-# 풀린 운용사는 현대·대신·미래에셋·신영·신한 5곳으로 갈린다 — 한 기관의 코드라면 나올 수 없는 분포다.
-# 최빈값 투표는 그럼에도 이 코드를 '현대자산운용' 으로 확정해 6행을 채우고 있었다.  근거가 가장 약한
-# 부분이고, 확실하지 않은 귀속은 넣지 않는다는 이 프로젝트의 원칙에 어긋나므로 매핑에서 제외한다.
-# (제외해도 상품명으로 풀린 21행은 그대로 남는다. 코드로 채우던 6행만 NULL 이 된다.)
+# A placeholder that is not used as a real manager institution code.  '99999999' appears on only 27 rows, and
+# the managers resolved from those rows' product names split across 5 houses (현대·대신·미래에셋·신영·신한) — a
+# distribution no single institution's code could produce.  The majority vote nevertheless pinned the code to
+# '현대자산운용' and filled 6 rows with it.  It was the weakest evidence in the mapping and broke this project's
+# rule of never recording an uncertain attribution, so the code is excluded from the mapping.
+# (The 21 rows resolved by product name are unaffected; only the 6 rows filled via the code become NULL.)
 _PLACEHOLDER_MANAGER_CODES = {"99999999"}
 
 
@@ -76,21 +77,21 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
             df[c] = df[c].map(yyyymmdd_to_iso)
     if table == "bond_kr":
         df["product_type"] = "국내채권"
-        # 주최측 공지(2026-08-24): BUYABLE_QUANTITY 값은 무효이며, 상장폐지·리스팅 종료 종목을 제외하면
-        # 모두 "구매 가능"으로 간주한다.  채권에서 그 판정은 상환(만기) 도래 여부다.
+        # Organizers' notice (2026-08-24): BUYABLE_QUANTITY values are invalid; apart from delisted issues and
+        # issues whose listing has ended, everything counts as "buyable".  For bonds that means not yet redeemed (matured).
         df["is_sellable"] = (df["mat_dt"].notna() & (df["mat_dt"] >= df["info_base_dt"])).astype(int)
-        # 매수·세후수익률이 실제로 수록된 종목(전체의 약 3%)은 별도 플래그로 남긴다.
+        # Issues that actually carry buy / after-tax yields (about 3% of all) keep a separate flag.
         df["has_buy_yield"] = df["buy_yield"].notna().astype(int)
         df["mat_date"], df["isu_date"], df["base_date"] = df["mat_dt"], df["isu_dt"], df["info_base_dt"]
         df["remaining_years"] = (df["remaining_days"] / 365.0).round(2)
         df["issuer_name"] = df["pd_pbcm"].map(clean_text)
         df["pd_nm"] = df["pd_nm"].map(clean_text)
-        # 한 종목이 여러 행일 수 있다: 장내/장외 시장 구분 + 장외 판매 LOT(info_seq).
-        # 307종목은 LOT 마다 매수수익률·단가가 실제로 다르므로 행을 합치면 안 된다.
-        # 대신 종목 수를 세는 질의를 도구 계층에서 잡아준다(agent/tools.py 의 단위 경고).
+        # One issue can span several rows: exchange vs OTC market + OTC sales LOT (info_seq).
+        # For 307 issues the buy yield and unit price really differ per LOT, so the rows must not be merged.
+        # Instead the tool layer catches queries that count issues (the unit warning in agent/tools.py).
     elif table == "etf_kr":
         df["product_type"] = df["pd_grp_no"].map(lambda g: "국내ETN" if g == "ETN" else "국내ETF")
-        # 상장 종료일이 9999-12-31 이면 상장 유지 중. 거래정지(pd_tr_yn=1)만 제외한다.
+        # A listing end date of 9999-12-31 means still listed.  Only trading halts (pd_tr_yn=1) are excluded.
         df["is_listed"] = (df["pd_lste_dt"].isna() | (df["pd_lste_dt"] > df["du_upt_dt"])).astype(int)
         df["is_on_sale"] = (df["is_listed"].astype(bool) & (df["pd_tr_yn"].fillna("0") != "1")).astype(int)
         df["manager_name"] = df["cu_fund_mgmt_co"].map(lambda v: (lx.manager_canonical(v) or lx.manager_for_product_name(v) or clean_text(v)) if isinstance(v, str) else None)
@@ -112,20 +113,20 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         df["is_on_sale"] = df["sale_yn"].map(to_flag)
         df["itm_nm"] = df["itm_nm"].map(clean_text)
         df["fund_family"] = df["itm_nm"].map(lambda v: fund_family_key(v) if isinstance(v, str) else None)
-        # 운용사는 상품명이 아니라 주최측이 준 코드에서 읽는다.  상품명 접두어 매칭은 이름이
-        # 운용사 브랜드로 시작할 때만 맞는다: 23,676행 중 17,660행(74.6%)만 풀리고 6,016행이
-        # 통째로 NULL 이 된다.  반면 or_co_xtn_itt_cd(운용회사대외기관코드)는 원천이 전 행에
-        # 채워 보내주며 275개 코드로 운용사를 구분한다 — 추정할 필요가 없는 값이 이미 있는데
-        # 이름을 보고 짐작하고 있었던 것이다.
-        # 다만 코드→운용사명 표는 원천에 없으므로 데이터 자체에서 만든다.  이름으로 이미 풀린
-        # 행을 코드별로 묶으면 이름이 붙은 코드 89개 중 72개(81%)가 단일 이름으로 수렴하므로,
-        # 코드마다 최빈 이름을 그 코드의 정식 명칭으로 삼는다.  동률이면 임의로 고르지 않고
-        # 비워 둔다 — 틀린 운용사명은 NULL 보다 나쁘다.  외부 표를 손으로 적지 않고 주최측이
-        # 준 값만으로 NULL 6,016행 중 3,938행이 회복된다.
-        # 이름으로 풀린 값은 절대 덮어쓰지 않으며, 어느 쪽에서 왔는지는 manager_source 에 남긴다.
-        # 파이썬 리스트로 다루는 이유: Series.map 이 돌려준 None 은 pandas 가 str dtype 의
-        # NaN 으로 바꾸는데, NaN 은 truthy 라서 `이름 or 코드` 식 폴백이 조용히 전부 '이름'
-        # 으로 판정된다.  결측은 반드시 `is None` 으로만 본다.
+        # The manager is read from the code the organizers supplied, not from the product name.  Matching a
+        # product-name prefix only works when the name starts with a manager brand: just 17,660 of 23,676 rows
+        # (74.6%) resolve and 6,016 rows are NULL outright.  or_co_xtn_itt_cd (the management company's external
+        # institution code), by contrast, is filled on every row by the source and tells managers apart with
+        # 275 codes — a value that needs no guessing was already there while we were guessing from names.
+        # The code -> manager-name table is not in the source, though, so it is built from the data itself.
+        # Grouping the rows already resolved by name per code, 72 of the 89 named codes (81%) converge on a
+        # single name, so each code's most frequent name becomes that code's canonical name.  On a tie nothing
+        # is picked arbitrarily; it stays empty — a wrong manager name is worse than NULL.  Without hand-writing
+        # any external table, the organizers' values alone recover 3,938 of the 6,016 NULL rows.
+        # A value resolved by name is never overwritten, and manager_source records where each value came from.
+        # Why plain Python lists: pandas turns a None returned by Series.map into NaN for a str dtype, and NaN
+        # is truthy, so a `name or code` fallback silently judges every row as 'name'.  Missing values are
+        # only ever tested with `is None`.
         by_name = [lx.manager_for_product_name(v) if isinstance(v, str) else None for v in df["itm_nm"]]
         codes = [c if isinstance(c, str) else None for c in df["or_co_xtn_itt_cd"]]
         tally: dict[str, Counter] = defaultdict(Counter)
@@ -135,7 +136,7 @@ def _derive(table: str, df: pd.DataFrame, lx: Lexicon) -> pd.DataFrame:
         code_to_name: dict[str, str] = {}
         for code, cnt in tally.items():
             top = cnt.most_common(2)
-            if len(top) == 1 or top[0][1] > top[1][1]:  # 동률이면 매핑하지 않는다
+            if len(top) == 1 or top[0][1] > top[1][1]:  # no mapping on a tie
                 code_to_name[code] = top[0][0]
         by_code = [code_to_name.get(c) if c is not None else None for c in codes]
         df["manager_name"] = [n if n is not None else c for n, c in zip(by_name, by_code)]

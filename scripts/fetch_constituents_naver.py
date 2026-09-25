@@ -51,10 +51,11 @@ CACHE_DIR = ROOT / "data" / "external" / "cache" / "naver_etf"
 FAILURES_JSON = CACHE_DIR / "_failures.json"
 
 ETF_TABLE = "v_etf_kr"
-# company_code is the constituent's own stock code as the source reports it (005930 for 삼성전자,
-# 005935 for 삼성전자우).  It used to be dropped, which left the name as the only identity and forced
-# downstream code to guess: 'LG' was matched to 신한금융지주 and 'KT' to SK텔레콤 by substring.  Keep the
-# key the source hands us — it is the one field that cannot be reinterpreted.
+# company_code is the constituent's own stock code as the source reports it (005930 for 삼성전자 [Samsung
+# Electronics], 005935 for 삼성전자우 [its preferred share]).  It used to be dropped, which left the name as the only
+# identity and forced downstream code to guess: 'LG' was matched to 신한금융지주 [Shinhan Financial Group] and 'KT'
+# to SK텔레콤 [SK Telecom] by substring.  Keep the key the source hands us — it is the one field that cannot be
+# reinterpreted.
 CSV_HEADER = [
     "etf_id", "etf_table", "ticker", "etf_name", "company_code", "company_id", "company_name",
     "weight_pct", "as_of", "source",
@@ -70,7 +71,7 @@ URL_ETF_ANALYSIS = "https://m.stock.naver.com/api/stock/{ticker}/etfAnalysis"
 URL_COINFO = "https://finance.naver.com/item/coinfo.naver?code={ticker}"
 URL_WISEREPORT = "https://navercomp.wisereport.co.kr/v2/ETF/index.aspx?cmp_cd={ticker}"
 
-# Rows skipped only when weight is missing AND the name is one of these.
+# Rows skipped only when weight is missing AND the name is one of these (KRW cash, creation cash, USD, futures).
 SKIP_NAMES_IF_NO_WEIGHT = {"원화현금", "설정현금액", "USD", "선물"}
 
 # Corporate suffix tokens stripped for the secondary ("core") name match.
@@ -85,7 +86,7 @@ CORE_SUFFIX_RE = re.compile(
 # Normalisation / company mapping
 # --------------------------------------------------------------------------------------
 def normalize(s: str) -> str:
-    """NFKC -> lowercase -> drop whitespace -> strip (주)/주식회사."""
+    """NFKC -> lowercase -> drop whitespace -> strip (주)/주식회사 (the Korean 'Co., Ltd.' markers)."""
     s = unicodedata.normalize("NFKC", str(s or ""))
     s = s.lower()
     s = re.sub(r"\s+", "", s)

@@ -50,11 +50,11 @@ def test_us_treasury_is_not_korea_treasury():
         "한화 PLUS 미국S&P500미국채혼합50액티브증권상장지수투자신탁(채권혼합-재간접형)",
         "메리츠증권 메리츠 미국채30년 상장지수증권(H) 제37호",
         "삼성 KODEX 미국10년국채액티브증권상장지수투자신탁[채권-재간접형](H)",
-        "삼성누버거버먼이머징단기채권증권자투자신탁",  # 신흥국채권 -> '국채' 는 신흥국+채권의 경계에 걸친다
+        "삼성누버거버먼이머징단기채권증권자투자신탁",  # 신흥국채권 -> '국채' straddles the 신흥국+채권 boundary
         "미래에셋 아시아신흥국채권혼합증권자투자신탁",
     ):
         assert "kr_treasury" not in {t.id for t in lx.match_themes(name)}, name
-    # 국고채/국공채/국채선물 은 그대로 국고채 테마
+    # 국고채/국공채/국채선물 still map to the 국고채 (Korea treasury) theme
     for name in ("KB RISE 국채선물10년증권상장지수투자신탁(채권-파생형)", "삼성 KODEX 국고채3년증권상장지수투자신탁"):
         assert "kr_treasury" in {t.id for t in lx.match_themes(name)}, name
 
@@ -76,7 +76,7 @@ def test_manager_brand_in_a_product_name_is_not_a_theme():
     # 메리츠 != 리츠, 한국투자 != 한국
     assert "reits" not in {t.id for t in lx.match_themes("메리츠증권 메리츠 인버스 천연가스 선물 상장지수증권(H) 제44호")}
     assert "korea" not in {t.id for t in lx.match_themes("한국투자 ACE 미국배당귀족증권자투자신탁")}
-    # 브랜드가 아닌 곳에 나온 리츠는 그대로 매칭된다
+    # 리츠 outside a brand name still matches
     assert "reits" in {t.id for t in lx.match_themes("미래에셋 TIGER 글로벌리츠부동산자투자신탁")}
 
 
@@ -95,7 +95,7 @@ def test_new_themes_resolve():
     }
     for theme_id, name in cases.items():
         assert theme_id in {t.id for t in lx.match_themes(name)}, name
-    # '수소' 는 '필수소비재' 안에서는 걸리지 않는다
+    # '수소' does not fire inside '필수소비재'
     assert "hydrogen" not in {t.id for t in lx.match_themes("KODEX 필수소비재")}
 
 
@@ -103,5 +103,5 @@ def test_ascii_alias_may_be_followed_by_digits_but_not_absorbed():
     lx = Lexicon.load(ENRICH)
     assert "target_date" in {t.id for t in lx.match_themes("KIWOOM 적격TDF2030액티브증권상장지수투자신탁")}
     assert "mmf" in {t.id for t in lx.match_themes("외환스타신종MMF3")}
-    # 여전히 단어 경계는 지킨다
+    # word boundaries are still respected
     assert "ai" not in {t.id for t in lx.match_themes("Daily Value Fund")}

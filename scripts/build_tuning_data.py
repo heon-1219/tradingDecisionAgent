@@ -1,23 +1,26 @@
-"""CLOVA Studio 튜닝용 학습 데이터 생성기.
+"""Training-data generator for CLOVA Studio tuning.
 
-중요한 제약: CLOVA Studio 는 **튜닝과 function calling 을 동시에 쓸 수 없다**
-("이미지 입력, 튜닝, Function calling, Structured Outputs, 추론 기능은 동시 이용이 불가").
-따라서 도구를 호출하는 Agent 루프(HCX-005, function calling)는 그대로 두고,
-도구가 필요 없는 text→text 구간만 튜닝 모델로 특화한다.  이 스크립트는 그 세 구간의 학습셋을 만든다.
+This is competition-era tooling: it targets CLOVA Studio's tuning-data format and is not used by the Gemini edition.
 
-  nl2sql  질문(+스키마)            -> SQL          도구 없이 순수 텍스트 변환
-  answer  질문 + 근거 블록          -> 최종 답변     근거 표기·단위·확인불가 문체 학습
-  intent  질문                     -> 상태 + 대상 테이블  답변불가 5문항 대비 분류기
+Key constraint: CLOVA Studio **cannot use tuning and function calling at the same time**
+("image input, tuning, function calling, Structured Outputs and reasoning cannot be used together").
+So the tool-calling agent loop (HCX-005, function calling) is left as it is, and only the text→text stages that
+need no tools are specialised with a tuned model.  This script builds the training sets for those three stages.
 
-핵심 아이디어: 정답을 사람이 쓰지 않는다.  템플릿에 실제 데이터 값을 넣어 질문을 만들고,
-같은 템플릿이 만든 SQL 을 **실제로 실행해서** 결과가 나오는 쌍만 남긴다(= 검증된 정답).
-`data/eval/groundtruth.jsonl` 과 같은 원리를 대량으로 돌리는 것이다.
+  nl2sql  question (+schema)          -> SQL           pure text conversion, no tools
+  answer  question + evidence block   -> final answer  learns evidence citation, units, the cannot-confirm style
+  intent  question                    -> status + target tables  classifier to prepare for the 5 unanswerable questions
+
+Key idea: no human writes the answers.  Templates are filled with real data values to make the questions, and the
+SQL the same template produced is **actually executed**; only pairs that return results are kept (= verified answers).
+It is the principle behind `data/eval/groundtruth.jsonl`, run at scale.
 
   python scripts/build_tuning_data.py --task all --out data/tuning
   python scripts/build_tuning_data.py --task nl2sql --limit 500
 
-출력: CLOVA 규격 JSONL({"C_ID","T_ID","Text","Completion","System_Prompt"})과 4컬럼 CSV.
-문서 기준: UTF-8, 한 행 8,000자 이하, 최소 100행·권장 1,000~100,000행, 분류는 카테고리당 200행 이상.
+Output: CLOVA-format JSONL ({"C_ID","T_ID","Text","Completion","System_Prompt"}) and a 4-column CSV.
+Per the docs: UTF-8, at most 8,000 characters per row, at least 100 rows (1,000~100,000 recommended), and at least
+200 rows per category for classification.
 """
 from __future__ import annotations
 
@@ -83,7 +86,7 @@ def vals(rdb: RDB, sql: str) -> list:
 
 
 def runs(rdb: RDB, sql: str, need_rows: bool = True) -> list | None:
-    """SQL 을 실행해 결과가 있으면 행을 반환. 학습쌍의 '정답 검증' 단계."""
+    """Run the SQL and return its rows if there are any.  This is the 'answer verification' step for training pairs."""
     try:
         rows = rdb.fetch_all(sql if " limit " in sql.lower() else sql + " LIMIT 50")
     except Exception:  # noqa: BLE001
@@ -91,7 +94,7 @@ def runs(rdb: RDB, sql: str, need_rows: bool = True) -> list | None:
     if need_rows and not rows:
         return None
     if rows and rows[0][0] in (None, 0) and len(rows) == 1 and len(rows[0]) == 1:
-        return None  # COUNT 가 0 이면 학습 가치가 없다
+        return None  # a COUNT of 0 has no training value
     return rows
 
 
@@ -107,7 +110,7 @@ _ENDINGS = [
 
 
 def variants(q: str, k: int = 3) -> list[str]:
-    """같은 질문의 말투 변형. 평가 질의의 표현이 우리 템플릿과 다를 것이므로 다양성을 넣는다."""
+    """Phrasing variants of one question.  Evaluation queries will be worded differently from our templates, so add variety."""
     out = [q]
     for tail, alts in _ENDINGS:
         if q.endswith(tail):
@@ -127,7 +130,7 @@ NAME_COLS = ("pd_abrv_nm", "pd_nm", "itm_nm", "상품명", "ticker", "pd_no", "p
 
 
 def fmt_cell(col: str, v) -> str | None:
-    """컬럼 이름에 맞는 단위로 값을 표기한다. 단위를 틀리면 학습 라벨이 오염된다."""
+    """Render the value in the unit its column name calls for.  A wrong unit contaminates the training label."""
     if v is None:
         return None
     if col in PCT_COLS:
@@ -262,7 +265,7 @@ def gen_nl2sql(rdb: RDB, limit: int) -> list[Row]:
                  "SELECT COUNT(*) FROM v_fund_pub WHERE is_hedged=1 AND or_attr_desc='채권형' AND ovrs_fd_desc='해외' "
                  "AND is_on_sale=1 AND product_type='공모펀드'"))
 
-    for k in (3, 5, 10):  # 교차질의 — 주최측이 예고한 유형
+    for k in (3, 5, 10):  # cross-table queries — a type the organizers announced
         fams.append(([f"국내 ETF와 공모펀드를 합쳐서 1년 수익률 상위 {k}개를 알려줘",
                       f"ETF와 펀드를 같이 놓고 최근 1년 수익률 {k}위까지 비교해줘"],
                      "SELECT 구분, 상품명, 수익률1년 FROM ("
@@ -290,7 +293,7 @@ def gen_answer(rdb: RDB, nl2sql_rows: list[Row], limit: int) -> list[Row]:
     rows: list[Row] = []
     seen: dict[str, int] = {}
     for r in nl2sql_rows:
-        # 같은 정답(SQL)에 서로 다른 말투의 질문을 최대 3개까지 붙여 표현 robustness 를 학습시킨다
+        # attach up to 3 differently worded questions to the same answer (SQL) to train robustness to phrasing
         if seen.get(r.completion, 0) >= 3:
             continue
         try:
@@ -325,7 +328,7 @@ def gen_answer(rdb: RDB, nl2sql_rows: list[Row], limit: int) -> list[Row]:
         if len(rows) >= limit:
             break
 
-    # 확인불가 문체도 함께 학습시킨다 (배점이 걸린 행동)
+    # also train the cannot-confirm style (a behaviour that is scored)
     declines = [
         ("신용등급 AAAA인 채권을 찾아줘", "근거: 없음 (온톨로지 검증 결과 'AAAA'는 존재하지 않는 신용등급)",
          "제공된 데이터로는 확인할 수 없습니다. 신용등급 'AAAA'는 존재하지 않는 값입니다. "
@@ -345,7 +348,7 @@ def gen_answer(rdb: RDB, nl2sql_rows: list[Row], limit: int) -> list[Row]:
          "이름이 비슷한 상품으로는 KODEX 로봇액티브, KODEX 미국휴머노이드로봇 등이 있습니다. 이 중 찾으시는 상품이 있나요?"),
     ]
     for q, ev, ans in declines:
-        for _ in range(6):  # 확인불가 문체는 반복 노출이 필요하다
+        for _ in range(6):  # the cannot-confirm style needs repeated exposure
             rows.append(Row(SYS_ANSWER, f"질문: {q}\n\n근거:\n{ev}", ans))
     return rows
 
@@ -360,7 +363,7 @@ def gen_intent(rdb: RDB, nl2sql_rows: list[Row], lexicon: Lexicon, resolver: Ent
         if len(rows) >= int(limit * 0.6):
             break
 
-    # 존재하지 않는 상품명: 실존 상품명의 테마 토큰을 바꿔서 만들고, 실제로 없는지 색인으로 확인
+    # Nonexistent product names: swap the theme token of a real product name, then check against the index that it really doesn't exist
     real = [n for n in vals(rdb, "select pd_abrv_nm from v_etf_kr where is_on_sale=1 and pd_abrv_nm is not null") if " " in n]
     swaps = ["양자컴퓨팅", "우주광물", "합성생물학", "핵융합", "수소항공", "심해채굴", "뇌공학", "위성인터넷"]
     made = 0
@@ -405,7 +408,7 @@ def gen_intent(rdb: RDB, nl2sql_rows: list[Row], lexicon: Lexicon, resolver: Ent
         ("연금으로 살 만한 거 있어?", "clarify", "none", "상품군과 위험 성향 조건이 불명확"),
     ]
     for q, st, tb, why in fixed:
-        for _ in range(13):  # 분류는 카테고리당 200행 이상 권장
+        for _ in range(13):  # classification: 200+ rows per category recommended
             rows.append(Row(SYS_INTENT, q, f"status={st}; tables={tb}; reason={why}"))
     return rows
 
@@ -426,7 +429,7 @@ def write(rows: list[Row], out_dir: pathlib.Path, name: str) -> None:
         for i, r in enumerate(kept):
             w.writerow([i, 0, r.text, r.completion])
     dropped = len(rows) - len(kept)
-    print(f"  {name:8} {len(kept):>6}행 → {jsonl.name}, {name}.csv" + (f"  (8,000자 초과 {dropped}행 제외)" if dropped else ""))
+    print(f"  {name:8} {len(kept):>6} rows → {jsonl.name}, {name}.csv" + (f"  ({dropped} rows over 8,000 chars dropped)" if dropped else ""))
 
 
 def main() -> int:
@@ -439,7 +442,7 @@ def main() -> int:
     s = get_settings()
     rdb = RDB(s.store_path)
     out = pathlib.Path(a.out)
-    print(f"학습 데이터 생성 (검증: 모든 SQL 을 실제 실행해 결과가 있는 쌍만 채택)")
+    print(f"Generating training data (verification: every SQL is actually executed; only pairs with results are kept)")
 
     nl = gen_nl2sql(rdb, a.limit)
     if a.task in ("all", "nl2sql"):
@@ -450,7 +453,7 @@ def main() -> int:
         lx = Lexicon.load(s.enrichment_dir)
         resolver = EntityResolver(SearchIndex.from_rdb(rdb), lx)
         write(gen_intent(rdb, nl, lx, resolver, a.limit), out, "intent")
-    print(f"\nCLOVA Studio 업로드 규격: UTF-8, 한 행 8,000자 이하, 최소 100행 / 권장 1,000~100,000행.")
+    print(f"\nCLOVA Studio upload spec: UTF-8, at most 8,000 chars per row, at least 100 rows / 1,000~100,000 recommended.")
     return 0
 
 

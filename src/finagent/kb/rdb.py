@@ -41,13 +41,13 @@ class RDB:
         s = (sql or "").strip().rstrip(";").strip()
         s = re.sub(r"^```(?:sql)?\s*|\s*```$", "", s, flags=re.I).strip()
         if not s:
-            raise SQLGuardError("빈 SQL입니다.")
+            raise SQLGuardError("Empty SQL.")
         if ";" in s:
-            raise SQLGuardError("한 번에 하나의 SELECT 문만 실행할 수 있습니다.")
+            raise SQLGuardError("Only one SELECT statement can be run at a time.")
         if not re.match(r"^(select|with)\b", s, re.I):
-            raise SQLGuardError("SELECT/WITH 문만 허용됩니다.")
+            raise SQLGuardError("Only SELECT/WITH statements are allowed.")
         if _FORBIDDEN.search(s):
-            raise SQLGuardError("읽기 전용 질의만 허용됩니다.")
+            raise SQLGuardError("Only read-only queries are allowed.")
         m = re.search(r"\blimit\s+(\d+)\s*$", s, re.I)
         if m is None:
             s = f"{s} LIMIT {self.row_limit + 1}"
@@ -67,10 +67,10 @@ class RDB:
                 rows = [dict(r) for r in cur.fetchall()]
             except sqlite3.OperationalError as e:
                 if "interrupted" in str(e).lower():
-                    raise SQLGuardError(f"질의 시간 초과({self.timeout_sec:.0f}초). 조건을 좁혀 주세요.") from e
-                raise SQLGuardError(f"SQL 오류: {e}") from e
+                    raise SQLGuardError(f"Query timed out ({self.timeout_sec:.0f}s). Narrow the conditions.") from e
+                raise SQLGuardError(f"SQL error: {e}") from e
             except sqlite3.DatabaseError as e:
-                raise SQLGuardError(f"SQL 오류: {e}") from e
+                raise SQLGuardError(f"SQL error: {e}") from e
             finally:
                 self._con.set_progress_handler(None, 0)
         truncated = len(rows) > self.row_limit
@@ -100,7 +100,7 @@ class RDB:
 
     def columns(self, view: str) -> list[str]:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", view):
-            raise SQLGuardError("잘못된 테이블 이름")
+            raise SQLGuardError("Invalid table name")
         return [r[1] for r in self.fetch_all(f"pragma table_info({view})")]
 
     def meta(self) -> dict[str, dict]:
