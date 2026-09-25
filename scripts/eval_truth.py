@@ -8,6 +8,7 @@ number instead of a subjective read of the answers.
 
   python scripts/eval_truth.py --compute                      # compute and print the answer key only (no LLM needed)
   python scripts/eval_truth.py --base http://127.0.0.1:8000   # ask the server and grade the answers
+  python scripts/eval_truth.py --file data/eval/groundtruth_en.jsonl --base http://127.0.0.1:8000  # English answer key
 
 Checks are deliberately loose about formatting: numbers match with or without thousands separators,
 names match after whitespace/case normalisation, and an "cannot_confirm" item passes when the answer
