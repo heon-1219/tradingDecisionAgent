@@ -715,9 +715,9 @@ function onEvent(e) {
     const t = d.text || "";
     // tool call/result lines are already rendered richly above; keep the rest.
     // These patterns match the server's own step text (data, not interface text) — do not translate.
-    if (/^라운드 \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
-    const fix = /보정|명시|경고/.test(t);
-    const err = /오류|초과|거부|실패/.test(t);
+    if (/^(?:라운드|Round) \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
+    const fix = /보정|명시|경고|corrected|stated|warning/i.test(t);
+    const err = /오류|초과|거부|실패|error|timed out|exceeded|rejected|failed|refused/i.test(t);
     li(err ? "err" : (fix ? "fix" : "step"), at, `<span class="${err ? "" : (fix ? "warnline" : "")}">${esc(t)}</span>`);
   } else if (d.type === "done") {
     finish(d);
