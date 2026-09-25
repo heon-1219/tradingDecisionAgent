@@ -48,7 +48,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `question` | string | Yes | Same as the request value |
 | `retrieved_context` | string | Yes | Evidence for the answer. Each `[Evidence n]` block lists the referenced table (Korean name · view name), data base date, **row count**, the SQL/SPARQL/search query that was executed, and the referenced product codes and names. When external documents are used: document title and source.<br>The count is the **total number of rows that match the filter**; when the displayed rows are cut at the 200-row cap, it is written separately as "N total (200 shown)" |
 | `think_trace` | string | Yes | Numbered processing steps: pre-analysis (entities, themes, ontology validation) → each round's tool calls and result sizes → final status and elapsed time |
-| `answer` | string | Yes | Final answer, in the language of the question (English by default; Korean when the question is in Korean). If the data cannot confirm the answer, it starts with the fixed cannot-confirm sentence ("This cannot be confirmed from the provided data." in English, "제공된 데이터로는 확인할 수 없습니다" in Korean); if the conditions are ambiguous, it asks a clarifying question (ending with a question mark) |
+| `answer` | string | Yes | Final answer, in the language of the question (English by default; Korean when the question is in Korean). If the data cannot confirm the answer, it starts with the fixed cannot-confirm sentence ("This cannot be confirmed with the provided data." in English, "제공된 데이터로는 확인할 수 없습니다" in Korean); if the conditions are ambiguous, it asks a clarifying question (ending with a question mark) |
 
 ### JSON Schema
 
@@ -74,8 +74,8 @@ The example question is in Korean, so `answer` is in Korean; the labels in `retr
 {
   "question_id": "Q-001",
   "question": "현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘",
-  "retrieved_context": "[Evidence 1] 국내채권마스터 (v_bond_kr) · as of 2026-08-21 · 15,837 total (200 shown)\n  sql: SELECT DISTINCT pd_no, pd_nm, crd_grd, buy_yield, after_tax_yield, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY buy_yield DESC LIMIT 200\n  refs: KR350801G954 한국가스공사 394 | KR6056554B20 SK이노베이션10-4 | ...",
-  "think_trace": "1. Pre-analysis: no product mentions; credit rating 'AA-' is valid → crd_grd IN ('AAA','AA+','AA0','AA-')\n2. Round 1: sql_query(...) → 3120-char result, 200 of 15,837 rows shown\n3. Round 2: final_answer(status=answered)\n4. Final: status=answered, 1 evidence block, 14.2s elapsed",
+  "retrieved_context": "[Evidence 1] 국내채권마스터(v_bond_kr) · base date 2026-08-21 · 15837 rows\n  sql: SELECT DISTINCT pd_no, pd_nm, crd_grd, buy_yield, after_tax_yield, mat_date FROM v_bond_kr WHERE is_sellable=1 AND curr_cd='KRW' AND crd_grd IN ('AAA','AA+','AA0','AA-') ORDER BY buy_yield DESC LIMIT 200\n  Refs: KR350801G954 한국가스공사 394 | KR6056554B20 SK이노베이션10-4 | ...",
+  "think_trace": "1. Pre-analysis: product mentions none\n2. Round 1: sql_query(...) → result 3120 chars, 15837 rows\n3. Round 2: final_answer(status=answered)\n4. Final: status=answered, 1 evidence, 14.2s",
   "answer": "현재 구매 가능한 원화 채권 중 신용등급 AA- 이상 종목은 총 15,837건입니다 (국내채권마스터, 기준일 2026-08-21). 매수수익률이 수록된 종목(has_buy_yield=1) 기준 상위: ... (근거: 국내채권마스터 · 2026-08-21)"
 }
 ```
@@ -95,7 +95,7 @@ The question asks: "Find bonds with a credit rating of AAAA."
   "question_id": "Q-031",
   "question": "신용등급 AAAA인 채권 찾아줘",
   "retrieved_context": "No data referenced",
-  "think_trace": "1. Pre-analysis: no product mentions; 1 ontology violation\n2. Round 1: final_answer(status=cannot_confirm)\n3. Final: status=cannot_confirm, 0 evidence blocks, 6.1s elapsed",
+  "think_trace": "1. Pre-analysis: product mentions none; 1 ontology violation(s)\n2. Round 1: final_answer(status=cannot_confirm)\n3. Final: status=cannot_confirm, 0 evidence, 6.1s",
   "answer": "제공된 데이터로는 확인할 수 없습니다. 신용등급 'AAAA'는 존재하지 않는 값입니다. 유효한 신용등급: AAA, AA+, AA0, AA-, A+, ... D"
 }
 ```
@@ -103,7 +103,7 @@ The question asks: "Find bonds with a credit rating of AAAA."
 Asked in English, the answer reads:
 
 ```json
-"answer": "This cannot be confirmed from the provided data. 'AAAA' is not a valid credit rating. Valid credit ratings: AAA, AA+, AA0, AA-, A+, ... D"
+"answer": "This cannot be confirmed with the provided data. 'AAAA' is not a valid credit rating. Valid credit ratings: AAA, AA+, AA0, AA-, A+, ... D"
 ```
 
 ## Error handling
@@ -161,7 +161,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `question` | string | 필수 | 요청값 그대로 |
 | `retrieved_context` | string | 필수 | 답변 근거. `[근거 n]` 블록마다 참조 테이블(한글명·뷰명)·데이터 기준일·**건수**·실행한 SQL/SPARQL/검색어·참조 상품코드와 상품명. 외부 문서를 쓴 경우 문서 제목·출처.<br>건수는 **필터에 걸린 전체 건수**이며, 표시 행이 200행 상한에 잘린 경우 "전체 N건 (표시 200건)"으로 구분해 적습니다 |
 | `think_trace` | string | 필수 | 번호가 매겨진 처리 과정: 사전분석(엔티티·테마·온톨로지 검증) → 각 라운드의 도구 호출과 결과 크기 → 최종 상태·소요 시간 |
-| `answer` | string | 필수 | 최종 답변. 질문의 언어를 따릅니다(기본 영어, 한국어로 쓴 질문이면 한국어). 확인 불가 시 고정 문장으로 시작(한국어 "제공된 데이터로는 확인할 수 없습니다", 영어 "This cannot be confirmed from the provided data."), 조건 모호 시 역질문(물음표로 끝남) |
+| `answer` | string | 필수 | 최종 답변. 질문의 언어를 따릅니다(기본 영어, 한국어로 쓴 질문이면 한국어). 확인 불가 시 고정 문장으로 시작(한국어 "제공된 데이터로는 확인할 수 없습니다", 영어 "This cannot be confirmed with the provided data."), 조건 모호 시 역질문(물음표로 끝남) |
 
 ### JSON Schema
 
