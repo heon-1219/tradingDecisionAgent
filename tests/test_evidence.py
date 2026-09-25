@@ -7,6 +7,7 @@ from finagent.research.evidence import (
     ResearchResult,
     SourceRecord,
     sanitize_untrusted,
+    strip_hidden_markup,
     wrap_untrusted,
 )
 from finagent.store.appdb import AppDB
@@ -106,6 +107,37 @@ def test_sanitize_untrusted_keeps_aria_hidden_false():
     raw = '<span aria-hidden="false">Still shown</span>'
     out = sanitize_untrusted(raw)
     assert "Still shown" in out
+
+
+# --- strip_hidden_markup (structure-preserving: no whitespace collapse, no truncation) ---
+
+
+def test_strip_hidden_markup_removes_hidden_block_preserves_paragraph_breaks():
+    raw = "Visible one.\n\n<span style=\"display:none\">Secret</span>\n\nVisible two."
+    out = strip_hidden_markup(raw)
+    assert "Secret" not in out
+    assert "Visible one." in out
+    assert "Visible two." in out
+    # paragraph breaks (blank lines) survive, unlike sanitize_untrusted's whitespace collapse
+    assert "\n\n" in out
+
+
+def test_strip_hidden_markup_does_not_collapse_whitespace_or_truncate():
+    out = strip_hidden_markup("a\n\n\n   b")
+    assert out == "a\n\n\n   b"
+
+
+def test_strip_hidden_markup_cutting_after_is_safe_even_mid_hidden_tag():
+    # Simulates the real bug: a naive caller truncates BEFORE stripping, landing inside a hidden
+    # element's opening tag - the closing tag is gone, so _HIDDEN_BLOCK_RE can't match and the
+    # payload leaks. Stripping first (this function), THEN cutting, is safe at any cut point
+    # because the hidden element (tags and contents) no longer exists to be cut into.
+    raw = 'Visible.<span style="display:none">Secret payload</span> more.'
+    stripped = strip_hidden_markup(raw)
+    assert "Secret payload" not in stripped
+    # Even a cut that would have landed mid-tag in the raw text is safe post-strip.
+    for cut in range(1, len(stripped)):
+        assert "Secret payload" not in stripped[:cut]
 
 
 def test_wrap_untrusted_format():

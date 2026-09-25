@@ -22,7 +22,14 @@ from urllib.parse import urlsplit
 
 from rank_bm25 import BM25Okapi
 
-from .evidence import EvidenceStore, ResearchResult, SourceRecord, sanitize_untrusted, wrap_untrusted
+from .evidence import (
+    EvidenceStore,
+    ResearchResult,
+    SourceRecord,
+    sanitize_untrusted,
+    strip_hidden_markup,
+    wrap_untrusted,
+)
 from .http import HttpClient, HttpError
 
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -34,6 +41,8 @@ _TTL_SEARCH_DEFAULT = 12 * 3600
 _TTL_FETCH = 12 * 3600
 
 _SNIPPET_MAX_CHARS = 1000  # per-result search snippet cap, independent of fetch's max_chars
+_TITLE_MAX_CHARS = 200
+_PUBLISHED_MAX_CHARS = 40
 
 _WORD_RE = re.compile(r"\w+")
 
@@ -96,10 +105,16 @@ def _hostname(url: str | None) -> str | None:
 
 
 def _focus_paragraphs(text: str, focus_query: str, max_chars: int) -> str:
-    """Keep the most BM25-relevant blank-line-separated paragraphs, up to max_chars total."""
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    """Keep the most BM25-relevant blank-line-separated paragraphs, up to max_chars total.
+
+    Strips hidden markup *before* splitting/selecting/cutting (never after): a hidden element
+    straddling a cut point would otherwise lose its closing tag and leak as visible text. See
+    `evidence.strip_hidden_markup`.
+    """
+    stripped = strip_hidden_markup(text)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", stripped) if p.strip()]
     if not paragraphs:
-        return text[:max_chars]
+        return stripped[:max_chars]
     if len(paragraphs) == 1:
         return paragraphs[0][:max_chars]
 
@@ -194,22 +209,40 @@ class WebSearch:
             url = r.get("url")
             host = _hostname(url)
             tier = _tier_for_host(host)
-            published = r.get("published_date")
-            clean = sanitize_untrusted(r.get("content") or "", max_chars=_SNIPPET_MAX_CHARS)
+            clean_content = sanitize_untrusted(r.get("content") or "", max_chars=_SNIPPET_MAX_CHARS)
+
+            # published_date is externally sourced same as everything else here - sanitize it and
+            # keep it inside the <untrusted> boundary rather than appending it to the line raw
+            # (an unsanitized field placed outside the wrapper would let a malicious
+            # published_date inject text - or a literal "</untrusted>" - that the model sees as
+            # if it were trusted).
+            raw_published = r.get("published_date")
+            clean_published = (
+                sanitize_untrusted(str(raw_published), max_chars=_PUBLISHED_MAX_CHARS)
+                if raw_published
+                else None
+            )
+            body = f"{clean_content} ({clean_published})" if clean_published else clean_content
+
+            title = (
+                sanitize_untrusted(r.get("title") or "", max_chars=_TITLE_MAX_CHARS)
+                or url
+                or "Untitled"
+            )
+
             source = self._evidence.add(
                 session_id,
                 connector="websearch",
-                title=r.get("title") or url or "Untitled",
+                title=title,
                 url=url,
                 publisher=host,
                 tier=tier,
-                published_at=published,
-                snippet=clean,
+                published_at=clean_published,
+                snippet=clean_content,
                 untrusted=True,
             )
             sources.append(source)
-            suffix = f" ({published})" if published else ""
-            lines.append(f"[{source.id}] {wrap_untrusted(source.id, clean)}{suffix}")
+            lines.append(f"[{source.id}] {wrap_untrusted(source.id, body)}")
 
         if not lines:
             return ResearchResult(text=f"No web search results for '{query}'.", sources=[])
@@ -238,7 +271,9 @@ class WebSearch:
         if focus_query:
             body = _focus_paragraphs(raw_text, focus_query, max_chars)
         else:
-            body = raw_text[:max_chars]
+            # Strip hidden markup before cutting to max_chars, not after - see
+            # evidence.strip_hidden_markup for why cutting first is unsafe.
+            body = strip_hidden_markup(raw_text)[:max_chars]
 
         clean = sanitize_untrusted(body, max_chars=max_chars)
         source = self._evidence.add(

@@ -53,14 +53,28 @@ _ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
 _WS_RE = re.compile(r"\s+")
 
 
-def sanitize_untrusted(text: str, max_chars: int = 4000) -> str:
-    """Strip markup, hidden/zero-width text and comments out of externally-sourced text."""
+def strip_hidden_markup(text: str) -> str:
+    """Strip markup, hidden/zero-width text and comments, without collapsing whitespace or
+    truncating.
+
+    Split out of `sanitize_untrusted` so a caller that needs to select or truncate a bounded
+    excerpt of untrusted text (e.g. by paragraph, or to a char budget) can strip hidden content
+    *first*, then cut. Cutting first and stripping second is unsafe: a cut landing between a
+    hidden element's opening and closing tag leaves `_HIDDEN_BLOCK_RE` nothing to match, and the
+    hidden payload survives in the truncated excerpt as if it were visible text.
+    """
     s = text or ""
     s = _COMMENT_RE.sub(" ", s)
     s = _SCRIPT_STYLE_RE.sub(" ", s)
     s = _HIDDEN_BLOCK_RE.sub(" ", s)
     s = _TAG_RE.sub(" ", s)
     s = _ZERO_WIDTH_RE.sub("", s)
+    return s
+
+
+def sanitize_untrusted(text: str, max_chars: int = 4000) -> str:
+    """Strip markup, hidden/zero-width text and comments out of externally-sourced text."""
+    s = strip_hidden_markup(text)
     s = _WS_RE.sub(" ", s).strip()
     return s[:max_chars].rstrip()
 
