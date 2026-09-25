@@ -1,5 +1,6 @@
 """Tool registry, orchestrator and API contract tests with a scripted stub LLM on a tiny store."""
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -7,8 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from finagent.agent.answer import (
-    CANNOT_PREFIX,
+    CANNOT_PREFIX_EN,
+    CANNOT_PREFIX_KO,
     Evidence,
+    fallback_answer,
     format_evidence,
     normalize_answer,
     strip_closing_offer,
@@ -140,9 +143,9 @@ async def test_orchestrator_answered_with_evidence(tiny_store, tmp_path):
     ]
     s = _state(tiny_store, StubLLM(script), tmp_path)
     resp = await s.orchestrator.answer("Q-001", "현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘")
-    assert resp.question_id == "Q-001" and "[근거 1]" in resp.retrieved_context and "v_bond_kr" in resp.retrieved_context
+    assert resp.question_id == "Q-001" and "[Evidence 1]" in resp.retrieved_context and "v_bond_kr" in resp.retrieved_context
     assert "final_answer(status=answered)" in resp.think_trace and "2종" in resp.answer
-    assert "'AA-' 유효" in s.llm.started[0][1]  # pre-analysis injected credit-grade hint
+    assert "'AA-' is valid" in s.llm.started[0][1]  # pre-analysis injected credit-grade hint
 
 
 async def test_orchestrator_invalid_grade_forces_cannot_confirm(tiny_store, tmp_path):
@@ -150,13 +153,55 @@ async def test_orchestrator_invalid_grade_forces_cannot_confirm(tiny_store, tmp_
     s = _state(tiny_store, StubLLM(script), tmp_path)
     resp = await s.orchestrator.answer("Q-X", "신용등급 AAAA인 채권 찾아줘")
     assert resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")
-    assert "온톨로지 위반" in s.llm.started[0][1] or "AAAA" in s.llm.started[0][1]
+    assert "신용등급 'AAAA'는 존재하지 않는 값입니다. 유효한 신용등급: AAA, AA+" in resp.answer   # Korean question, Korean text
+    assert "Ontology violation" in s.llm.started[0][1] and "AAAA" in s.llm.started[0][1]
+
+
+async def test_orchestrator_invalid_grade_in_an_english_question(tiny_store, tmp_path):
+    """The English credit-rating and risk-grade phrasings reach the same ontology check; the correction is English."""
+    script = [Turn("", [ToolCall("c1", "final_answer", {"status": "answered", "answer": "There are 3 AAAA bonds."})], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("Q-XE", "Find bonds with a credit rating of AAAA")
+    assert resp.answer.startswith(f"{CANNOT_PREFIX_EN} Credit rating 'AAAA' does not exist. Valid credit grades: AAA, AA+")
+    assert "3 AAAA bonds" not in resp.answer and "corrected to cannot_confirm" in resp.think_trace
+    o = s.orchestrator
+    for q in ("Which bonds are rated AAAA?", "Show me bonds rated AAAA or higher", "List AAAA or higher bonds"):
+        assert any("'AAAA' does not exist" in x for x in o.pre_analyze(q).invalid), q
+    for q in ("Show me ETFs with risk grade 7", "Which funds have a risk level of 7?", "grade 7 ETFs"):
+        assert any("Risk grade '7' does not exist" in x for x in o.pre_analyze(q).invalid), q
+    # valid values pass, and a lower-case article or a product name is not a rating
+    assert o.pre_analyze("How many KRW bonds are rated AA- or higher?").invalid == []
+    assert "'AA-' is valid" in o.pre_analyze("How many KRW bonds are rated AA- or higher?").text
+    assert o.pre_analyze("What is the fee of BondBloxx BB Rated USD High Yield Corp Bd ETF?").invalid == []
+    assert o.pre_analyze("Which ETFs have risk grade 1?").invalid == []
+    # Korean phrasing still behaves as before
+    assert o.pre_analyze("위험등급 7등급 ETF 알려줘").invalid and o.pre_analyze("위험등급 1등급 ETF 알려줘").invalid == []
 
 
 async def test_orchestrator_llm_error_falls_back(tiny_store, tmp_path):
     s = _state(tiny_store, StubLLM([Turn("boom", [], "error")]), tmp_path)
     resp = await s.orchestrator.answer("Q-E", "아무 질문")
-    assert "확인할 수 없습니다" in resp.answer and "LLM 오류" in resp.think_trace
+    assert "확인할 수 없습니다" in resp.answer and "LLM error" in resp.think_trace
+    assert "(LLM 응답 없음)" in resp.answer                       # Korean question: Korean fallback
+
+
+async def test_orchestrator_llm_error_falls_back_in_english(tiny_store, tmp_path):
+    s = _state(tiny_store, StubLLM([Turn("boom", [], "error")]), tmp_path)
+    resp = await s.orchestrator.answer("Q-EE", "What is the total fee of KODEX 200?")
+    assert resp.answer.startswith(CANNOT_PREFIX_EN) and "(no response from the LLM)" in resp.answer
+
+
+async def test_answer_language_line_reaches_the_model(tiny_store, tmp_path):
+    """The language is stated in the first user message; the (cached) system prompt stays identical."""
+    llm = StubLLM(script_factory=lambda q: [Turn("", [ToolCall("c", "final_answer", {"status": "answered", "answer": "x"})], "tool_use")])
+    s = _state(tiny_store, llm, tmp_path)
+    await s.orchestrator.answer("L-1", "Which domestic ETFs hold 에코프로비엠?")
+    await s.orchestrator.answer("L-2", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?")
+    (sys_en, user_en), (sys_ko, user_ko) = llm.started
+    assert user_en.startswith("Question: Which domestic ETFs hold 에코프로비엠?\nAnswer language: English\n")
+    assert user_ko.startswith("Question: 에코프로비엠을 편입한 국내 ETF는 몇 개인가요?\nAnswer language: Korean\n")
+    assert sys_en == sys_ko and "Answer language" in sys_en            # the rule is in the system prompt, the value is not
+    assert "answer language stated in the user message" in sys_en
 
 
 async def test_orchestrator_text_only_then_nudge(tiny_store, tmp_path):
@@ -176,7 +221,9 @@ def test_api_contract(tiny_store, tmp_path):
         assert set(body) == {"question_id", "question", "retrieved_context", "think_trace", "answer"}
         assert body["question_id"] == "Q-001" and body["answer"].startswith("답변")
         r2 = client.get("/answer", params={"question_id": "Q-002"})
-        assert r2.status_code == 200 and "question 파라미터" in r2.json()["answer"]
+        assert r2.status_code == 200 and set(r2.json()) == set(body)
+        assert r2.json()["answer"] == "The question parameter is required. E.g. /answer?question_id=Q-001&question=your+question"
+        assert r2.json()["think_trace"] == "Input validation: question parameter missing"
         h = client.get("/health").json()
         assert h["status"] == "ok" and h["kg_triples"] > 0
 
@@ -194,29 +241,63 @@ def test_api_never_500_on_orchestrator_crash(tiny_store, tmp_path):
     with TestClient(create_app(factory)) as client:
         r = client.get("/answer", params={"question_id": "Q", "question": "x"})
         assert r.status_code == 200 and "RuntimeError" in r.json()["think_trace"] and r.json()["answer"]
+        assert r.json()["think_trace"].startswith("Internal error: RuntimeError")
+        assert r.json()["answer"].startswith(CANNOT_PREFIX_EN) and "(internal_error)" in r.json()["answer"]
+        # the fallback follows the question's language
+        r = client.get("/answer", params={"question_id": "Q", "question": "판매중인 국내 ETF는 몇 개인가요?"})
+        assert r.status_code == 200 and r.json()["answer"].startswith(CANNOT_PREFIX_KO)
+        # the stream route reports a missing question in English too
+        assert "The question parameter is required." in client.get("/answer/stream").text
 
 
 def test_answer_helpers():
     ev = Evidence("sql", "v_bond_kr", "국내채권마스터", "2026-08-21", "SELECT 1", 2, ["KR1 a", "KR2 b"])
     txt = format_evidence([ev], ["v_bond_kr"])
-    assert txt.startswith("[근거 1] 국내채권마스터(v_bond_kr) · 기준일 2026-08-21 · 2건") and "SELECT 1" in txt
-    assert normalize_answer("cannot_confirm", "해당 상품 없음").startswith("제공된 데이터로는 확인할 수 없습니다")
-    assert normalize_answer("clarify", "어느 것").endswith("?")
+    assert txt.startswith("[Evidence 1] 국내채권마스터(v_bond_kr) · base date 2026-08-21 · 2 rows") and "SELECT 1" in txt
+    assert format_evidence([]) == "No data referenced"
+    assert normalize_answer("cannot_confirm", "해당 상품 없음", "ko").startswith("제공된 데이터로는 확인할 수 없습니다")
+    assert normalize_answer("clarify", "어느 것", "ko") == "어느 것 어떤 조건을 말씀하시는지 알려주시겠어요?"
     assert json.loads('{"a": 1}')["a"] == 1
 
 
-def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
-    """모델이 final_answer 를 '호출'하지 않고 그 구문을 answer 안에 글자로 써 보낸 실제 사례들.
+def test_answer_helpers_in_english():
+    """The code's own answer text follows the answer language; English is the default."""
+    assert normalize_answer("cannot_confirm", "No such product.") == f"{CANNOT_PREFIX_EN} No such product."
+    assert normalize_answer("clarify", "Which one") == "Which one Could you tell me which condition you mean?"
+    assert normalize_answer("clarify", "Did you mean KODEX 200?") == "Did you mean KODEX 200?"
+    # an English answer that already says it cannot be confirmed gets no second prefix
+    for said in ("The 2027 return cannot be confirmed from a base-date snapshot.",
+                 "I cannot confirm that any public fund holds 삼성전자."):
+        assert normalize_answer("cannot_confirm", said) == said, said
+    # and the Korean acknowledgement still counts for an English-language call
+    assert normalize_answer("cannot_confirm", "제공된 데이터로는 확인할 수 없습니다.") == "제공된 데이터로는 확인할 수 없습니다."
+    assert normalize_answer("answered", "") == CANNOT_PREFIX_EN
+    assert normalize_answer("answered", "", "ko") == CANNOT_PREFIX_KO
+    # a leaked call whose body repeats the English prefix is de-duplicated like the Korean one
+    leak = f'{CANNOT_PREFIX_EN} final_answer(status="cannot_confirm", answer="{CANNOT_PREFIX_EN} No data.")'
+    assert strip_tool_call_syntax(leak) == f"{CANNOT_PREFIX_EN} No data."
 
-    기록된 54개 답변 중 6개가 이랬다. 껍데기만 벗기고 안의 본문은 반드시 살아남아야 한다 —
-    통째로 지우면 답이 사라지고, 그냥 두면 사용자가 도구 구문을 읽게 된다.
+
+def test_fallback_answer_follows_the_language():
+    en = fallback_answer("timeout")
+    assert en.startswith(CANNOT_PREFIX_EN) and "(timeout)" in en and "try again" in en
+    ko = fallback_answer("시간 초과", "ko")
+    assert ko == (f"{CANNOT_PREFIX_KO} 시스템 처리 중 문제가 발생하여 답변을 생성하지 못했습니다(시간 초과). "
+                  "질문을 조금 더 구체적으로 바꾸어 다시 시도해 주세요.")
+
+
+def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
+    """Real cases where the model, instead of *calling* final_answer, wrote the call out as text inside answer.
+
+    6 of the 54 recorded answers did this.  Only the shell may be peeled; the body inside must survive —
+    deleting it all loses the answer, leaving it makes the user read tool syntax.
     """
-    # G-006: 호출 구문이 답변 전체인 경우
+    # G-006: the call is the whole answer
     assert strip_tool_call_syntax(
         'final_answer(status="completed", answer="국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품은 총 22개입니다.")'
     ) == "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품은 총 22개입니다."
 
-    # G-016: 진짜 문장 뒤에 호출 구문이 붙은 경우. 앞 문장도 안의 본문도 모두 남아야 한다.
+    # G-016: a call appended after a real sentence.  Both the sentence before and the body inside must stay.
     g016 = ('제공된 데이터로는 확인할 수 없습니다. final_answer(status="cannot_confirm", '
             'answer="제공된 데이터에서는 신용등급이 \'AAAA\'인 채권을 찾을 수 없습니다. '
             '유효한 신용등급으로는 AAA, AA+, AA0, AA- 등이 있으니 이러한 등급을 가진 채권을 찾으시면 도움이 될 것 같습니다.")')
@@ -225,31 +306,31 @@ def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
     assert out.startswith("제공된 데이터로는 확인할 수 없습니다. 제공된 데이터에서는 신용등급이 'AAAA'인 채권을 찾을 수 없습니다.")
     assert out.endswith("도움이 될 것 같습니다.")
 
-    # G-043: 인자 안의 \n 이스케이프는 실제 줄바꿈으로 풀린다(목록이 한 줄로 뭉치지 않게)
+    # G-043: \n escapes inside the argument become real line breaks (so a list does not collapse onto one line)
     g043 = ('final_answer(status="completed", answer="판매 중인 국내 ETF와 공모펀드를 통틀어 위험등급 1등급으로 '
             '분류된 상품은 총 1,097개입니다.\\n\\n- 국내 ETF: 223개\\n- 공모펀드: 874개")')
     out = strip_tool_call_syntax(g043)
     assert "\\n" not in out and "- 국내 ETF: 223개\n- 공모펀드: 874개" in out
 
-    # G-054: 안내 문구 + 코드펜스로 감싼 경우. 껍데기 세 겹이 모두 벗겨져야 한다.
+    # G-054: an announcement line + a code fence.  All three layers of shell must come off.
     g054 = ('final_answer 도구를 사용하여 답변을 제출하겠습니다:\n\n```plaintext\n'
             'final_answer(status="cannot_confirm", answer="제공된 데이터로는 총보수 정보를 찾을 수 없습니다.")\n```')
     assert strip_tool_call_syntax(g054) == "제공된 데이터로는 총보수 정보를 찾을 수 없습니다."
 
-    # 출력 상한을 낮추면 구문이 닫히기 전에 잘릴 수 있다. 그 조각도 같은 방식으로 벗긴다.
+    # With a lower output cap the call can be cut off before it closes.  That fragment is peeled the same way.
     assert strip_tool_call_syntax(
         '제공된 데이터로는 확인할 수 없습니다. final_answer(status="cannot_confirm", answer="제공된 데이터로는 특정 상품을'
     ) == "제공된 데이터로는 확인할 수 없습니다. 제공된 데이터로는 특정 상품을"
 
-    # ---- 손대면 안 되는 것들: 괄호·따옴표가 든 정상 답변(실제 기록 G-003 / G-009 / G-026) ----
+    # ---- must not be touched: normal answers containing parens and quotes (real records G-003 / G-009 / G-026) ----
     for legit in (
         "매수수익률이 수록된 채권 중 세후 운용수익률이 가장 높은 종목은 '국고채권 01500-5003(20-2)'이며, 수익률은 5.70%입니다.",
         "해외 ETF 중 운용규모(AUM)가 가장 큰 상품은 Vanguard 500 Index Fund;ETF - 997,351,790,000원 (9,973억 5,179만원)입니다.",
-        # 번호 목록 예시는 여기서 뺐다.  답변을 줄글로만 내보내기로 하면서 normalize_answer 가
-        # 목록 마커를 걷어 한 문장으로 잇기 때문에 == legit 이 더는 성립하지 않는다.  마커만
-        # 사라지고 항목은 하나도 잃지 않는다는 기대치는
-        # test_flattened_list_supersedes_the_earlier_passthrough_expectation 이 대신 검증한다.
-        # strip_tool_call_syntax 가 그 문자열을 건드리지 않는다는 원래 의도도 그쪽에 함께 있다.
+        # The numbered-list example was taken out of here.  Since answers go out as prose only,
+        # normalize_answer strips the list markers and joins the items into one sentence, so == legit no
+        # longer holds.  The expectation that only the markers vanish and no item is lost is checked by
+        # test_flattened_list_supersedes_the_earlier_passthrough_expectation instead, together with the
+        # original intent that strip_tool_call_syntax leaves that string alone.
         '위험등급은 "매우높은위험(1등급)" 형태의 라벨로 제공됩니다.',
     ):
         assert strip_tool_call_syntax(legit) == legit, legit
@@ -257,7 +338,7 @@ def test_leaked_tool_call_syntax_is_unwrapped_not_deleted():
 
 
 async def test_nonexistent_product_is_not_answered_as_a_similar_one(tiny_store, tmp_path):
-    """'KODEX AI로봇' 은 존재하지 않는다. 모델이 KODEX 로봇액티브로 바꿔 답하면 서버가 역질문으로 보정한다."""
+    """'KODEX AI로봇' does not exist.  If the model answers with KODEX 로봇액티브 instead, the server corrects it to a clarifying question."""
     script = [Turn("", [ToolCall("c", "final_answer", {
         "status": "answered",
         "answer": "KODEX AI로봇의 순자산은 500억원이며 삼성자산운용이 운용합니다.",
@@ -265,22 +346,48 @@ async def test_nonexistent_product_is_not_answered_as_a_similar_one(tiny_store, 
     s = _state(tiny_store, StubLLM(script), tmp_path)
     pre = s.orchestrator.pre_analyze("KODEX AI로봇 ETF 정보 알려줘")
     assert pre.unresolved and pre.unresolved[0][0] == "KODEX AI로봇"
-    assert "존재하지 않습니다" in pre.text
+    assert "does not exist in the data" in pre.text
     resp = await s.orchestrator.answer("U-003", "KODEX AI로봇 ETF 정보 알려줘")
     assert "확인할 수 없습니다" in resp.answer
-    assert "KODEX 로봇액티브" in resp.answer  # 후보를 제시하며 되물음
-    assert "역질문으로 보정" in resp.think_trace
+    assert "KODEX 로봇액티브" in resp.answer and "이 중 찾으시는 상품이 있나요?" in resp.answer  # asks back, offering candidates
+    assert "corrected to a clarifying question" in resp.think_trace
+
+
+async def test_nonexistent_product_correction_in_english(tiny_store, tmp_path):
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "KODEX AI로봇 has net assets of 50 billion won and is managed by 삼성자산운용.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("U-003E", "Tell me about the KODEX AI로봇 ETF")
+    assert resp.answer.startswith("A product exactly matching 'KODEX AI로봇' cannot be confirmed in the provided data.")
+    assert "KODEX 로봇액티브" in resp.answer and "Is one of these the product you are looking for?" in resp.answer
+    assert "(For reference, the following was looked up on the basis of a similar product)" in resp.answer
+    assert "corrected to a clarifying question" in resp.think_trace
+
+
+async def test_clarify_suffix_without_candidates_follows_the_language(tiny_store, tmp_path):
+    """No similar product to offer: the code's own question back comes in the question's language."""
+    from finagent.agent.orchestrator import PreAnalysis
+
+    for q, want in (("KODEX 없는상품 순자산 알려줘", "찾으시는 상품명을 다시 확인해 주시겠어요?"),
+                    ("What are the net assets of KODEX 없는상품?", "Could you check the product name you are looking for?")):
+        script = [Turn("", [ToolCall("c", "final_answer", {"status": "answered", "answer": "500억원"})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        s.orchestrator.pre_analyze = lambda _q: PreAnalysis("[x]", [], ["KODEX 없는상품"], [], [("KODEX 없는상품", [])])
+        resp = await s.orchestrator.answer("U-NC", q)
+        assert want in resp.answer, q
 
 
 async def test_real_product_is_not_falsely_flagged(tiny_store, tmp_path):
-    """운용사 접두어나 '펀드' 접미사 차이는 미존재로 보면 안 된다(오탐 방지)."""
+    """A manager prefix or a '펀드' (fund) suffix is no reason to call a product nonexistent (false-positive guard)."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
     assert s.orchestrator.pre_analyze("KODEX 로봇액티브 순자산 알려줘").unresolved == []
     assert s.orchestrator.pre_analyze("삼성 KODEX 2차전지산업의 위험등급은?").unresolved == []
 
 
 async def test_acknowledged_decline_is_left_alone(tiny_store, tmp_path):
-    """모델이 이미 '없다'고 답했으면 서버가 덧붙이지 않는다."""
+    """If the model already said 'there is none', the server adds nothing."""
     script = [Turn("", [ToolCall("c", "final_answer", {
         "status": "cannot_confirm",
         "answer": "KODEX AI로봇이라는 상품은 확인할 수 없습니다. 혹시 KODEX 로봇액티브를 말씀하시나요?",
@@ -288,76 +395,137 @@ async def test_acknowledged_decline_is_left_alone(tiny_store, tmp_path):
     s = _state(tiny_store, StubLLM(script), tmp_path)
     resp = await s.orchestrator.answer("U-003", "KODEX AI로봇 ETF 정보 알려줘")
     assert resp.answer.count("확인할 수 없습니다") == 1
-    assert "역질문으로 보정" not in resp.think_trace
+    assert "corrected to a clarifying question" not in resp.think_trace
+
+
+async def test_acknowledged_decline_in_english_is_left_alone(tiny_store, tmp_path):
+    """The English acknowledgements ('could not be found', 'did you mean') count, even with status=answered."""
+    for text in ("KODEX AI로봇 could not be found in the data. Did you mean KODEX 로봇액티브?",
+                 "There is no such product; are you looking for KODEX 로봇액티브?"):
+        script = [Turn("", [ToolCall("c", "final_answer", {"status": "answered", "answer": text})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        resp = await s.orchestrator.answer("U-003A", "Tell me about the KODEX AI로봇 ETF")
+        assert resp.answer == text, text
+        assert "corrected to a clarifying question" not in resp.think_trace
 
 
 def test_forward_looking_detector_covers_the_class_not_one_phrasing():
-    """온톨로지에 미래 값 컬럼이 없다는 사실에 근거한 판정. 데이터에 있는 값은 건드리면 안 된다."""
+    """A judgement grounded in the fact that the ontology has no future-value column.  Values the data holds must not be touched."""
     for q in ("TIGER 반도체 ETF의 내년 예상 수익률", "이 펀드 앞으로 오를까요?",
               "향후 주가 전망 알려줘", "내년에 수익률이 얼마나 될까"):
         assert asks_forward_looking(q), q
-    # 만기보장수익률(exrt_grte_ern_r)은 실제로 데이터에 있는 값이므로 예측 질문이 아니다
+    # the guaranteed yield to maturity (exrt_grte_ern_r) is a value the data really holds, so it is no forecast question
     for q in ("만기보장수익률이 가장 높은 채권", "보장수익률 알려줘",
               "최근 1년 수익률 상위 3개", "작년 수익률", "만기가 2027년인 채권",
-              # 운용사·상품 이름의 '미래'는 미래 시점이 아니다(상품명 9,816건이 '미래'를 포함한다)
+              # the '미래' (future) in manager and product names is not a future point (9,816 product names contain '미래')
               "미래에셋 ETF의 1년 수익률 알려줘", "BNK 미래전략기술액티브의 수익률은?",
               "작년 연말 수익률 알려줘",
-              # '규모'는 값이 아니라 크기를 가리키는 말이다. 값 표현으로 넣었더니 이 정상 질문이
-              # '미래 … 규모'로 걸렸다. G-045 는 '순자산'만으로도 잡히므로 '규모'는 필요 없다.
-              "미래 성장 규모가 큰 테마", "미래 성장성이 높은 산업 관련 ETF"):
+              # '규모' (size) names a magnitude, not a value.  Added as a value word, it caught this ordinary
+              # question as '미래 … 규모'.  G-045 is caught by '순자산' alone, so '규모' is not needed.
+              "미래 성장 규모가 큰 테마", "미래 성장성이 높은 산업 관련 ETF",
+              # English product names are not forecasts either
+              "RISE 200의 1년 수익률은?", "Future Mobility ETF의 순자산은?"):
         assert not asks_forward_looking(q), q
 
 
-def test_future_year_counts_as_a_future_time_reference():
-    """G-045 재발 방지: '2027년 말'처럼 연도로만 적은 미래 시점도 미래 표현으로 센다.
+def test_forward_looking_detector_in_english():
+    """The same four families in English: forecast word, future-time word, future year, rise/fall."""
+    for q in ("Next year, what is the expected return of TIGER 반도체?",
+              "Will KODEX 200 rise next year?",
+              "What is the price outlook for 삼성전자?",
+              "How much will RISE 200 go up?",
+              "Is 삼성전자 likely to fall?",
+              "What will the 1-year return of KODEX 200 be in 3 years?",
+              "What will the net assets of KODEX 200 be at the end of 2027?",
+              "Forecast the dividend of TIGER 200 for 2028",
+              "What are the projected returns of KODEX 200?"):
+        assert asks_forward_looking(q, 2026), q
+    for q in ("What is the 1-year return of KODEX 200?",
+              "Which bond has the highest guaranteed yield to maturity?",
+              "How many KRW bonds rated AAA mature in 2027?",
+              "Which ETFs will be listed in 2027?",
+              "What was the return of KODEX 200 in 2025?",
+              "What is the dividend frequency of RISE 200?",
+              "Could you tell me which ETF rose the most last month?",
+              "Which futures ETFs have the lowest fees?",
+              "Which Mirae Asset funds have the highest 1-year return?",
+              # product names are capitalised: 'Future', 'Outlook', '2030' inside a name are not forecasts
+              "What is the AUM of the Goldman Sachs Future Tech Leaders Equity ETF?",
+              "What is the AUM of RH Tactical Outlook ETF?",
+              "What is the AUM of the iShares iBonds Dec 2030 Term Corporate ETF?",
+              "What is the net asset value of TIGER TDF 2045?"):
+        assert not asks_forward_looking(q, 2026), q
+    # the base year comes from the store meta, for English years too
+    assert not asks_forward_looking("What will the net assets of KODEX 200 be in 2027?", 2027)
 
-    기준연도(데이터 base_date 의 연도)를 넘는 연도만 미래다. 함정은 G-002 —
-    "만기가 2027년인 채권"은 미래 연도를 말하지만 mat_date 라는 **기록된 날짜 필드**를 묻는
-    질문이라 답할 수 있어야 한다. 값 표현이 아니라 날짜 필드에 붙은 연도는 세지 않는다.
+
+def test_future_year_counts_as_a_future_time_reference():
+    """G-045 regression: a future point written only as a year, like '2027년 말', counts as a future-time expression.
+
+    Only a year after the base year (the year of the data's base_date) is in the future.  The trap is
+    G-002 — "만기가 2027년인 채권" (bonds maturing in 2027) names a future year but asks about a
+    **recorded date field**, mat_date, and must be answerable.  A year attached to a date field rather
+    than a value word does not count.
     """
     for q in ("KODEX 200의 2027년 말 예상 순자산 규모는 얼마인가요?",
               "2028년 순자산 규모를 알려줘", "2030년 수익률이 어떻게 될까요?"):
         assert asks_forward_looking(q, 2026), q
-    # ★ 미래 연도 + 날짜 필드 = 예측이 아니라 조회다. 여기서 발동하면 답할 수 있는 문항이 죽는다.
+    # ★ future year + date field = a lookup, not a forecast.  Firing here kills answerable questions.
     for q in ("구매 가능한 원화채권 중 신용등급 AAA이고 만기가 2027년인 종목 수를 알려줘",
               "만기 2029년 채권 목록", "2027년 상장 예정 ETF가 있나요?",
-              "2026년 말 순자산 규모는?",   # 기준연도 이하 = 과거·현재 스냅샷
+              "2026년 말 순자산 규모는?",   # at or before the base year = past/current snapshot
               "2025년 수익률 알려줘"):
         assert not asks_forward_looking(q, 2026), q
-    # 기준연도는 스토어 meta 에서 온다 — 기준연도가 밀리면 판정도 함께 밀려야 한다
+    # the base year comes from the store meta — when it moves, the judgement must move with it
     assert asks_forward_looking("2027년 순자산 규모", 2026)
     assert not asks_forward_looking("2027년 순자산 규모", 2027)
 
 
 def test_holdings_scope_guard_fires_only_where_there_is_no_holdings_data():
-    """G-040·G-041 재발 방지: 편입 데이터는 국내 ETF 1,162 종목에만 있다.
+    """G-040/G-041 regression: holdings data exists only for 1,162 domestic ETFs.
 
-    해외ETF·공모펀드·사모펀드·ETN 으로 범위를 좁힌 편입 질문은 데이터에 관계가 없어
-    답할 수 없다. 반대로 국내 ETF 편입 질문은 정상 답변 대상이므로 절대 건드리면 안 된다.
+    A holdings question narrowed to foreign ETFs, public funds, private funds or ETNs has no such
+    relation in the data and cannot be answered.  Conversely a domestic-ETF holdings question is a
+    normal answer and must never be touched.
     """
     for q in ("엔비디아를 편입한 해외 ETF를 알려줘",
               "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?",
               "삼성전자를 보유한 공모펀드를 알려줘",
               "테슬라를 포함한 미국 ETF가 있나요?",
-              "카카오를 편입한 ETN을 알려줘"):
+              "카카오를 편입한 ETN을 알려줘",
+              # English
+              "Which foreign ETFs hold NVIDIA?",
+              "Which public funds hold 삼성전자?",
+              "Does any mutual fund contain SK하이닉스?",
+              "Which US ETFs include Tesla?",
+              "Which ETNs hold 카카오?",
+              "What are the top holdings of the overseas ETF QQQ?"):
         assert asks_holdings_without_data(q), q
-    # ★ 답할 수 있는 문항 — 여기서 발동하면 정상 답변을 확인불가로 뭉갠다
+    # ★ answerable questions — firing here crushes a normal answer into cannot-confirm
     for q in ("삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
               "SK하이닉스를 편입하고 있는 국내 ETF는 몇 개인가요?",
               "두산에너빌리티를 보유한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘",
               "국내 ETF 가운데 삼성전자 비중이 가장 높은 상품은 무엇인가요?",
-              "에코프로비엠을 편입한 ETF는 몇 개인가요?",          # 범위어가 없으면 발동하지 않는다
-              "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘",  # 편입어 없음
+              "에코프로비엠을 편입한 ETF는 몇 개인가요?",          # no scope word, no firing
+              "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘",  # no holding word
               "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?",
-              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"):
+              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘",
+              # English
+              "Which domestic ETFs hold 삼성전자?",
+              "Which Korean ETFs and public funds hold 삼성전자?",
+              "How many ETFs hold 에코프로비엠?",
+              "Which public funds have the highest 1-year return?",
+              "Show me foreign ETFs including leveraged ones",
+              "Tell us which ETFs hold 삼성전자"):
         assert not asks_holdings_without_data(q), q
 
 
 async def test_fund_holdings_answer_is_rewritten_to_cannot_confirm(tiny_store, tmp_path):
-    """G-041 재발 방지: v_fund_pub 에는 보유 종목 컬럼이 없다.
+    """G-041 regression: v_fund_pub has no holdings column.
 
-    search_products 는 이름·의미 유사도만 돌려주므로 '그 종목을 담고 있다'를 성립시키지 못한다.
-    모델이 그렇게 단정하면 서버가 확인불가로 내리고 근거가 없다는 사실을 밝힌다.
+    search_products returns only name/meaning similarity, so it cannot establish 'holds that stock'.
+    When the model asserts it anyway, the server lowers the answer to cannot-confirm and states that
+    there is no evidence.
     """
     script = [Turn("", [ToolCall("c", "final_answer", {
         "status": "answered",
@@ -365,29 +533,39 @@ async def test_fund_holdings_answer_is_rewritten_to_cannot_confirm(tiny_store, t
     })], "tool_use")]
     s = _state(tiny_store, StubLLM(script), tmp_path)
     resp = await s.orchestrator.answer("H-001", "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?")
-    assert resp.answer.startswith(CANNOT_PREFIX)
+    assert resp.answer.startswith(CANNOT_PREFIX_KO)
     assert "국내 ETF 1,162 종목" in resp.answer
-    assert "확인불가로 보정" in resp.think_trace
+    assert "corrected to cannot_confirm" in resp.think_trace
+
+
+async def test_fund_holdings_answer_is_rewritten_in_english(tiny_store, tmp_path):
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "The public fund holding SK하이닉스 with the largest net assets is KB 만기가 있는 채권 EMP.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("H-001E", "Which public fund holding SK하이닉스 has the largest net assets?")
+    assert resp.answer.startswith(CANNOT_PREFIX_EN)
+    assert "exists only for 1,162 domestic ETFs" in resp.answer and "EMP" not in resp.answer
+    assert "corrected to cannot_confirm" in resp.think_trace
 
 
 async def test_domestic_etf_holdings_answer_is_left_alone(tiny_store, tmp_path):
-    """국내 ETF 편입 질문은 답할 수 있다 — 가드가 건드리면 안 된다(오탐 방지)."""
-    script = [Turn("", [ToolCall("c", "final_answer", {
-        "status": "answered",
-        "answer": "에코프로비엠을 편입한 국내 ETF는 KODEX 2차전지산업 1개입니다.",
-    })], "tool_use")]
-    s = _state(tiny_store, StubLLM(script), tmp_path)
-    resp = await s.orchestrator.answer("H-002", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?")
-    assert not resp.answer.startswith(CANNOT_PREFIX)
-    assert "KODEX 2차전지산업" in resp.answer
-    assert "확인불가로 보정" not in resp.think_trace
+    """A domestic-ETF holdings question is answerable — the guard must not touch it (false-positive guard)."""
+    for q, text in (("에코프로비엠을 편입한 국내 ETF는 몇 개인가요?", "에코프로비엠을 편입한 국내 ETF는 KODEX 2차전지산업 1개입니다."),
+                    ("How many domestic ETFs hold 에코프로비엠?", "1 domestic ETF holds 에코프로비엠: KODEX 2차전지산업.")):
+        script = [Turn("", [ToolCall("c", "final_answer", {"status": "answered", "answer": text})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        resp = await s.orchestrator.answer("H-002", q)
+        assert resp.answer == text, q
+        assert "corrected to cannot_confirm" not in resp.think_trace
 
 
 async def test_past_return_is_not_served_as_a_forecast(tiny_store, tmp_path):
-    """G-019 재발 방지: 과거 1년 수익률(du_er_1y)을 '내년 예상 수익률'로 제시하면 안 된다.
+    """G-019 regression: the past 1-year return (du_er_1y) must not be presented as 'next year's expected return'.
 
-    숫자 자체는 도구가 낸 진짜 값이라 숫자 교차검증은 통과한다. 틀린 것은 라벨이므로
-    서버가 상태를 확인불가로 내리고 과거 실적임을 명시한 채로 남긴다.
+    The number itself is a real value the tool produced, so the numeric cross-check passes.  What is
+    wrong is the label, so the server lowers the status to cannot-confirm and keeps it, stated as past performance.
     """
     script = [Turn("", [ToolCall("c", "final_answer", {
         "status": "answered",
@@ -395,66 +573,85 @@ async def test_past_return_is_not_served_as_a_forecast(tiny_store, tmp_path):
     })], "tool_use")]
     s = _state(tiny_store, StubLLM(script), tmp_path)
     resp = await s.orchestrator.answer("F-001", "KODEX 로봇액티브의 내년 예상 수익률을 알려줘")
-    assert resp.answer.startswith(CANNOT_PREFIX)
+    assert resp.answer.startswith(CANNOT_PREFIX_KO)
     assert "미래에 실현될 값을 담은 항목이 없습니다" in resp.answer
     assert "보장하지 않으므로" in resp.answer
-    assert "(참고)" in resp.answer and "260.41%" in resp.answer  # 조회 결과는 과거 실적으로 남긴다
-    assert "확인불가로 보정" in resp.think_trace
+    assert "(참고)" in resp.answer and "260.41%" in resp.answer  # the lookup result stays, as past performance
+    assert "corrected to cannot_confirm" in resp.think_trace
+
+
+async def test_past_return_is_not_served_as_a_forecast_in_english(tiny_store, tmp_path):
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "The expected return of KODEX 로봇액티브 next year is 260.41%.",
+    })], "tool_use")]
+    s = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s.orchestrator.answer("F-001E", "Next year, what is the expected return of KODEX 로봇액티브?")
+    assert resp.answer.startswith(CANNOT_PREFIX_EN)
+    assert "has no item holding a value to be realised in the future" in resp.answer
+    assert "(For reference)" in resp.answer and "260.41%" in resp.answer
+    assert "corrected to cannot_confirm" in resp.think_trace
 
 
 async def test_guaranteed_yield_question_is_still_answered(tiny_store, tmp_path):
-    """만기보장수익률은 데이터에 있는 컬럼이다 — 예측 가드가 이 질문을 막으면 안 된다."""
-    script = [Turn("", [ToolCall("c", "final_answer", {
-        "status": "answered",
-        "answer": "만기보장수익률이 가장 높은 채권은 한국전력공사채권1012입니다.",
-    })], "tool_use")]
-    s = _state(tiny_store, StubLLM(script), tmp_path)
-    resp = await s.orchestrator.answer("F-002", "만기보장수익률이 가장 높은 채권 알려줘")
-    assert resp.answer.startswith("만기보장수익률이 가장 높은 채권은")
-    assert CANNOT_PREFIX not in resp.answer
-    assert "확인불가로 보정" not in resp.think_trace
+    """The guaranteed yield to maturity is a column in the data — the forecast guard must not block this question."""
+    for q, text in (("만기보장수익률이 가장 높은 채권 알려줘", "만기보장수익률이 가장 높은 채권은 한국전력공사채권1012입니다."),
+                    ("Which bond has the highest guaranteed yield to maturity?",
+                     "The bond with the highest guaranteed yield to maturity is 한국전력공사채권1012.")):
+        script = [Turn("", [ToolCall("c", "final_answer", {"status": "answered", "answer": text})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        resp = await s.orchestrator.answer("F-002", q)
+        assert resp.answer == text, q
+        assert "corrected to cannot_confirm" not in resp.think_trace
 
 
 async def test_count_star_on_bonds_reports_product_count(tiny_store, tmp_path):
-    """'몇 개'를 COUNT(*) 로 물으면 행 수가 나온다. 실제 종목 수를 함께 알려줘야 한다."""
+    """Asking 'how many' with COUNT(*) returns a row count.  The real bond count must come with it."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
     r = await s.tools.execute("sql_query", {"sql": "SELECT COUNT(*) FROM v_bond_kr WHERE is_sellable=1"})
     assert not r.is_error
-    assert "행 수" in r.content and "채권 종목" in r.content
+    assert "row count" in r.content and "number of bonds" in r.content
 
-    # 이미 DISTINCT 를 쓴 질의에는 경고하지 않는다
+    # no warning on a query that already uses DISTINCT
     ok = await s.tools.execute("sql_query", {"sql": "SELECT COUNT(DISTINCT pd_no) FROM v_bond_kr WHERE is_sellable=1"})
-    assert "행 수" not in ok.content
+    assert "row count" not in ok.content
 
-    # 목록 조회에도 경고하지 않는다
+    # nor on a listing query
     lst = await s.tools.execute("sql_query", {"sql": "SELECT pd_no, pd_nm FROM v_bond_kr LIMIT 2"})
-    assert "행 수" not in lst.content
+    assert "row count" not in lst.content
 
 
 def test_request_prompt_stays_within_token_budget(tiny_store, tmp_path):
-    """매 라운드 실제로 전송되는 크기 = 시스템 프롬프트 + 도구 정의.
+    """The size actually sent every round = system prompt + tool definitions.
 
-    무엇이 진짜 제약인가:
-      * 주최측은 토큰 상한을 두지 않았다. 명시된 제약은 문항당 300초 응답 시간뿐이다.
-      * 실제 제약은 CLOVA 의 분당 토큰 수(TPM)다. 429 가 실제로 관측된 크기는 13,389토큰이었고,
-        그 상태로는 분당 2회밖에 호출하지 못해 평가 22문항 중 21문항이 429 로 실패했다.
-      * 프롬프트가 커지면 느려진다는 통념은 측정으로 반증됐다. 프롬프트 크기를
-        599 / 5,591 / 8,789 / 13,495토큰으로 바꿔가며 첫 호출 지연시간 중앙값을 재니
-        2.90 / 3.65 / 2.94 / 3.82초로, 차이가 잡음 범위 안이었다. 크기는 지연의 원인이 아니다.
-        따라서 상한의 근거는 300초 예산이 아니라 오직 TPM 이다.
+    What the real constraint was (competition build, HyperCLOVA X):
+      * The organisers set no token limit.  The only stated constraint is 300 seconds per question.
+      * The real constraint was CLOVA's tokens per minute (TPM).  A 429 was actually observed at 13,389
+        tokens; at that size only two calls per minute went through and 21 of the 22 evaluation
+        questions failed with 429.
+      * The common belief that a bigger prompt is slower was refuted by measurement.  Varying the prompt
+        over 599 / 5,591 / 8,789 / 13,495 tokens, the median first-call latency was 2.90 / 3.65 / 2.94 /
+        3.82 seconds, within noise.  Size does not cause latency, so the basis of the limit was never the
+        300-second budget, only TPM.
 
-    무엇을 재야 하는가: 시스템 프롬프트만 재면 실제 전송량보다 작다. 매 라운드 도구 스키마
-    8개(OpenAI 호환 wire 형식으로 직렬화 시 약 2,594토큰)가 함께 나가기 때문이다.
-    tiny_store 기준 시스템 프롬프트 9,152 + 도구 2,594 = 11,746토큰이 한 번의 요청 크기다.
-    ("이 데이터가 무엇인가" 사실 절 추가로 8,754 -> 9,152. 중복된 편입종목 안내 2곳을 지워
-     +398토큰에 그쳤다.)
+    What to measure: the system prompt alone understates what is sent, because the 8 tool schemas
+    (about 2,594 tokens serialized in the OpenAI-compatible wire format) go out every round too.  On
+    tiny_store, system prompt 9,152 + tools 2,594 = 11,746 tokens was one request.
+    (Adding the "what this data is" fact section took it from 8,754 -> 9,152; deleting two duplicate
+     holdings notes kept that to +398 tokens.)
 
-    상한 12,000 의 근거: 이 테스트는 tiny_store 로 재므로 실서비스보다 작다. 실제 스토어에
-    value_hints 까지 실은 운영 프롬프트는 9,584토큰이라 요청 총량은 12,178토큰, 즉 여기서 재는
-    값보다 약 432토큰 크다. 운영 크기가 상한을 넘었지만 상한의 근거는 12,000 이라는 숫자가 아니라
-    TPM 이다 — 429 가 실제로 관측된 13,389 보다 1,211토큰 아래이므로 아직 여유가 있다.
-    이 테스트에 남은 증가 여유는 약 254토큰이다. 더 늘려야 하면 상한을 올리기 전에
-    CORE_COLUMNS 의 저빈도 컬럼이나 value_hints 를 줄이는 쪽을 먼저 본다.
+    Basis of the 12,000 limit: this test measures on tiny_store, so it is smaller than production.  The
+    production prompt on the real store, value_hints included, was 9,584 tokens, a request of 12,178
+    tokens — about 432 more than measured here.  Production exceeded the limit, but the basis of the
+    limit was TPM, not the number 12,000: that was still 1,211 tokens below the 13,389 where 429 was
+    observed.  The test had about 254 tokens of headroom left.  Before raising a limit, look first at
+    trimming CORE_COLUMNS' rarely used columns or value_hints.
+
+    English edition: every number above comes from the Korean build and was estimated as len/1.6, a ratio
+    for HCX's tokenizer on Korean-heavy text.  That ratio overcounts English roughly 2.5-fold, so the
+    estimate is now per script: about 4 characters per token for Latin text and about 1 token per Hangul
+    syllable (Korean data values, labels and the schema cards).  Under this estimate the Korean build's
+    request on tiny_store is about 9,600 tokens and the English one about 8,500.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     wire_tools = json.dumps(
@@ -462,23 +659,31 @@ def test_request_prompt_stays_within_token_budget(tiny_store, tmp_path):
          for t in s.tools.specs()],
         ensure_ascii=False,
     )
-    prompt_tokens = len(s.orchestrator.system_prompt) / 1.6
-    tool_tokens = len(wire_tools) / 1.6
+
+    def approx(text: str) -> float:
+        hangul = sum(1 for ch in text if "가" <= ch <= "힣")
+        return hangul + (len(text) - hangul) / 4
+
+    prompt_tokens = approx(s.orchestrator.system_prompt)
+    tool_tokens = approx(wire_tools)
     approx_tokens = prompt_tokens + tool_tokens
-    # 상한 12,000 -> 14,000.  이 한도는 "프롬프트가 커지면 느려진다"는 가정에서 나왔는데, 측정은
-    # 그 가정을 부정했다: 프롬프트 599 / 5,591 / 8,789 / 13,495 토큰에 대한 첫 호출 지연 중앙값이
-    # 2.90 / 3.65 / 2.94 / 3.82초로 22배 커지는 동안 평평했다(지연을 만드는 것은 왕복 횟수다).
-    # 그래서 한도는 이제 비용이 아니라 "프롬프트가 조용히 부풀지 않는지" 보는 경보다.  12,000 은
-    # 오늘 여유가 10토큰까지 줄어 규칙 한 줄을 더할 때마다 깨졌고, 그때마다 문구를 줄이는 압박이
-    # 정확도보다 예산을 앞세우게 만들었다.  14,000 은 같은 경보를 유지하되 그 압박을 없앤다.
-    assert approx_tokens < 14000, (
-        f"요청 1회 크기가 너무 큼: {approx_tokens:,.0f} 토큰 "
-        f"(시스템 프롬프트 {prompt_tokens:,.0f} + 도구 정의 {tool_tokens:,.0f})"
+    # Limit 12,000 -> 14,000 (Korean build, len/1.6).  The limit came from the assumption that a bigger
+    # prompt is slower, and measurement refuted it: over prompts of 599 / 5,591 / 8,789 / 13,495 tokens
+    # the median first-call latency stayed flat at 2.90 / 3.65 / 2.94 / 3.82 seconds while the size grew
+    # 22-fold (round trips are what cost time).  So the limit is an alarm that the prompt is not quietly
+    # bloating, not a cost.  12,000 had shrunk to 10 tokens of headroom and broke with every added rule
+    # line, and each time the pressure to shorten wording put the budget ahead of accuracy.  14,000 kept
+    # the same alarm without that pressure.
+    # English edition: 11,000 under the per-script estimate above (Korean build 9,611, English 8,526 at
+    # the time of the switch) — the same alarm, with about 2,500 tokens of room.
+    assert approx_tokens < 11000, (
+        f"one request is too large: {approx_tokens:,.0f} tokens "
+        f"(system prompt {prompt_tokens:,.0f} + tool definitions {tool_tokens:,.0f})"
     )
-    # 요약본에도 판정에 필요한 핵심 컬럼은 남아 있어야 한다
+    # the key columns needed for judgements must still be on the cards
     for col in ("is_sellable", "has_buy_yield", "crd_grd", "is_on_sale", "fund_family", "expense_ratio_pct"):
         assert col in s.orchestrator.system_prompt, col
-    # 전체 정의는 table_info 로 여전히 받을 수 있다
+    # the full definitions are still available through table_info
     assert "table_info" in s.orchestrator.system_prompt
 
 
@@ -488,96 +693,97 @@ async def test_table_info_still_returns_full_card(tiny_store, tmp_path):
     assert not r.is_error and len(r.content) > len(s.orchestrator.system_prompt) / 8
 
 
-# ------------------------------------------------- 막다른 길에서 빠져나오게 하는 두 장치
-# (1) SQL 오류가 '무엇이 맞는지'까지 알려준다  (2) 같은 호출을 반복하면 그렇다고 말해 준다
+# ------------------------------------------------- two devices that get the model out of a dead end
+# (1) SQL errors say what is right  (2) repeating the same call gets said out loud
 
 async def test_wrong_column_error_names_the_right_column(tiny_store, tmp_path):
-    """G-007 재발 방지: "no such column: pd_ticker" 는 무엇이 틀렸는지만 말한다.
+    """G-007 regression: "no such column: pd_ticker" says only what is wrong.
 
-    실제 컬럼명(v_etf_gl.ticker)을 짚어 줘야 모델이 추측 없이 한 번에 고칠 수 있다.
+    Pointing at the real column (v_etf_gl.ticker) lets the model fix it in one go, without guessing.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     r = await s.tools.execute("sql_query", {"sql": "SELECT pd_ticker, pd_nm FROM v_etf_gl LIMIT 3"})
     assert r.is_error
-    assert "no such column: pd_ticker" in r.content      # 원래 메시지는 지우지 않는다
-    assert "v_etf_gl.ticker" in r.content                # 접두어 혼동(pd_ 를 붙임)을 정확히 짚는다
+    assert "no such column: pd_ticker" in r.content      # the original message is kept
+    assert "v_etf_gl.ticker" in r.content                # names the prefix confusion (pd_ added) exactly
 
-    # 별칭이 붙은 JOIN 질의는 그 별칭이 가리키는 뷰만 본다(G-015 의 pd_no)
+    # an aliased JOIN query looks only at the view the alias points to (G-015's pd_no)
     j = await s.tools.execute("sql_query", {"sql": (
         "SELECT e.pd_no FROM v_etf_kr e JOIN v_etf_constituent c ON e.pd_itm_no=c.etf_itm_no LIMIT 3")})
     assert j.is_error and "pd_itm_no" in j.content and "v_etf_kr" in j.content
 
-    # 없는 뷰를 물으면 쓸 수 있는 5개를 알려준다
+    # asking for a view that does not exist lists the 5 that do
     t = await s.tools.execute("sql_query", {"sql": "SELECT * FROM v_etf_korea LIMIT 1"})
     assert t.is_error and "v_etf_kr" in t.content
     for v in ("v_bond_kr", "v_etf_gl", "v_fund_pub", "v_etf_constituent"):
         assert v in t.content, v
 
-    # 컬럼 목록을 SQL 로 캐내려는 시도는 가드가 막는다 — 막힌 이유 대신 쓸 도구를 알려준다
+    # fishing for the column list through SQL is blocked by the guard — name the tool to use instead
     p = await s.tools.execute("sql_query", {"sql": "PRAGMA table_info(v_etf_kr)"})
     assert p.is_error and "table_info" in p.content
 
-    # 정상 질의는 손대지 않는다
+    # a normal query is left alone
     ok = await s.tools.execute("sql_query", {"sql": "SELECT pd_abrv_nm FROM v_etf_kr LIMIT 1"})
-    assert not ok.is_error and "대신" not in ok.content
+    assert not ok.is_error and "instead of" not in ok.content
 
-    # 고칠 방법이 없는 오류는 그대로 둔다
+    # an error with no known fix is left as is
     syn = await s.tools.execute("sql_query", {"sql": "SELECT pd_nm FROM v_etf_kr WHERE"})
-    assert syn.is_error and "syntax error" in syn.content and "대신" not in syn.content
+    assert syn.is_error and "syntax error" in syn.content and "instead of" not in syn.content
 
 
 async def test_wide_view_error_stays_bounded(tiny_store, tmp_path):
-    """넓은 뷰의 컬럼을 통째로 실으면 컨텍스트를 잡아먹는다. 근접 후보 + 총 개수만 준다."""
+    """Listing every column of a wide view eats the context.  Only nearby candidates + the total count."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
     wide = [f"col_{i}" for i in range(60)] + ["ticker"]
-    s.tools._colcache = {"v_etf_gl": wide}   # 실제 스토어의 v_etf_gl 은 39컬럼, v_etf_kr 은 59컬럼
-    msg = s.tools._sql_error_hint("SELECT pd_ticker FROM v_etf_gl", "SQL 오류: no such column: pd_ticker")
+    s.tools._colcache = {"v_etf_gl": wide}   # the real store's v_etf_gl has 39 columns, v_etf_kr 59
+    msg = s.tools._sql_error_hint("SELECT pd_ticker FROM v_etf_gl", "SQL error: no such column: pd_ticker")
     assert "v_etf_gl.ticker" in msg
-    assert f"컬럼 {len(wide)}개 중" in msg and "table_info('v_etf_gl')" in msg
-    assert "col_59" not in msg and len(msg) < 400   # 전체를 쏟아붓지 않는다
+    assert f"has {len(wide)} columns; names close to" in msg and "table_info('v_etf_gl')" in msg
+    # does not dump the whole list (the English directive alone is ~300 characters; the 61 names would add ~430)
+    assert "col_59" not in msg and len(msg) < 600
 
 
 async def test_missing_column_says_what_to_do_not_just_what_is_wrong(tiny_store, tmp_path):
-    """119초 문항 재발 방지: du_er_1y FROM v_etf_gl 실패 직후 모델이 답 대신 '접근 방법'을 썼다.
+    """Regression for the 119-second question: right after du_er_1y FROM v_etf_gl failed, the model wrote an 'approach' instead of an answer.
 
-    v_etf_gl 에는 1년 수익률 컬럼이 없고 du_er_1d(1일)뿐이다. 철자가 가까워 제안은 나오지만
-    그 제안은 답이 될 수 없다 — 그래서 '무엇이 맞는지'만이 아니라 '그래서 무엇을 하라'가 필요하다.
+    v_etf_gl has no 1-year return column, only du_er_1d (1 day).  The spelling is close, so a suggestion
+    comes out, but it cannot be the answer — so besides 'what is right' the message needs 'so do this'.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     s.tools._colcache = {"v_etf_gl": ["ticker", "pd_nm", "is_on_sale", "du_er_1d", "du_last_aum"]}
     msg = s.tools._sql_error_hint(
         "SELECT ticker, du_er_1y FROM v_etf_gl WHERE is_on_sale=1 ORDER BY du_er_1y DESC LIMIT 10",
-        "SQL 오류: no such column: du_er_1y",
+        "SQL error: no such column: du_er_1y",
     )
-    assert "du_er_1d" in msg                       # 기존 동작: 가까운 컬럼은 계속 짚어 준다
-    assert "뜻" in msg and "같지는 않습니다" in msg  # 이름이 가까운 것 != 뜻이 같은 것
-    assert "제외" in msg                            # 대체 금지 → 그 상품군을 제외하고
-    assert "방법 설명 금지" in msg                   # 계획을 쓰지 말고 바로 답하라
+    assert "du_er_1d" in msg                          # existing behaviour: the close column is still named
+    assert "does not mean the same meaning" in msg    # a close name != the same meaning
+    assert "excluded" in msg                          # no substitution → exclude that product group
+    assert "do not describe the method" in msg        # no plan; answer right away
 
-    # 근접 후보가 하나도 없을 때도 같은 지시가 붙는다
+    # the same directive is attached when there is no close candidate at all
     s.tools._colcache = {"v_etf_gl": ["ticker", "pd_nm"]}
-    bare = s.tools._sql_error_hint("SELECT zzz_qqq FROM v_etf_gl", "SQL 오류: no such column: zzz_qqq")
-    assert "제외" in bare and "방법 설명 금지" in bare
+    bare = s.tools._sql_error_hint("SELECT zzz_qqq FROM v_etf_gl", "SQL error: no such column: zzz_qqq")
+    assert "excluded" in bare and "do not describe the method" in bare
 
-    # 컬럼 오류가 아닌 실패에는 붙지 않는다
+    # not attached to failures that are not column errors
     syn = await s.tools.execute("sql_query", {"sql": "SELECT pd_nm FROM v_etf_kr WHERE"})
-    assert syn.is_error and "방법 설명 금지" not in syn.content
+    assert syn.is_error and "do not describe the method" not in syn.content
 
 
 def test_call_key_defines_the_same_call():
-    """'같은 호출'의 정의를 고정한다. 느슨해지면 멀쩡한 재시도까지 막는다."""
+    """Pin down the definition of 'the same call'.  Loosen it and legitimate retries get blocked too."""
     a = ToolCall("1", "sql_query", {"sql": "SELECT pd_nm FROM v_etf_kr WHERE manager_name='삼성자산운용'", "purpose": "1차"})
     b = ToolCall("2", "sql_query", {"sql": "select  pd_nm\nfrom v_etf_kr\nwhere manager_name = '삼성자산운용';", "purpose": "다시 시도"})
     c = ToolCall("3", "sql_query", {"sql": "select pd_nm from v_etf_kr where manager_name = '미래에셋자산운용'"})
-    assert _call_key(a) == _call_key(b)   # 대소문자·개행·연산자 공백·세미콜론·purpose 만 다르면 같은 호출
-    assert _call_key(a) != _call_key(c)   # 리터럴 값이 다르면 다른 호출(리터럴은 소문자화하지 않는다)
+    assert _call_key(a) == _call_key(b)   # differing only in case, newlines, operator spacing, semicolon, purpose = same call
+    assert _call_key(a) != _call_key(c)   # a different literal value is a different call (literals are not lower-cased)
     assert _call_key(ToolCall("4", "search_products", {"query": "로봇"})) != \
         _call_key(ToolCall("5", "search_products", {"query": "로봇 ETF"}))
     assert _call_key(ToolCall("6", "final_answer", {"status": "answered"})) is None
 
 
 class _Tap(StubLLM):
-    """모델에게 실제로 전달된 도구 결과 문자열을 그대로 모아 두는 StubLLM."""
+    """A StubLLM that collects the tool-result strings actually handed to the model, as is."""
 
     def __init__(self, script):
         super().__init__(script)
@@ -591,13 +797,13 @@ class _Tap(StubLLM):
 
 
 async def test_identical_call_is_re_executed_and_says_so(tiny_store, tmp_path):
-    """G-015 재발 방지: 같은 질의를 세 번 보내면 '막혔다'고 알린다.
+    """G-015 regression: sending the same query three times gets told it is stuck.
 
-    단, 호출을 **막지는 않는다**(G-040). 실행을 건너뛰어 아끼는 것은 도구 시간 몇 밀리초뿐이고,
-    그 대가로 모델이 막다른 길에서 빠져나오려는 시도를 잘라 버린다. 실행은 그대로 하고
-    결과 뒤에 '몇 번째 같은 호출인지'만 덧붙인다.
+    But the call is **not blocked** (G-040).  Skipping execution saves only a few milliseconds of tool
+    time, and in exchange cuts off the model's attempt to get out of the dead end.  It runs as usual,
+    and only 'which identical call this is' is appended to the result.
     """
-    sql = "SELECT pd_no, pd_abrv_nm FROM v_etf_kr WHERE is_on_sale=1"   # pd_no 는 없는 컬럼
+    sql = "SELECT pd_no, pd_abrv_nm FROM v_etf_kr WHERE is_on_sale=1"   # pd_no is not a column
     script = [
         Turn("", [ToolCall("c1", "sql_query", {"sql": sql, "purpose": "1차 시도"})], "tool_use"),
         Turn("", [ToolCall("c2", "sql_query", {"sql": sql, "purpose": "2차 시도"})], "tool_use"),
@@ -608,27 +814,27 @@ async def test_identical_call_is_re_executed_and_says_so(tiny_store, tmp_path):
     s = _state(tiny_store, llm, tmp_path)
     executed = []
     real = s.rdb.query
-    s.rdb.query = lambda q: (executed.append(q), real(q))[1]   # DB 를 실제로 몇 번 때렸는지 센다
+    s.rdb.query = lambda q: (executed.append(q), real(q))[1]   # counts how often the DB is really hit
 
     resp = await s.orchestrator.answer("R-001", "국내 ETF 목록 알려줘")
 
-    assert sum(1 for q in executed if "pd_no" in q.lower()) == 3, executed   # 세 번 모두 실행된다
+    assert sum(1 for q in executed if "pd_no" in q.lower()) == 3, executed   # all three run
     assert len(llm.tool_contents) == 3
-    assert "번째 동일한 호출입니다" not in llm.tool_contents[0]
-    assert "2번째 동일한 호출입니다" in llm.tool_contents[1]
-    assert "3번째 동일한 호출입니다" in llm.tool_contents[2]
-    assert "결과가 달라지지 않습니다" in llm.tool_contents[1]
-    assert "실행하지 않고" not in llm.tool_contents[1]   # 안내 문구가 사실과 어긋나면 안 된다
-    assert "table_info" in llm.tool_contents[1]              # 실패한 호출에는 컬럼 확인을 지시한다
-    # 반복분도 첫 결과(오류 메시지)를 그대로 담고 있다
+    assert "identical call #" not in llm.tool_contents[0]
+    assert "This is identical call #2 for this question" in llm.tool_contents[1]
+    assert "This is identical call #3 for this question" in llm.tool_contents[2]
+    assert "the same input gives the same result" in llm.tool_contents[1]
+    assert "without running" not in llm.tool_contents[1]   # the note must not contradict what happened
+    assert "table_info" in llm.tool_contents[1]             # a failed call is told to check the columns
+    # the repeat still carries the first result (the error message) as is
     assert "no such column: pd_no" in llm.tool_contents[1]
-    # think_trace 에도 남는다
-    assert "동일 호출 2번째" in resp.think_trace and "동일 호출 3번째" in resp.think_trace
-    assert "동일 호출 3회 → 조기 마무리 안내" in resp.think_trace
+    # and it stays in think_trace
+    assert "identical call #2" in resp.think_trace and "identical call #3" in resp.think_trace
+    assert "identical call 3 times → told to wrap up early" in resp.think_trace
 
 
 async def test_zero_row_repeat_suggests_relaxing_conditions(tiny_store, tmp_path):
-    """0건이 반복되면 '조건을 하나씩 빼라'고 구체적으로 말한다. 근거는 두 번 세지 않는다."""
+    """Repeated 0 rows get a concrete 'drop the conditions one at a time'.  The evidence is not counted twice."""
     sql = "SELECT pd_abrv_nm FROM v_etf_kr WHERE manager_name='없는운용사'"
     script = [
         Turn("", [ToolCall("c1", "sql_query", {"sql": sql})], "tool_use"),
@@ -641,14 +847,14 @@ async def test_zero_row_repeat_suggests_relaxing_conditions(tiny_store, tmp_path
     real = s.rdb.query
     s.rdb.query = lambda q: (executed.append(q), real(q))[1]
     resp = await s.orchestrator.answer("R-003", "없는운용사 ETF 알려줘")
-    assert sum(1 for q in executed if "없는운용사" in q) == 2   # 재실행은 막지 않는다
-    assert "조건을 하나씩 빼면서" in llm.tool_contents[1]
-    # 실행은 두 번 했어도 근거는 한 번만 센다 — 같은 결과가 [근거] 로 두 줄 찍히면 안 된다
-    assert resp.retrieved_context.count("[근거") == 1
+    assert sum(1 for q in executed if "없는운용사" in q) == 2   # re-running is not blocked
+    assert "Drop the conditions one at a time" in llm.tool_contents[1]
+    # run twice, but the evidence counts once — the same result must not print as two [Evidence] lines
+    assert resp.retrieved_context.count("[Evidence") == 1
 
 
 async def test_two_different_calls_both_run_untouched(tiny_store, tmp_path):
-    """정상 질문에는 아무 일도 일어나면 안 된다 — 서로 다른 두 호출은 둘 다 실행된다."""
+    """Nothing may happen to a normal question — two different calls both run."""
     q1 = "SELECT pd_abrv_nm FROM v_etf_kr WHERE is_on_sale=1"
     q2 = "SELECT pd_no, pd_nm FROM v_bond_kr WHERE is_sellable=1"
     script = [
@@ -664,19 +870,20 @@ async def test_two_different_calls_both_run_untouched(tiny_store, tmp_path):
 
     resp = await s.orchestrator.answer("R-004", "판매중인 ETF와 채권 알려줘")
     assert any("v_etf_kr" in q for q in executed) and any("v_bond_kr" in q for q in executed)
-    assert "동일 호출" not in resp.think_trace
-    assert not any("동일한 호출입니다" in c for c in llm.tool_contents)
-    assert resp.retrieved_context.count("[근거") == 2
+    assert "identical call" not in resp.think_trace
+    assert not any("identical call" in c for c in llm.tool_contents)
+    assert resp.retrieved_context.count("[Evidence") == 2
 
 
 def test_closing_offer_is_stripped_but_facts_and_caveats_survive():
-    """기록된 54개 답변 중 8개가 "추가적인 정보가 필요하시면 …"으로 끝났다.
+    """8 of the 54 recorded answers ended with "추가적인 정보가 필요하시면 …" (if you need more information …).
 
-    그 문장은 정보가 0인데 생성 시간을 쓴다(측정: 고정 2.7초 + 63토큰/초). 실제로 지워지는 것은
-    54개 중 6개고 나머지 48개는 바이트 단위로 그대로다. 지우면 안 되는 것이 더 중요하다 —
-    수치가 든 문장, "투자 판단은 본인 책임" 같은 유의사항, "…없습니다" 같은 확인 불가 사실.
+    That sentence carries no information and costs generation time (measured: a fixed 2.7 seconds + 63
+    tokens/second).  Only 6 of the 54 are actually trimmed; the other 48 stay byte for byte.  What must
+    not be deleted matters more — sentences with numbers, caveats like "투자 판단은 본인 책임" (investment
+    decisions are your own responsibility), and cannot-confirm facts like "…없습니다" (there is none).
     """
-    # 실제 기록에서 지워지는 문장들 (G-021 / G-022 / G-009 / G-043 / G-054)
+    # sentences from the real records that are deleted (G-021 / G-022 / G-009 / G-043 / G-054)
     assert strip_closing_offer(
         "혹시 이 중에서 찾고 계신 상품이 있는지 확인 부탁드립니다. 추가적인 정보가 필요하시면 말씀해 주세요."
     ) == "혹시 이 중에서 찾고 계신 상품이 있는지 확인 부탁드립니다."
@@ -694,34 +901,57 @@ def test_closing_offer_is_stripped_but_facts_and_caveats_survive():
         "추가적인 정보가 필요하다면 직접 금융기관의 웹사이트를 방문하거나 고객 서비스에 문의하시는 것을 권장드립니다."
     ) == "총보수 정보는 도구에서 반환되지 않았습니다."
 
-    # ---- 손대면 안 되는 것들 ----
+    # ---- must not be touched ----
     keep = (
-        # 유의사항이 같은 문장에 섞여 있으면 통째로 남긴다(G-020 / G-037 실제 기록).
+        # a caveat in the same sentence keeps the whole sentence (real records G-020 / G-037).
         "투자 판단은 본인의 책임 하에 이루어져야 하며, 추가적인 정보가 필요하신 경우 개별 ETF의 세부 사항을 확인하시기 바랍니다.",
         "투자 판단은 본인의 책임이며, 추가적인 정보는 제공된 도구들을 통해 더욱 상세히 확인할 수 있습니다.",
-        # 수치가 든 문장은 답의 본체다
+        # a sentence with numbers is the body of the answer
         "조건에 맞는 종목은 15,837개이며 그중 상위 5개는 아래와 같습니다.",
         "추가적인 정보로 순자산은 4조 1,402억원입니다.",
-        # 확인 불가·제외 사실
+        # cannot-confirm and exclusion facts
         "해외ETF는 1년 수익률이 제공되지 않아 비교에서 제외했습니다.",
         "제공된 데이터로는 확인할 수 없습니다.",
-        # 그냥 안내가 아닌 마지막 문장
+        # a last sentence that is not mere guidance
         "이 상품의 총보수는 0.05%입니다.",
     )
     for t in keep:
         assert strip_closing_offer(t) == t, t
         assert normalize_answer("answered", t) == t, t
 
-    # 파이프라인에 실제로 물려 있고, 빈 답을 만들지 않는다
+    # it is really wired into the pipeline, and it never produces an empty answer
     assert normalize_answer("answered", "총 22개입니다. 추가적인 정보가 필요하시면 문의해 주세요.") == "총 22개입니다."
-    assert normalize_answer("answered", "추가적인 정보가 필요하시면 문의해 주세요.") == CANNOT_PREFIX
+    assert normalize_answer("answered", "추가적인 정보가 필요하시면 문의해 주세요.", "ko") == CANNOT_PREFIX_KO
+
+
+def test_english_closing_offer_is_stripped_but_facts_and_caveats_survive():
+    """The English counterpart: the same three keep-rules (numbers, caveats, cannot-confirm facts)."""
+    for text, want in (
+        ("The total fee of KODEX 200 is 0.15%. Let me know if you need anything else.",
+         "The total fee of KODEX 200 is 0.15%."),
+        ("15,837 bonds match. Feel free to ask if you have more questions!", "15,837 bonds match."),
+        ("TIGER 200 is managed by 미래에셋자산운용. If you have more questions, please let me know.",
+         "TIGER 200 is managed by 미래에셋자산운용."),
+        ("The fund is 공모펀드. If you need further information, please do not hesitate to contact us.",
+         "The fund is 공모펀드."),
+    ):
+        assert strip_closing_offer(text) == want, text
+    for keep in (
+        "Investment decisions are your own responsibility; feel free to ask for more details.",
+        "If you need more details, the 1-year return is 12.3%.",
+        "Foreign ETFs were excluded; let me know if you want them anyway.",
+        "No further information is available.",
+        "For more details, see the prospectus.",
+    ):
+        assert strip_closing_offer(keep) == keep, keep
+    assert normalize_answer("answered", "Let me know if you need anything else.") == CANNOT_PREFIX_EN
 
 
 async def test_graph_neighbors_shows_few_labels_but_the_true_total(tiny_store, tmp_path):
-    """라벨은 8개만 찍고 총 건수는 그대로 보고한다.
+    """Print only 8 labels, but report the total as is.
 
-    잘린 개수를 총계로 보고한 것이 예전의 실제 버그였다(에코프로비엠 42건이 60건 상한으로 보고됨).
-    라벨 40개는 삼성전자 한 번 호출에 1,501자였고 그 텍스트는 이후 모든 라운드에 다시 실려 나간다.
+    Reporting the truncated count as the total was a real bug before (에코프로비엠's 42 reported as the 60 cap).
+    40 labels were 1,501 characters for one 삼성전자 call, and that text is re-sent in every later round.
     """
     class _FakeKG:
         def __init__(self, n):
@@ -735,51 +965,50 @@ async def test_graph_neighbors_shows_few_labels_but_the_true_total(tiny_store, t
     s = _state(tiny_store, StubLLM([]), tmp_path)
     s.tools.kg = _FakeKG(229)
     r = await s.tools.execute("graph_neighbors", {"entity": "삼성전자"})
-    assert "229건" in r.content and r.evidence.row_count == 229      # 총계는 잘리지 않는다
-    assert r.content.count("ETF") == GRAPH_LABELS_SHOWN == 8         # 라벨은 8개만
+    assert "229 total" in r.content and r.evidence.row_count == 229  # the total is never truncated
+    assert r.content.count("ETF") == GRAPH_LABELS_SHOWN == 8         # only 8 labels
     assert "ETF007" in r.content and "ETF008" not in r.content
-    # 라벨 줄은 여전히 "..." 로 잘리지만, 그 아래에 SQL 조회용 ID 줄이 따라붙는다.
+    # the label line is still cut with "...", but a line of SQL lookup IDs follows it.
     labels_line = r.content.splitlines()[0]
-    assert "예시 8건" in labels_line and labels_line.rstrip().endswith("...")
-    assert "조회용 ID" in r.content and "pd_itm_no IN (" in r.content
-    assert "상위" not in r.content                                    # 정렬돼 있지 않으므로 '상위'라 부르지 않는다
-    # 상한 200 -> 700.  라벨 8개만으로는 모델이 SQL 을 짤 수 없어 조회용 ID 줄을 덧붙였고,
-    # 그만큼 길어진다(229건 관계에서 550자).  이 상한의 목적은 40개 시절 삼성전자가 1,501자를
-    # 쏟아내던 것을 막는 것이었고, 550자는 그 3분의 1이다.  ID 없이 짧기만 한 출력은 실제로
-    # 답을 못 만들었다 — 우주항공 테마 100건을 받고도 이름만으로는 쓰지 못해 확인불가로 끝났다.
+    assert "8 examples shown" in labels_line and labels_line.rstrip().endswith("...")
+    assert "lookup IDs" in r.content and "pd_itm_no IN (" in r.content
+    assert not re.search(r"\btop\b", r.content, re.I)                # not sorted, so never called 'top'
+    # Limit 200 -> 700.  8 labels alone do not let the model write SQL, so a lookup-ID line was added,
+    # which makes the output longer (550 characters for a 229-item relation).  The limit exists to stop
+    # what 삼성전자 did in the 40-label days, dumping 1,501 characters, and 550 is a third of that.  Output
+    # that was merely short, without IDs, really failed to produce answers — 100 우주항공 theme products
+    # came back and, names alone being unusable, the question ended as cannot-confirm.
     assert len(r.content) < 700
 
-    # 총계가 상한 이하면 아무것도 잘리지 않고 "예시" 표기도 붙지 않는다
+    # at or below the threshold nothing is cut and no "examples" note is added
     s.tools.kg = _FakeKG(3)
     r3 = await s.tools.execute("graph_neighbors", {"entity": "에코프로"})
-    assert "3건" in r3.content and "예시" not in r3.content and "..." not in r3.content
+    assert "3 total" in r3.content and "examples" not in r3.content and "..." not in r3.content
     assert r3.content.count("ETF") == 3
 
 
-# ---------------------------------------------------------------- 온톨로지가 판정을 소유하는가
-# 아래 네 가지는 예전에 프롬프트의 문장으로만 있었고, 문장은 코드가 읽을 수 없었다. 이제 판정의
-# 출처는 TTL 이므로 TTL 을 고치면 여기 결과가 따라 움직여야 한다.
+# ---------------------------------------------------------------- does the ontology own the judgement?
+# The four checks below used to exist only as sentences in the prompt, and code cannot read sentences.
+# The judgement now comes from the TTL, so editing the TTL must move these results with it.
 
 
 def test_ontology_answers_which_product_classes_carry_holdings():
-    """편입종목을 가진 상품군을 그래프에서 읽어 온다 — 하드코딩 목록이 아니라."""
+    """The product groups that carry holdings are read from the graph — not from a hard-coded list."""
     from finagent.ontology.loader import Ontology
 
     o = Ontology.load(ROOT / "ontology")
     assert [c.name for c in o.holding_classes()] == ["DomesticETF"]
     assert o.holding_view() == "v_etf_constituent"
-    # 상위 클래스는 하위 중 하나라도 가지면 참이다: 'ETF' 로만 물은 질문을 막으면 안 된다
+    # a superclass is true when any subclass is: a question that only says 'ETF' must not be blocked
     assert o.class_has_holdings("ETF") and o.class_has_holdings("DomesticETF")
-    # ETN·펀드·채권은 하위까지 내려가도 편입종목이 없다
+    # ETNs, funds and bonds have no holdings, all the way down
     for c in ("ETN", "DomesticETN", "Fund", "PublicFund", "PrivateFund", "ForeignETF", "DomesticBond"):
         assert not o.class_has_holdings(c), c
 
 
 def test_ontology_scope_detection_agrees_with_the_regex_guard(tiny_store, tmp_path):
-    """온톨로지 주도 상품군 판정이 기존 정규식 가드와 같은 답을 낸다(둘이 갈라지면 사고다)."""
-    from finagent.agent.orchestrator import product_groups
-
-    from finagent.agent.orchestrator import _HOLDING_WORD
+    """The ontology-driven product-group judgement gives the same answer as the regex guard (a split is an incident)."""
+    from finagent.agent.orchestrator import mentions_holdings, product_groups
 
     s = _state(tiny_store, StubLLM([]), tmp_path)
     o = s.orchestrator.ontology
@@ -790,100 +1019,148 @@ def test_ontology_scope_detection_agrees_with_the_regex_guard(tiny_store, tmp_pa
               "카카오를 편입한 ETN을 알려줘",
               "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
               "에코프로비엠을 편입한 ETF는 몇 개인가요?",
-              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"):
+              "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘",
+              # English: the classes' English labels and English spelling variants
+              "Which foreign ETFs hold NVIDIA?",
+              "Which public funds hold 삼성전자?",
+              "Does any mutual fund contain SK하이닉스?",
+              "Which US ETFs include Tesla?",
+              "Which ETNs hold 카카오?",
+              "Which domestic ETFs hold 삼성전자?",
+              "Which Korean ETFs and public funds hold 삼성전자?",
+              "How many ETFs hold 에코프로비엠?",
+              "Which PLUS ETF holds 삼성전자?"):
         g = product_groups(q, o)
-        blind = bool(g and _HOLDING_WORD.search(q)) and not any(o.class_has_holdings(c.name) for c in g)
+        blind = bool(g and mentions_holdings(q)) and not any(o.class_has_holdings(c.name) for c in g)
         assert blind == asks_holdings_without_data(q), (q, [c.name for c in g])
+    # English labels are matched only in English questions: a Korean question is grouped exactly as before
+    assert [c.name for c in product_groups("Vanguard 500 Index Fund의 운용사는?", o)] == []
 
 
 async def test_fund_holdings_question_gets_the_fact_not_a_holdings_count(tiny_store, tmp_path):
-    """G-041: 공모펀드로 한정된 편입 질문에 '편입 상품 100건' 을 주면 안 된다.
+    """G-041: a holdings question restricted to public funds must not be given 'held by 100 products'.
 
-    그 100 은 국내ETF 의 건수였고(그나마 상한에 잘린 값이었다), 모델은 그것을 공모펀드의
-    건수로 읽었다. 이제는 건수 대신 '이 상품군에는 편입 데이터가 없다'는 사실이 들어간다.
+    That 100 was the count for domestic ETFs (and a value cut at the cap at that), and the model read it
+    as the public-fund count.  Now the fact 'this product group has no holdings data' goes in instead of a count.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
-    pre = s.orchestrator.pre_analyze("SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?")
-    assert "편입 상품" not in pre.text and "편입 국내ETF" not in pre.text   # 건수를 주지 않는다
-    assert "편입종목 데이터 범위" in pre.text
-    assert "공모펀드(v_fund_pub)" in pre.text and "v_etf_constituent" in pre.text
-    assert "확인할 수 없음" in pre.text                                     # 0건이 아니라 확인불가
-    assert "fp:hasConstituent 의 정의역 = DomesticETF" in pre.text          # 근거는 온톨로지다
+    for q in ("SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?",
+              "Which public fund holding SK하이닉스 has the largest net assets?"):
+        pre = s.orchestrator.pre_analyze(q)
+        assert "held by" not in pre.text                                          # no count is given
+        assert "Holdings data scope" in pre.text
+        assert "공모펀드(v_fund_pub)" in pre.text and "v_etf_constituent" in pre.text
+        assert "cannot be confirmed with the provided data" in pre.text           # not 0, but cannot confirm
+        assert "the domain of the ontology's fp:hasConstituent = DomesticETF" in pre.text   # the basis is the ontology
 
 
 async def test_answerable_etf_holdings_question_keeps_its_count(tiny_store, tmp_path):
-    """국내 ETF 편입 질문은 답할 수 있다 — 주입이 이 문항을 건드리면 정답을 막는다."""
+    """A domestic-ETF holdings question is answerable — if the injection touched it, it would block the right answer."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
     pre = s.orchestrator.pre_analyze("에코프로비엠을 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개")
-    assert "편입종목 데이터 범위" not in pre.text
-    assert "편입 국내ETF 1건(그래프)" in pre.text      # 작은 스토어의 실제 편입 건수
-    assert "정렬 기준 '순자산'" in pre.text and "v_etf_kr.pd_net_tamt" in pre.text
-    assert "요청 개수: 3개" in pre.text
+    assert "Holdings data scope" not in pre.text
+    assert "held by 1 국내ETF (graph)" in pre.text      # the small store's real holding count
+    assert "Sort criterion '순자산'" in pre.text and "v_etf_kr.pd_net_tamt" in pre.text
+    assert "Requested count: 3" in pre.text
+
+
+async def test_english_ranking_criterion_resolves_through_the_korean_labels(tiny_store, tmp_path):
+    """English ranking phrasings reach the same ontology lookup; the phrase is shown as asked."""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    pre = s.orchestrator.pre_analyze("Which 3 domestic ETFs holding 에코프로비엠 have the largest net assets?")
+    assert "Holdings data scope" not in pre.text and "held by 1 국내ETF (graph)" in pre.text
+    assert "Sort criterion 'net assets'" in pre.text and "v_etf_kr.pd_net_tamt" in pre.text
+    assert "Requested count: 3" in pre.text
+    pre = s.orchestrator.pre_analyze("Top 10 across domestic ETFs, foreign ETFs and public funds by 1-year return")
+    assert "Sort criterion '1-year return'" in pre.text
+    assert "v_etf_kr.du_er_1y" in pre.text and "v_fund_pub.fd_yr1_ern_r" in pre.text
+    assert "해외ETF(v_etf_gl) has no '1년 수익률' column" in pre.text and "du_er_1d" in pre.text
+    assert "Requested count: 10" in pre.text
+    pre = s.orchestrator.pre_analyze("What are the three largest domestic ETFs by net assets?")
+    assert "Sort criterion 'net assets'" in pre.text and "Requested count: 3" in pre.text
+    for q in ("Which domestic ETFs are sorted by total fee?", "List bonds ranked by coupon rate",
+              "Which fund has the highest expense ratio?"):
+        assert "Sort criterion" in s.orchestrator.pre_analyze(q).text, q
+    # no ranking, or a ranking word without a measure: silence, as in Korean
+    for q in ("How many KRW bonds are rated AA- or higher?", "Which company manages KODEX 로봇액티브?",
+              "Which are the largest ETFs?", "What is the risk grade of 삼성 KODEX 2차전지산업?"):
+        assert "Sort criterion" not in s.orchestrator.pre_analyze(q).text, q
+
+
+async def test_recent_months_window_in_english(tiny_store, tmp_path):
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    assert "'last 6 months' = 2026-02-21 ~ 2026-08-21" in s.orchestrator.pre_analyze("최근 6개월 상장 ETF").text
+    assert "'last 6 months' = 2026-02-21 ~ 2026-08-21" in s.orchestrator.pre_analyze(
+        "Which ETFs were listed in the last 6 months?").text
 
 
 async def test_period_specific_criterion_names_the_group_that_lacks_it(tiny_store, tmp_path):
-    """'1년 수익률' 로 세 상품군을 한 번에 물으면, 해외ETF 에 그 컬럼이 없다는 사실이 들어간다.
+    """Asking for the '1년 수익률' (1-year return) of three product groups at once injects the fact that 해외ETF lacks that column.
 
-    이것이 92초짜리 3-way UNION 을 만든 사고의 원인이었다: 프롬프트에 산문으로 적혀 있었지만
-    바로 위 예시가 3-way UNION 이라 모델은 예시를 따라갔다.
+    This caused the incident of the 92-second 3-way UNION: it was written in the prompt as prose, but the
+    example right above it was a 3-way UNION and the model followed the example.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     pre = s.orchestrator.pre_analyze("국내ETF, 해외ETF, 공모펀드를 통틀어 1년 수익률 기준 TOP10을 알려줘")
     assert "v_etf_kr.du_er_1y" in pre.text and "v_fund_pub.fd_yr1_ern_r" in pre.text
-    assert "해외ETF(v_etf_gl)에는 '1년 수익률' 컬럼이 없습니다" in pre.text
-    assert "du_er_1d" in pre.text                     # 대신 무엇이 있는지도 밝힌다
-    assert "요청 개수: 10개" in pre.text
+    assert "해외ETF(v_etf_gl) has no '1년 수익률' column" in pre.text
+    assert "du_er_1d" in pre.text                     # and says what there is instead
+    assert "Requested count: 10" in pre.text
 
 
 async def test_bare_return_criterion_is_reported_as_ambiguous_not_guessed(tiny_store, tmp_path):
-    """맨 '수익률' 은 기간이 없어 여러 컬럼에 대응한다. 하나를 몰래 고르면 안 된다."""
+    """A bare '수익률' (return) has no period and maps to several columns.  Quietly picking one is not allowed."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
-    pre = s.orchestrator.pre_analyze("수익률이 가장 높은 상품 10개를 알려줘")
-    assert "기간·대상이 지정되지 않아" in pre.text
-    assert "du_er_1y" in pre.text and "du_er_1m" in pre.text   # 후보를 이름으로 준다
-    assert "임의로 고르지 말고" in pre.text
+    for q in ("수익률이 가장 높은 상품 10개를 알려줘", "Which 10 products have the highest return?"):
+        pre = s.orchestrator.pre_analyze(q)
+        assert "names no period or target" in pre.text, q
+        assert "du_er_1y" in pre.text and "du_er_1m" in pre.text   # the candidates are given by name
+        assert "do not pick one arbitrarily" in pre.text
 
 
 async def test_label_miss_is_not_reported_as_missing_data(tiny_store, tmp_path):
-    """'운용규모' 는 라벨 조회로 0건이지만 v_etf_gl.du_last_aum 이 바로 그것이다.
+    """'운용규모' (AUM) gets 0 label matches, yet v_etf_gl.du_last_aum is exactly that.
 
-    라벨이 없다는 이유로 '데이터에 없다'고 쓰면 답할 수 있는 문항이 확인불가가 된다.
-    주석·영문 라벨까지 뒤져 후보를 주되, 부재를 단정하지 않는다.
+    Writing 'not in the data' because there is no label turns an answerable question into cannot-confirm.
+    Candidates are given, searching comments and English labels too, but absence is never asserted.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     pre = s.orchestrator.pre_analyze("해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘")
     assert "du_last_aum" in pre.text
-    assert "라벨이 없다고 데이터에 없는 것이 아닙니다" in pre.text
-    # 부재 단정 문구는 하나도 나오면 안 된다 ('정확히 일치하는 컬럼이 없습니다' 는 후보 안내이지 부재 단정이 아니다)
-    for bad in ("이 기준에 해당하는 컬럼이 없습니다", "순위 비교에서 제외", "확인할 수 없"):
+    assert "No label does not mean no data" in pre.text
+    # not a single absence assertion may appear ('has no column whose ontology label matches exactly' is
+    # candidate guidance, not an assertion of absence)
+    for bad in ("has no column for this criterion", "Exclude it from the ranking", "cannot be confirmed"):
         assert bad not in pre.text, bad
-    # 같은 이유로, 라벨이 다른 뷰에 대해서도 부재를 단정하지 않는다 (순자산 vs v_etf_gl.du_last_aum)
-    pre2 = s.orchestrator.pre_analyze("해외 ETF 중 순자산이 가장 큰 상품 3개")
-    assert "없다고 단정하지 말고" in pre2.text and "du_last_aum(AUM)" in pre2.text
-    assert "이 기준에 해당하는 컬럼이 없습니다" not in pre2.text
+    # for the same reason no absence is asserted for a view whose label differs (순자산 vs v_etf_gl.du_last_aum)
+    for q in ("해외 ETF 중 순자산이 가장 큰 상품 3개", "Which 3 foreign ETFs have the largest net assets?"):
+        pre2 = s.orchestrator.pre_analyze(q)
+        assert "Do not conclude it is missing" in pre2.text and "du_last_aum(AUM)" in pre2.text, q
+        assert "has no column for this criterion" not in pre2.text
 
 
 async def test_questions_without_a_ranking_criterion_get_no_criterion_line(tiny_store, tmp_path):
-    """대부분의 문항에는 정렬 기준이 없다. 그럴 때 주입은 완전히 침묵해야 한다."""
+    """Most questions have no ranking criterion.  Then the injection must stay completely silent."""
     s = _state(tiny_store, StubLLM([]), tmp_path)
     for q in ("현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
               "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?",
               "구매 가능한 원화채권 가운데 신용등급이 A0인 채권은 서로 다른 종목(종목코드) 기준으로 몇 개인가요?",
               "KODEX 로봇액티브를 운용하는 자산운용사는 어디인가요?",
               "삼성 KODEX 2차전지산업의 위험등급은?"):
-        assert "정렬 기준" not in s.orchestrator.pre_analyze(q).text, q
+        assert "Sort criterion" not in s.orchestrator.pre_analyze(q).text, q
 
 
-# ===================================================================== 줄글(평문) 답변
-# 주최측 응답 예시의 answer 는 평문 한 줄이다. 프롬프트 규칙 12 로 한 번, normalize_answer 로 한 번
-# 막는다. 여기서 검증하는 것은 코드 방어 쪽이다 — 프롬프트 규칙은 지켜지지 않은 전례가 있다.
+# ===================================================================== plain-prose answers
+# The answer in the organisers' sample response is one line of plain text.  It is blocked once by prompt
+# rule 12 and once by normalize_answer.  What is checked here is the code-side defence — prompt rules
+# have a record of being ignored.
 def test_markdown_emphasis_is_stripped_without_touching_numbers():
     assert normalize_answer("answered", "총보수는 **0.65**%입니다.") == "총보수는 0.65%입니다."
     assert normalize_answer("answered", "펀드는 '__한국투자네비게이터__'입니다.") == "펀드는 '한국투자네비게이터'입니다."
     assert normalize_answer("answered", "*가장 낮은* 값입니다.") == "가장 낮은 값입니다."
-    # 짝이 맞지 않는 강조(출력이 잘린 경우)도 남기지 않는다
+    # unpaired emphasis (truncated output) is not left behind either
     assert normalize_answer("answered", "총보수는 **0.65%입니다.") == "총보수는 0.65%입니다."
-    # 숫자·컬럼명·문장 부호는 마크다운이 아니다 — 그대로 둔다
+    # numbers, column names and punctuation are not markdown — they stay
     for intact in (
         "총보수 0.03%인 상품은 1개이며 순자산은 1,436.24억원입니다.",
         "du_er_1y 는 과거 1년 실적이며 pd_net_tamt 는 순자산입니다.",
@@ -922,7 +1199,7 @@ def test_headers_rules_tables_and_code_fences_are_stripped():
 
 
 def test_bullet_list_of_a_real_recorded_answer_is_flattened():
-    # G-021 의 실제 답변 모양. 마커만 사라지고 코드 4개는 전부 남아야 한다.
+    # The shape of G-021's real answer.  Only the markers go; all 4 codes must stay.
     out = normalize_answer("answered", (
         "이 ETF의 정보는 다음과 같습니다:\n\n"
         "- **상품명**: KODEX 미국휴머노이드로봇\n"
@@ -934,9 +1211,9 @@ def test_bullet_list_of_a_real_recorded_answer_is_flattened():
         assert keep in out, keep
 
 
-# ============================================ cannot_confirm: 거절했으면 거기서 끝난다
-# 사고 사례: "한화 에어로스페이스의 자회사를 편입한 ETF 중 …" 에 "찾을 수 없습니다" 라고 해놓고
-# "그러나 한화 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다" 하며 40개를 나열했다.
+# ============================================ cannot_confirm: once refused, the answer ends there
+# Incident: to "한화 에어로스페이스의 자회사를 편입한 ETF 중 …" the model said "찾을 수 없습니다" (cannot be
+# found), then went on "그러나 한화 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다" and listed 40.
 def test_cannot_confirm_drops_the_substitute_product_listing():
     out = normalize_answer("cannot_confirm", (
         "제공된 데이터로는 한화 에어로스페이스의 자회사를 편입한 ETF를 확인할 수 없습니다. "
@@ -955,8 +1232,26 @@ def test_cannot_confirm_drops_the_substitute_product_listing():
         assert gone not in out, gone
 
 
+def test_english_cannot_confirm_drops_the_substitute_product_listing():
+    """The same cut for an English answer: refusal kept, the pivot sentence and the product rows dropped."""
+    out = normalize_answer("cannot_confirm", (
+        "The ETFs holding subsidiaries of 한화에어로스페이스 cannot be confirmed with the provided data. "
+        "There is no holdings data linking subsidiaries to products.\n"
+        "However, here are ETFs that hold 한화에어로스페이스 itself:\n\n"
+        "1. **KODEX 200** (069500) - 25.47 trillion won\n"
+        "2. **TIGER 200** (102110) - 10.43 trillion won\n"
+        "3. **PLUS 고배당주** (161510) - 1.2 trillion won\n"
+    ))
+    assert out == ("The ETFs holding subsidiaries of 한화에어로스페이스 cannot be confirmed with the provided data. "
+                   "There is no holdings data linking subsidiaries to products.")
+    # the valid values of the asked condition, inline, are kept
+    keep = ("This cannot be confirmed with the provided data. Credit rating 'AAAA' does not exist. "
+            "Valid credit ratings: AAA, AA+, AA0, AA-, A+, A0, A-.")
+    assert normalize_answer("cannot_confirm", keep) == keep
+
+
 def test_cannot_confirm_drops_a_marker_less_row_listing_too():
-    # 변경 1 로 마커가 사라지므로, 목록 판정은 마커가 아니라 '행 단위 상품'이라는 내용으로 한다.
+    # Change 1 removes the markers, so a list is judged by content ('one product per line'), not by markers.
     out = normalize_answer("cannot_confirm", (
         "제공된 데이터로는 자회사를 편입한 ETF를 확인할 수 없습니다.\n"
         "대신 한화에어로스페이스를 편입한 ETF는 다음과 같습니다.\n"
@@ -966,7 +1261,7 @@ def test_cannot_confirm_drops_a_marker_less_row_listing_too():
 
 
 def test_cannot_confirm_keeps_the_valid_values_of_the_asked_condition():
-    """지우면 안 되는 쪽 — 조건의 유효값을 인라인으로 알려주는 답변(G-016·G-017·G-022·G-052 실제 답변)."""
+    """The side that must not be deleted — answers giving the condition's valid values inline (real answers G-016, G-017, G-022, G-052)."""
     for keep in (
         "제공된 데이터로는 확인할 수 없습니다. 신용등급 'AAAA'는 존재하지 않는 값입니다. "
         "유효한 신용등급은 AAA, AA+, AA0, AA-, A+, A0, A-, BBB+, BBB0, BBB-, BB+, BB0, BB-, "
@@ -982,7 +1277,7 @@ def test_cannot_confirm_keeps_the_valid_values_of_the_asked_condition():
 
 
 def test_answered_status_never_loses_a_product_listing():
-    """상품 목록을 지우는 것은 cannot_confirm 전용이다. 정상 답변의 목록은 문장으로 이어질 뿐이다."""
+    """Deleting a product list is for cannot_confirm only.  A normal answer's list is only joined into a sentence."""
     out = normalize_answer("answered", (
         "순자산 상위 3개는 다음과 같습니다:\n"
         "1. KODEX 200 (069500) - 25조 4,748억원\n"
@@ -994,7 +1289,7 @@ def test_answered_status_never_loses_a_product_listing():
 
 
 def test_cannot_confirm_listing_is_kept_when_the_refusal_would_not_survive():
-    """목록이 답의 전부이면 손대지 않는다 — 여기서 통째로 날리는 것이 더 큰 손해다."""
+    """If the list is the whole answer it is left alone — throwing it all away here is the bigger loss."""
     only_list = "1. KODEX 200 (069500) - 25조원\n2. TIGER 200 (102110) - 10조원\n3. ACE 200 (105190) - 1조원"
     out = normalize_answer("cannot_confirm", only_list)
     for keep in ("KODEX 200", "TIGER 200", "ACE 200"):
@@ -1002,7 +1297,7 @@ def test_cannot_confirm_listing_is_kept_when_the_refusal_would_not_survive():
 
 
 def test_recorded_answers_that_must_pass_through_unchanged():
-    """54개 회귀셋 중 바뀌면 안 되는 실제 답변들(수치·확인불가 문구·스키마 사실)."""
+    """Real answers from the 54-question regression set that must not change (numbers, cannot-confirm wording, schema facts)."""
     for status, text in (
         ("answered", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 총 15,837개입니다."),
         ("answered", "TIGER 미국나스닥100을 운용하는 자산운용사는 미래에셋자산운용입니다."),
@@ -1017,10 +1312,10 @@ def test_recorded_answers_that_must_pass_through_unchanged():
 
 
 def test_flattened_list_supersedes_the_earlier_passthrough_expectation():
-    """test_leaked_tool_call_syntax_is_unwrapped_not_deleted 의 마지막 기대(목록 그대로 통과)는
+    """The last expectation of test_leaked_tool_call_syntax_is_unwrapped_not_deleted (a list passes through as is)
 
-    변경 1(줄글 강제)로 의도적으로 바뀌었다. strip_tool_call_syntax 는 여전히 손대지 않고,
-    normalize_answer 만 목록을 한 문장으로 잇는다 — 항목은 하나도 사라지지 않는다.
+    was changed on purpose by change 1 (prose only).  strip_tool_call_syntax still leaves it alone, and
+    only normalize_answer joins the list into one sentence — not a single item disappears.
     """
     legit = ("1. KB RISE 글로벌양자컴퓨팅증권상장지수투자신탁 (RISE 시리즈)\n"
              "2. 삼성 KODEX 글로벌양자컴퓨팅증권상장지수투자신탁 (KODEX 시리즈)")
@@ -1032,23 +1327,24 @@ def test_flattened_list_supersedes_the_earlier_passthrough_expectation():
 
 def test_prompt_carries_the_plain_prose_and_no_substitution_rules():
     from finagent.agent.prompts import RULES
-    assert "줄글(평문)로만" in RULES and "마크다운 금지" in RULES and "번호목록" in RULES
-    assert "묻지 않은 대상(상품군·개체·기간)으로 갈아타지 않습니다" in RULES
-    assert "확인 불가면 거기서 멈추고 대체 상품 목록을 덧붙이지 않습니다" in RULES
-    assert "마크다운 표/목록 가능" not in RULES        # 규칙 9 에서 뺐다
+    assert "plain prose only" in RULES and "No markdown" in RULES and "numbered lists" in RULES
+    assert "do not switch to a target that was not asked about (product group, entity, period)" in RULES
+    assert "If it cannot be confirmed, stop there and do not append a list of substitute products" in RULES
+    assert "markdown tables/lists allowed" not in RULES    # dropped from rule 9
 
 
-# ===================================================================== 조회 없는 답변 차단
-# 이 아래는 append-only 로 추가한 블록이다(위의 기존 테스트는 손대지 않았다).
+# ===================================================================== blocking answers given without a lookup
+# The block below was added append-only (the existing tests above were not touched).
 #
-# 배경: HCX-005 가 도구를 한 번도 부르지 않고 사전학습 지식으로 답해 버리는 경우가 있고, 실측에서
-# 그런 답은 예외 없이 틀렸다(G-034 는 운용사를 약칭으로, G-010 은 DB 에 없는 상품과 수치를 지어냈다).
-# 그래서 '조회 0회 상태의 final_answer' 는 받지 않고 한 라운드 더 돌린다.
+# Background: HCX-005 (the competition build's model) sometimes answered from pre-training knowledge
+# without calling a single tool, and measured, such answers were wrong without exception (G-034 gave the
+# manager's short form, G-010 invented a product and numbers not in the DB).  So a 'final_answer after 0
+# lookups' is not accepted and one more round runs.
 from finagent.agent.orchestrator import FORCED_LOOKUP_MIN_REMAINING_SEC, LOOKUP_TOOLS
 
 
 class _FullTap(StubLLM):
-    """모델에게 되돌려 준 tool_result 를 (id, 내용, 오류여부) 그대로, user 메시지도 함께 모은다."""
+    """Collects the tool_results handed back to the model as (id, content, is_error), and the user messages too."""
 
     def __init__(self, script):
         super().__init__(script)
@@ -1068,10 +1364,11 @@ class _FullTap(StubLLM):
 
 
 def _rebudget(s, *, time_budget_sec=120, max_tool_rounds=4):
-    """오케스트레이터의 시간·라운드 예산만 갈아끼운다.
+    """Swap only the orchestrator's time and round budget.
 
-    기존 ``_state`` 는 20초 예산이라 강제 재시도가 애초에 걸리지 않는다(그래서 기존 테스트는
-    이 변경의 영향을 받지 않는다). 여기서는 실제 운영값(120초)에 가까운 예산을 준다.
+    The existing ``_state`` has a 20-second budget, so the forced retry never kicks in (which is why the
+    existing tests are unaffected by this change).  Here a budget close to the production value (120
+    seconds) is given.
     """
     s.orchestrator.settings = Settings(
         _env_file=None, llm_provider="stub",
@@ -1080,28 +1377,28 @@ def _rebudget(s, *, time_budget_sec=120, max_tool_rounds=4):
     return s
 
 
-# 라운드 0 사전검색이 발동하지 않는 질문이어야 한다.  아래 게이트들은 "이번 질의에서 조회가
-# 한 번도 일어나지 않았다" 를 만들려는 것인데, 상품명을 지목하면 라운드 0 이 벡터 검색을
-# 실행해 버려 그 전제가 성립하지 않는다(사전검색은 서버가 실행한 진짜 조회로 센다).
-_ASK = "판매 가능한 원화채권은 몇 개인가요?"          # 순수 집계 — 그래프·벡터·문서 모두 생략
+# This must be a question on which round 0's prefetch does not fire.  The gates below want "no lookup
+# happened for this question", and naming a product makes round 0 run a vector search, which breaks that
+# premise (the prefetch counts as a real lookup the server ran).
+_ASK = "판매 가능한 원화채권은 몇 개인가요?"          # pure aggregation — graph, vector, document all skipped
 _SQL = "SELECT pd_nm, manager_name FROM v_etf_kr WHERE pd_nm LIKE '%2차전지%'"
 
 
 def test_lookup_tools_matches_the_registry(tiny_store, tmp_path):
-    """LOOKUP_TOOLS 가 실제 도구 목록과 어긋나면(도구 추가·개명) 여기서 걸린다.
+    """If LOOKUP_TOOLS drifts from the real tool list (a tool added or renamed), this catches it.
 
-    허용 목록으로 적은 이유는, 모델이 존재하지 않는 이름의 도구를 부른 것을 '조회했다'로
-    세면 안 되기 때문이다. 대신 목록이 낡을 수 있으므로 레지스트리와 대조해 둔다.
+    It is written as an allow-list because the model calling a tool whose name does not exist must not
+    count as 'looked up'.  The list can go stale instead, so it is checked against the registry.
     """
     s = _state(tiny_store, StubLLM([]), tmp_path)
     names = {t.name for t in s.tools.specs()}
     assert "final_answer" in names
     assert LOOKUP_TOOLS == names - {"final_answer"}
-    assert FORCED_LOOKUP_MIN_REMAINING_SEC > 14   # 기존 '시간 예산 임박' 문턱보다는 커야 한다
+    assert FORCED_LOOKUP_MIN_REMAINING_SEC > 14   # must be above the existing 'time budget nearly spent' threshold
 
 
 async def test_final_answer_without_any_lookup_is_sent_back_once(tiny_store, tmp_path):
-    """G-034 재발 방지: 조회 0회로 낸 답변은 받지 않고 한 라운드 더 돌린다."""
+    """G-034 regression: an answer given after 0 lookups is not accepted; one more round runs."""
     script = [
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
@@ -1111,21 +1408,21 @@ async def test_final_answer_without_any_lookup_is_sent_back_once(tiny_store, tmp
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-034", _ASK)
 
-    assert "제출 거부" in resp.think_trace
-    assert "삼성자산운용" in resp.answer                  # 조회 결과에서 가져온 값으로 답이 바뀌었다
-    assert resp.retrieved_context.count("[근거") == 1     # 조회가 실제로 일어났다
-    # 지시는 '사용 시점의 사실'로, user 메시지로 전달한다
-    assert "답변 전에 최소 한 번은 데이터를 조회해야 합니다" in llm.directives
+    assert "submission rejected" in resp.think_trace
+    assert "삼성자산운용" in resp.answer                  # the answer changed to the value from the lookup
+    assert resp.retrieved_context.count("[Evidence") == 1  # a lookup really happened
+    # the instruction is given as 'a fact at the point of use', in a user message
+    assert "You must look up data at least once before answering" in llm.directives
     assert "sql_query" in llm.directives
-    assert "공식 명칭" in llm.directives
+    assert "official product names" in llm.directives
 
 
 async def test_forced_retry_answers_every_pending_tool_call(tiny_store, tmp_path):
-    """CLOVA(OpenAI 호환)는 assistant 의 tool_call 마다 결과를 요구한다 — 하나라도 비면 다음 요청이 400 이다.
+    """CLOVA (OpenAI-compatible) requires a result for every assistant tool_call — one missing and the next request fails with 400.
 
-    final_answer 와 같은 턴에 딸려 와서 **실행되지 않은** 호출까지 전부 결과를 돌려주는지 본다.
-    실행되지 않은 호출은 조회로 세지 않는다(결과를 못 봤으면 근거가 없는 것과 같다) — 그래서
-    이 경우에도 재시도가 걸린다.
+    Checks that every call gets a result, including those that came along with final_answer in the same
+    turn and were **not executed**.  Unexecuted calls do not count as lookups (a result not seen is no
+    evidence) — so the retry kicks in here too.
     """
     script = [
         Turn("", [ToolCall("x1", "sql_query", {"sql": _SQL}),
@@ -1138,16 +1435,17 @@ async def test_forced_retry_answers_every_pending_tool_call(tiny_store, tmp_path
     resp = await s.orchestrator.answer("G-034b", _ASK)
 
     by_id = {i: c for i, c, _ in llm.tool_results}
-    assert "f1" in by_id and "x1" in by_id            # 대기 중이던 두 호출 모두 결과를 받았다
-    assert "제출이 거부되었습니다" in by_id["f1"]
-    assert "실행되지 않았습니다" in by_id["x1"]
-    assert "제출 거부" in resp.think_trace and "삼성자산운용" in resp.answer
+    assert "f1" in by_id and "x1" in by_id            # both pending calls got a result
+    assert "Submission rejected" in by_id["f1"]
+    assert "was not executed" in by_id["x1"]
+    assert "submission rejected" in resp.think_trace and "삼성자산운용" in resp.answer
 
 
 async def test_forced_retry_happens_at_most_once(tiny_store, tmp_path):
-    """두 번째에도 도구를 안 부르면 그대로 받는다.
+    """If tools are still not called the second time, the answer is accepted.
 
-    무한 루프로 응답시간(주최측 권장 60초)을 넘기는 쪽이 근거 없는 답 하나보다 나쁘다.
+    An infinite loop exceeding the response time (the organisers recommend 60 seconds) is worse than one
+    answer without evidence.
     """
     script = [
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
@@ -1159,13 +1457,13 @@ async def test_forced_retry_happens_at_most_once(tiny_store, tmp_path):
     resp = await s.orchestrator.answer("G-034c", _ASK)
 
     assert "그래도 삼성입니다" in resp.answer
-    assert "세번째답변은오면안된다" not in resp.answer          # 라운드가 더 돌지 않았다
-    assert resp.think_trace.count("제출 거부") == 1
-    assert sum(1 for m in llm.user_msgs if "답변 전 데이터 조회 필수" in m) == 1
+    assert "세번째답변은오면안된다" not in resp.answer          # no further round ran
+    assert resp.think_trace.count("submission rejected") == 1
+    assert sum(1 for m in llm.user_msgs if "[Data lookup required before answering]" in m) == 1
 
 
 async def test_no_forced_retry_when_a_lookup_already_ran(tiny_store, tmp_path):
-    """이미 조회한 뒤의 final_answer 에는 재시도가 붙으면 안 된다 — 정상 문항에 +11초를 물리지 않는다."""
+    """A final_answer after a lookup must not get the retry — a normal question must not pay +11 seconds."""
     script = [
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
@@ -1175,16 +1473,16 @@ async def test_no_forced_retry_when_a_lookup_already_ran(tiny_store, tmp_path):
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-010", _ASK)
 
-    assert "제출 거부" not in resp.think_trace
-    assert not any("답변 전 데이터 조회 필수" in m for m in llm.user_msgs)
+    assert "submission rejected" not in resp.think_trace
+    assert not any("[Data lookup required before answering]" in m for m in llm.user_msgs)
     assert "삼성자산운용" in resp.answer and "이답변은오면안된다" not in resp.answer
 
 
 async def test_table_info_alone_counts_as_a_lookup(tiny_store, tmp_path):
-    """table_info 는 값이 아니라 스키마를 돌려주지만 조회로 친다.
+    """table_info returns a schema, not values, but counts as a lookup.
 
-    기준일·허용값처럼 table_info 만으로 답이 되는 문항이 있어서다. 이 판정을 바꾸려면
-    orchestrator.LOOKUP_TOOLS 에서 한 줄만 빼면 된다.
+    Some questions are answered by table_info alone (base dates, allowed values).  To change this
+    judgement, remove one line from orchestrator.LOOKUP_TOOLS.
     """
     script = [
         Turn("", [ToolCall("t1", "table_info", {"table": "v_etf_kr"})], "tool_use"),
@@ -1193,15 +1491,16 @@ async def test_table_info_alone_counts_as_a_lookup(tiny_store, tmp_path):
     llm = _FullTap(script)
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-TI", "국내 ETF 데이터의 기준일은 언제인가요?")
-    assert "제출 거부" not in resp.think_trace
+    assert "submission rejected" not in resp.think_trace
     assert "2026-08-21" in resp.answer
 
 
 async def test_forced_retry_applies_to_cannot_confirm_too(tiny_store, tmp_path):
-    """확인불가도 '조회한 뒤의 거절'이라야 근거가 선다.
+    """A cannot-confirm too only stands as 'a refusal after a lookup'.
 
-    동시에, 조회 결과가 0건이면 답을 지어내지 말고 cannot_confirm 을 유지하라는 지시가
-    함께 나가야 한다 — 이 변경으로 확인불가 문항이 답을 짓기 시작하면 순손실이다.
+    At the same time the instruction must say that with 0 rows the answer is not to be made up and
+    cannot_confirm is kept — if this change made cannot-confirm questions start inventing answers, it
+    would be a net loss.
     """
     sql = "SELECT pd_abrv_nm FROM v_etf_kr WHERE manager_name='없는운용사'"
     script = [
@@ -1213,14 +1512,14 @@ async def test_forced_retry_applies_to_cannot_confirm_too(tiny_store, tmp_path):
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-NC", "없는운용사 ETF 알려줘")
 
-    assert "제출 거부" in resp.think_trace
-    assert "확인할 수 없습니다" in resp.answer                       # 거절이 유지된다
-    assert "status=cannot_confirm 을 그대로 유지" in llm.directives  # 지어내지 말라는 지시가 나갔다
-    assert "답을 지어내지 마세요" in llm.directives
+    assert "submission rejected" in resp.think_trace
+    assert "확인할 수 없습니다" in resp.answer                     # the refusal stands
+    assert "keeping status=cannot_confirm is the right answer" in llm.directives   # told not to make things up
+    assert "do not make up an answer" in llm.directives
 
 
 async def test_forced_retry_skipped_when_time_budget_is_short(tiny_store, tmp_path):
-    """남은 예산이 재시도 비용을 못 대면 되돌리지 않고 있는 답을 받는다."""
+    """If the remaining budget cannot pay for the retry, the answer is accepted instead of sent back."""
     script = [
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
         Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "이답변은오면안된다"})], "tool_use"),
@@ -1229,13 +1528,13 @@ async def test_forced_retry_skipped_when_time_budget_is_short(tiny_store, tmp_pa
     s = _rebudget(_state(tiny_store, llm, tmp_path), time_budget_sec=20)
     resp = await s.orchestrator.answer("G-T1", _ASK)
 
-    assert "강제 재시도 생략" in resp.think_trace
+    assert "forced retry skipped" in resp.think_trace
     assert "삼성입니다" in resp.answer and "이답변은오면안된다" not in resp.answer
     assert not llm.user_msgs
 
 
 async def test_forced_retry_skipped_when_no_round_is_left_to_run_tools(tiny_store, tmp_path):
-    """시간이 남아도 도구를 돌릴 라운드가 없으면 되돌려 봐야 근거가 생기지 않는다."""
+    """Even with time left, if no round remains to run tools, sending it back produces no evidence."""
     script = [
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
         Turn("", [ToolCall("f2", "final_answer", {"status": "answered", "answer": "이답변은오면안된다"})], "tool_use"),
@@ -1244,15 +1543,16 @@ async def test_forced_retry_skipped_when_no_round_is_left_to_run_tools(tiny_stor
     s = _rebudget(_state(tiny_store, llm, tmp_path), time_budget_sec=120, max_tool_rounds=1)
     resp = await s.orchestrator.answer("G-T2", _ASK)
 
-    assert "강제 재시도 생략" in resp.think_trace
+    assert "forced retry skipped" in resp.think_trace
     assert "삼성입니다" in resp.answer and "이답변은오면안된다" not in resp.answer
 
 
 async def test_rejected_answer_is_kept_if_the_retry_round_produces_nothing(tiny_store, tmp_path):
-    """되돌린 뒤 모델이 오류·침묵으로 아무것도 못 내놓아도 답변을 잃지 않는다.
+    """Even if the model produces nothing after the send-back (error, silence), the answer is not lost.
 
-    되돌린 final_answer 를 그냥 버리면, 재시도 라운드가 실패했을 때 status·evidence_refs 까지
-    통째로 날아가고 fallback 문구만 남는다. 근거가 없어도 원래 있던 답이 빈손보다 낫다.
+    Simply discarding the sent-back final_answer would, when the retry round fails, lose status and
+    evidence_refs too and leave only the fallback wording.  Without evidence, the original answer still
+    beats empty hands.
     """
     script = [
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
@@ -1262,29 +1562,54 @@ async def test_rejected_answer_is_kept_if_the_retry_round_produces_nothing(tiny_
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-T3", _ASK)
 
-    assert "제출 거부" in resp.think_trace
-    assert "처음 제출된 답변을 사용" in resp.think_trace
+    assert "submission rejected" in resp.think_trace
+    assert "using the answer first submitted" in resp.think_trace
     assert "삼성입니다" in resp.answer
 
 
-# ======================================================================= final_answer 게이트
-# 도구 루프가 final_answer 없이 끝나면 마지막에 흘린 텍스트가 그대로 답변이 된다.
-# 54문항 중 7문항이 이 경로를 탔고 그중 4문항이 오답이었다(비카운트 실패 2건도 전부 여기).
+# ======================================================================= the count cross-check
+async def test_count_answer_is_checked_against_the_single_count_result(tiny_store, tmp_path):
+    """A count question whose one COUNT result is missing from the answer gets the number stated, in the question's language."""
+    sql = "SELECT COUNT(*) AS n FROM v_etf_kr WHERE is_on_sale=1"
+    for q, text, note in (
+        ("판매중인 국내 ETF는 몇 개인가요?", "판매중인 국내 ETF는 3개입니다.", "(조회 결과 확인: 해당 조건에 맞는 건수는 2건입니다.)"),
+        ("How many domestic ETFs are on sale?", "There are 3 domestic ETFs on sale.",
+         "(Checked against the query result: 2 items match the condition.)"),
+        ("What is the number of domestic ETFs on sale?", "3 domestic ETFs are on sale.",
+         "(Checked against the query result: 2 items match the condition.)"),
+    ):
+        script = [Turn("", [ToolCall("c1", "sql_query", {"sql": sql})], "tool_use"),
+                  Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": text})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        resp = await s.orchestrator.answer("C-1", q)
+        assert resp.answer == f"{text}\n\n{note}", q
+        assert "query result stated" in resp.think_trace
+    # a question that asks no count is left alone, in either language
+    for q in ("판매중인 국내 ETF를 알려줘", "Which domestic ETFs are on sale?"):
+        script = [Turn("", [ToolCall("c1", "sql_query", {"sql": sql})], "tool_use"),
+                  Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "3"})], "tool_use")]
+        s = _state(tiny_store, StubLLM(script), tmp_path)
+        assert (await s.orchestrator.answer("C-2", q)).answer == "3", q
+
+
+# ======================================================================= final_answer gate
+# When the tool loop ends without final_answer, the last text let out becomes the answer as is.
+# 7 of the 54 questions took this path and 4 of them were wrong (both non-count failures were here too).
 from finagent.agent.orchestrator import unwrap_final_answer_json  # noqa: E402
 
-# 실제 사고 문자열 3개. 재현 테스트는 이 문자열들을 그대로 쓴다.
+# Three real incident strings.  The reproduction tests use them as is.
 #
-# G-007: final_answer 인자 JSON 원문이 answer 필드로 나가 채점자 화면에 그대로 보였다.
-#        max_tokens 로 문장 중간에서 끊겨 있어 json.loads 로는 열리지 않는다.
+# G-007: the raw final_answer argument JSON went out in the answer field and was shown to the grader.
+#        It was cut mid-sentence by max_tokens and json.loads cannot open it.
 _G007_TEXT = (
     '{\n'
     '"answer": "미국 증시에 상장된 주식형 ETF 중 총보수가 가장 낮은 상품을...\\n'
     '1. JPMorgan Alerian MLP Index ETN (AMJB)\\n'
     '2. ARK '
 )
-# G-009: SQL 3건을 이미 받아 놓고 확인불가를 흘렸다.
+# G-009: already holding 3 SQL results, it let out cannot-confirm.
 _G009_TEXT = "제공된 데이터로는 확인할 수 없습니다."
-# G-025: 한 답변 안에서 확인불가와 집계 결과를 동시에 주장했다.
+# G-025: one answer claimed both cannot-confirm and an aggregate result.
 _G025_TEXT = "제공된 데이터로는 확인할 수 없습니다. 조회 결과 총 5개의 클래스가 판매되고 있습니다."
 
 
@@ -1292,24 +1617,24 @@ def _text(t):
     return Turn(t, [], "end_turn")
 
 
-# ------------------------------------------------------------------ A. 되돌리기(재제출 지시)
+# ------------------------------------------------------------------ A. sending back (the resubmission instruction)
 
 async def test_missing_final_answer_is_sent_back_once(tiny_store, tmp_path):
-    """final_answer 없이 끝나려 하면 한 번 되돌려 보낸다 — 그리고 정확히 한 번만."""
+    """About to end without final_answer, the loop is sent back once — and exactly once."""
     script = [_text("1차 텍스트"), _text("2차 텍스트"), _text("3차 텍스트"), _text("4차 텍스트")]
     llm = _FullTap(script)
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-009a", _ASK)
 
-    assert sum(1 for m in llm.user_msgs if "[답변 미확정]" in m) == 1
-    assert "재제출 지시" in resp.think_trace
-    assert "재제출에도 final_answer 미호출" in resp.think_trace
-    # 되돌리기 뒤에 라운드가 더 붙지 않는다(무한 루프 금지) — 4번째 대본은 소비되지 않는다.
+    assert sum(1 for m in llm.user_msgs if "[Answer not submitted]" in m) == 1
+    assert "asked to resubmit" in resp.think_trace
+    assert "No final_answer on resubmission either" in resp.think_trace
+    # no round is added after the send-back (no infinite loop) — the 4th scripted turn is not consumed.
     assert "4차 텍스트" not in resp.answer
 
 
 async def test_retry_final_answer_is_adopted(tiny_store, tmp_path):
-    """되돌린 라운드에서 final_answer 를 부르면 그 답이 쓰인다."""
+    """If the sent-back round calls final_answer, that answer is used."""
     script = [
         _text("1차 텍스트"),
         _text(_G009_TEXT),
@@ -1320,16 +1645,17 @@ async def test_retry_final_answer_is_adopted(tiny_store, tmp_path):
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-009b", _ASK)
 
-    assert "재제출: final_answer(status=answered) → 채택" in resp.think_trace
+    assert "Resubmission: final_answer(status=answered) → adopted" in resp.think_trace
     assert "순자산 상위 3개는 A, B, C 입니다." in resp.answer
-    assert not resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")   # 흘린 텍스트를 쓰지 않았다
+    assert not resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")   # the let-out text was not used
 
 
 async def test_retry_directive_states_the_lookups_already_made(tiny_store, tmp_path):
-    """G-009 모양: SQL 을 이미 받아 놓고 확인불가를 흘린 경우.
+    """The G-009 shape: holding SQL results already, it let out cannot-confirm.
 
-    지시는 '사용 시점의 사실'로 준다 — 이 프로젝트에서 미리 준 규칙은 4/4 무시됐고 그 순간의
-    사실로 준 지시는 5/5 지켜졌다. 조회를 이미 했다는 사실이 지시문에 실려야 한다.
+    The instruction is given as 'a fact at the point of use' — in this project rules given in advance
+    were ignored 4/4 and instructions given as facts of the moment were followed 5/5.  The fact that the
+    lookups already ran must be in the instruction.
     """
     script = [
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
@@ -1342,55 +1668,64 @@ async def test_retry_directive_states_the_lookups_already_made(tiny_store, tmp_p
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-009c", _ASK)
 
-    directive = next(m for m in llm.user_msgs if "[답변 미확정]" in m)
-    assert "데이터 조회를 1회 실행했고" in directive
-    assert "근거로 기록됐습니다" in directive
+    directive = next(m for m in llm.user_msgs if "[Answer not submitted]" in m)
+    assert "Data lookups run for this question: 1" in directive
+    assert "Recorded as evidence" in directive
     assert "final_answer(status, answer)" in directive
-    assert "한 번도 부르지 않았습니다" not in directive          # 조회가 있었으므로 이 문장은 틀린 사실이다
+    assert "No data lookup tool has been called" not in directive   # lookups did run, so that sentence would be false
+    assert "complete sentences in Korean" in directive               # the question is Korean
     assert "삼성자산운용" in resp.answer
 
 
 async def test_retry_directive_when_no_lookup_ran(tiny_store, tmp_path):
-    """조회가 0회면 지시문도 그 사실을 그대로 말한다."""
+    """With 0 lookups the instruction states exactly that."""
     script = [_text("1차"), _text("2차"), _text("3차")]
     llm = _FullTap(script)
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     await s.orchestrator.answer("G-009d", _ASK)
 
-    directive = next(m for m in llm.user_msgs if "[답변 미확정]" in m)
-    assert "한 번도 부르지 않았습니다" in directive
-    assert "데이터 조회를" not in directive.split("[답변 미확정]")[1].split("지금 할 일")[0].replace(
-        "데이터 조회 도구도 한 번도 부르지 않았습니다.", "")
+    directive = next(m for m in llm.user_msgs if "[Answer not submitted]" in m)
+    assert "No data lookup tool has been called" in directive
+    assert "Data lookups run" not in directive.split("[Answer not submitted]")[1].split("What to do now")[0]
+    assert "complete sentences in Korean" in directive
+
+
+async def test_retry_directive_names_english_for_an_english_question(tiny_store, tmp_path):
+    llm = _FullTap([_text("1st"), _text("2nd"), _text("3rd")])
+    s = _rebudget(_state(tiny_store, llm, tmp_path))
+    await s.orchestrator.answer("G-009d-en", "How many buyable KRW bonds are there?")
+    directive = next(m for m in llm.user_msgs if "[Answer not submitted]" in m)
+    assert "complete sentences in English" in directive and "No data lookup tool has been called" in directive
 
 
 async def test_no_retry_when_the_time_budget_is_short(tiny_store, tmp_path):
-    """예산이 부족하면 되돌리지 않는다 — 라운드 추가 비용은 실측 ≈11초다.
+    """With too little budget nothing is sent back — the extra round costs ≈11 seconds (measured).
 
-    ``_state`` 의 기본 예산은 20초라 FORCED_LOOKUP_MIN_REMAINING_SEC(33초)에 못 미친다.
-    기존 165개 테스트가 이 변경의 영향을 받지 않는 이유이기도 하다.
+    ``_state``'s default budget is 20 seconds, short of FORCED_LOOKUP_MIN_REMAINING_SEC (33 seconds).
+    That is also why the existing 165 tests were unaffected by this change.
     """
     script = [_text("1차 텍스트"), _text("2차 텍스트"), _text("이턴은오면안된다")]
     llm = _FullTap(script)
-    s = _state(tiny_store, llm, tmp_path)                       # 예산 20초, 재예산 없음
+    s = _state(tiny_store, llm, tmp_path)                       # 20-second budget, not re-budgeted
     resp = await s.orchestrator.answer("G-009e", _ASK)
 
-    assert "재제출 지시 생략" in resp.think_trace and "예산 부족" in resp.think_trace
-    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
+    assert "resubmission request skipped" in resp.think_trace and "not enough budget" in resp.think_trace
+    assert not any("[Answer not submitted]" in m for m in llm.user_msgs)
     assert "이턴은오면안된다" not in resp.answer
 
 
 async def test_no_retry_after_an_llm_error(tiny_store, tmp_path):
-    """대화가 성립하지 않은 상태(LLM 오류)에서는 되돌려 봐야 같은 실패를 반복한다."""
+    """With no working conversation (an LLM error), sending it back only repeats the same failure."""
     llm = _FullTap([Turn("boom", [], "error"), _text("이턴은오면안된다")])
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-009f", _ASK)
 
-    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
-    assert "LLM 오류" in resp.think_trace and "이턴은오면안된다" not in resp.answer
+    assert not any("[Answer not submitted]" in m for m in llm.user_msgs)
+    assert "LLM error" in resp.think_trace and "이턴은오면안된다" not in resp.answer
 
 
 async def test_no_retry_when_the_lookup_gate_already_used_its_round(tiny_store, tmp_path):
-    """조회 0회 게이트가 이미 한 라운드를 썼으면 이 게이트는 걸지 않는다(총 +1 라운드 상한)."""
+    """If the zero-lookup gate already used a round, this gate does not fire (at most +1 round in total)."""
     llm = _FullTap([
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성입니다."})], "tool_use"),
         _text("되돌린 뒤에도 도구를 안 불렀다"),
@@ -1398,30 +1733,30 @@ async def test_no_retry_when_the_lookup_gate_already_used_its_round(tiny_store, 
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-009g", _ASK)
 
-    assert "제출 거부" in resp.think_trace
-    assert not any("[답변 미확정]" in m for m in llm.user_msgs)
-    assert "삼성입니다" in resp.answer                          # 되돌린 답변이 그대로 복구된다
+    assert "submission rejected" in resp.think_trace
+    assert not any("[Answer not submitted]" in m for m in llm.user_msgs)
+    assert "삼성입니다" in resp.answer                          # the sent-back answer is restored as is
 
 
 async def test_retry_answers_every_pending_tool_call(tiny_store, tmp_path):
-    """최대 라운드 초과로 실행하지 못한 호출에도 결과를 채운 뒤에 되돌린다.
+    """Calls left unexecuted because the maximum rounds were exceeded get results too, before the send-back.
 
-    OpenAI/CLOVA 는 assistant 의 tool_call 마다 결과를 요구한다 — 하나라도 비면 다음 요청이 400 이다.
+    OpenAI/CLOVA require a result for every assistant tool_call — one missing and the next request fails with 400.
     """
     llm = _FullTap([
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
-        Turn("", [ToolCall("c2", "sql_query", {"sql": _SQL + " LIMIT 1"})], "tool_use"),   # 라운드 초과로 미실행
+        Turn("", [ToolCall("c2", "sql_query", {"sql": _SQL + " LIMIT 1"})], "tool_use"),   # not run: over the round limit
         Turn("", [ToolCall("f1", "final_answer", {"status": "answered", "answer": "운용사는 삼성자산운용입니다."})], "tool_use"),
     ])
     s = _rebudget(_state(tiny_store, llm, tmp_path), max_tool_rounds=1)
     resp = await s.orchestrator.answer("G-009h", _ASK)
 
     by_id = {i: c for i, c, _ in llm.tool_results}
-    assert "c2" in by_id and "실행되지 않았습니다" in by_id["c2"]
+    assert "c2" in by_id and "was not executed" in by_id["c2"]
     assert "삼성자산운용" in resp.answer
 
 
-# ------------------------------------------------------------------ B. 폴백 텍스트의 JSON 풀기
+# ------------------------------------------------------------------ B. unwrapping JSON in the fallback text
 
 def test_unwrap_plain_final_answer_json():
     assert unwrap_final_answer_json('{"status": "answered", "answer": "총 5개입니다."}') == ("answered", "총 5개입니다.")
@@ -1444,19 +1779,19 @@ def test_unwrap_decodes_escaped_newlines_and_quotes():
 
 
 def test_unwrap_survives_a_truncated_json_block():
-    """G-007 의 실제 사고 문자열 — max_tokens 로 끊겨 json.loads 로는 열리지 않는다."""
+    """G-007's real incident string — cut by max_tokens, json.loads cannot open it."""
     got = unwrap_final_answer_json(_G007_TEXT)
     assert got is not None
     status, answer = got
-    assert status == ""                                        # status 키까지 도달하기 전에 잘렸다
+    assert status == ""                                        # cut before reaching the status key
     assert answer.startswith("미국 증시에 상장된 주식형 ETF")
     assert "JPMorgan Alerian MLP Index ETN (AMJB)" in answer
-    assert "\\n" not in answer and "\n" in answer              # 이스케이프가 실제 줄바꿈으로 풀렸다
+    assert "\\n" not in answer and "\n" in answer              # the escape became a real line break
     assert '"answer"' not in answer
 
 
 def test_unwrap_returns_none_for_ordinary_text():
-    """평범한 답변은 건드리지 않는다 — 풀지 못하면 지금 동작 그대로다."""
+    """Ordinary answers are not touched — if it cannot be unwrapped, behaviour stays as it is."""
     assert unwrap_final_answer_json(_G009_TEXT) is None
     assert unwrap_final_answer_json(_G025_TEXT) is None
     assert unwrap_final_answer_json("") is None
@@ -1466,37 +1801,37 @@ def test_unwrap_returns_none_for_ordinary_text():
 
 
 async def test_fallback_unwraps_a_tool_call_json_answer(tiny_store, tmp_path):
-    """되돌려도 final_answer 를 안 부르면 폴백하되, JSON 이면 풀어서 쓴다(G-007)."""
+    """Sent back and still no final_answer: fall back, but unwrap it if it is JSON (G-007)."""
     llm = _FullTap([
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
         _text("작업을 마치겠습니다."),
         _text("작업을 마치겠습니다."),
-        _text(_G007_TEXT),                                     # 되돌린 라운드도 JSON 원문을 흘린다
+        _text(_G007_TEXT),                                     # the sent-back round lets out raw JSON too
     ])
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-007", "미국 증시 주식형 ETF 중 총보수가 가장 낮은 상품")
 
-    assert "final_answer 인자 JSON" in resp.think_trace
+    assert "final_answer argument JSON" in resp.think_trace
     assert '"answer"' not in resp.answer and '{' not in resp.answer
     assert "JPMorgan Alerian MLP Index ETN (AMJB)" in resp.answer
 
 
 async def test_fallback_json_status_overrides_the_evidence_heuristic(tiny_store, tmp_path):
-    """JSON 안의 status 가 유효값이면 그것을 따른다."""
+    """If the status inside the JSON is a valid value, it is followed."""
     blob = '```json\n{"answer": "해당 조건의 상품을 찾지 못했습니다.", "status": "cannot_confirm"}\n```'
     llm = _FullTap([
-        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),   # 근거가 생겨 기본 판정은 answered
+        Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),   # evidence exists, so the default would be answered
         _text(blob), _text(blob), _text(blob),
     ])
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-007b", _ASK)
 
-    assert "status=cannot_confirm 로 해석" in resp.think_trace
+    assert "read as answer/status=cannot_confirm" in resp.think_trace
     assert resp.answer.startswith("제공된 데이터로는 확인할 수 없습니다")
 
 
 async def test_fallback_keeps_the_existing_status_when_json_status_is_invalid(tiny_store, tmp_path):
-    """status 가 유효값이 아니면 기존 판정 로직을 따른다."""
+    """If the status is not a valid value, the existing judgement applies."""
     blob = '{"answer": "순자산 상위 3개는 A, B, C 입니다.", "status": "done"}'
     llm = _FullTap([
         Turn("", [ToolCall("c1", "sql_query", {"sql": _SQL})], "tool_use"),
@@ -1505,16 +1840,16 @@ async def test_fallback_keeps_the_existing_status_when_json_status_is_invalid(ti
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-007c", _ASK)
 
-    assert "answer 만 해석(status 는 기존 판정)" in resp.think_trace
-    assert "순자산 상위 3개는 A, B, C 입니다." in resp.answer   # 근거가 있으므로 answered 그대로
+    assert "only answer read (status from the existing judgement)" in resp.think_trace
+    assert "순자산 상위 3개는 A, B, C 입니다." in resp.answer   # evidence exists, so answered as is
 
 
 async def test_fallback_leaves_plain_text_untouched(tiny_store, tmp_path):
-    """JSON 이 아니면 아무것도 바꾸지 않는다 — G-025 의 자기모순 문장도 예외를 던지지 않는다."""
+    """Non-JSON text is not changed at all — G-025's self-contradicting sentence raises nothing either."""
     llm = _FullTap([_text(_G025_TEXT), _text(_G025_TEXT), _text(_G025_TEXT)])
     s = _rebudget(_state(tiny_store, llm, tmp_path))
     resp = await s.orchestrator.answer("G-025", _ASK)
 
-    assert "final_answer 인자 JSON" not in resp.think_trace
-    assert "final_answer 미호출 → 마지막 텍스트를 답변으로 사용" in resp.think_trace
+    assert "final_answer argument JSON" not in resp.think_trace
+    assert "final_answer not called → using the last text as the answer" in resp.think_trace
     assert "확인할 수 없습니다" in resp.answer

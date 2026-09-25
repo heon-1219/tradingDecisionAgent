@@ -18,6 +18,10 @@ Why only those three, and why round 0:
 
 Everything here is best-effort: a failing prefetch is dropped, an over-budget plan is abandoned, and
 the existing tool loop runs exactly as it did before.  The fallback is the unchanged status quo.
+
+Questions come in Korean or English.  The Korean vocabulary below is the competition build's and is
+unchanged; each English pattern runs only on questions ``detect_lang`` calls English, so a Korean
+question routes exactly as it did before.
 """
 from __future__ import annotations
 
@@ -26,6 +30,8 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+
+from ..i18n import detect_lang
 
 log = logging.getLogger("finagent.routing")
 
@@ -41,33 +47,65 @@ MAX_CHARS = {"graph": 1200, "vector": 1300, "document": 1400}
 # At most this many prefetch calls, whatever the rules say.
 MAX_CALLS = 3
 
+
+# ---------------------------------------------------------------- English question text
+def is_english(question: str | None) -> bool:
+    return detect_lang(question) == "en"
+
+
+_SENTENCE_START = re.compile(r"(^|[.?!]\s+)([A-Z])(?=[a-z])")
+
+
+def fold_sentence_starts(text: str) -> str:
+    """Lower-case the first letter of each sentence, and nothing else.
+
+    The English patterns match lower-case words only, because product names are written in capitals:
+    'RISE 200', 'ASML Holding NV', 'Goldman Sachs Future Tech Leaders', 'RH Tactical Outlook ETF' would
+    otherwise read as the verbs and nouns the guards look for.  A sentence-initial 'Will …' or
+    'Which …' is still an ordinary word, so only that capital is folded.
+    """
+    return _SENTENCE_START.sub(lambda m: m.group(1) + m.group(2).lower(), text or "")
+
+
 # ---------------------------------------------------------------- routing vocabulary
 #
-# GRAPH.  Only the *inverse* holding direction ("X를 보유한/편입한 상품") is routed, because that is
-# the direction whose subject is extractable from surface form with confidence: the holder entity sits
-# immediately before the verb.  The forward direction ('그 ETF의 구성종목은') names the product, not the
-# company, and resolving it is the product-lookup problem, not a graph one.
+# GRAPH.  Only the *inverse* holding direction ("X를 보유한/편입한 상품", "products that hold X") is
+# routed, because that is the direction whose subject is extractable from surface form with confidence:
+# the holder entity sits right next to the verb.  The forward direction ('그 ETF의 구성종목은', "the
+# constituents of that ETF") names the product, not the company, and resolving it is the product-lookup
+# problem, not a graph one.
 _HOLDER_VERB = r"보유|편입|담고\s*있|담은|담긴|들고\s*있|포함한|포함하고\s*있|포함된"
 _HOLDING_Q = re.compile(_HOLDER_VERB)
 # The holder is the token right before the verb.  The character class stops at whitespace, so the
 # capture is one word; trailing case particles are stripped afterwards.
 _HOLDER = re.compile(r"([A-Za-z가-힣][A-Za-z0-9가-힣·&\.\-]{1,19})\s*(?:" + _HOLDER_VERB + ")")
 _PARTICLE = re.compile(r"(?:을|를|이|가|은|는|와|과|도|의|에)$")
+# English: the holder comes *after* the verb ('ETFs that hold 삼성전자').  'including'/'included' are
+# left out — in English they are mostly prepositions ('including ETNs'), not holdings.
+_HOLDER_VERB_EN = r"hold|holds|holding|held|contain|contains|containing|include|includes"
+_HOLDING_Q_EN = re.compile(rf"\b(?:{_HOLDER_VERB_EN})\b")
+_HOLDER_EN = re.compile(
+    rf"\b(?:{_HOLDER_VERB_EN})\s+(?:(?:the|a|an|any|shares?\s+of|stocks?\s+of)\s+)?([^\s,?.!;:()]+)"
+)
+_POSSESSIVE = re.compile(r"(?:'s|’s|'|’)$")
+_HANGUL = re.compile(r"[가-힣]")
 # Words that are never a company: they show up before the verb in scope phrases like
 # '판매중인 상품 기준으로 채권에 투자하는' or '국내 ETF가 포함된'.
-# 관계어도 마찬가지다.  '에코프로의 자회사를 편입한 ETF' 에서 동사 바로 앞 토큰은 '자회사' 이고,
-# 그것을 회사 이름으로 잡아 graph_neighbors('자회사', constituentOf) 를 부르면 0건이 돌아온다
-# (실측).  이 단어들이 가리키는 회사는 문장 앞쪽에 있고, 그 회사는 사전분석이 이미 해소해 둔다.
+# Relation words too.  In '에코프로의 자회사를 편입한 ETF' the token right before the verb is '자회사'
+# (subsidiary); taking it as a company name and calling graph_neighbors('자회사', constituentOf) returns
+# 0 rows (measured).  The company these words point to sits earlier in the sentence, and the
+# pre-analysis has already resolved it.
 _NOT_A_HOLDER = {
     "상품", "종목", "펀드", "etf", "etn", "채권", "자산", "것", "기업", "회사", "지수",
     "데이터", "정보", "포트폴리오", "구성", "비중", "현재", "모두", "전체", "다음",
     "자회사", "계열사", "계열회사", "모회사", "관계사", "관련주", "테마주", "대장주", "경쟁사",
 }
 
-# GRAPH (themes).  Only an explicit '테마' question routes to the graph.  Theme aliases match very
-# broadly — '국내', '미국', '배당' fire on a third of all questions — so an implicit theme match is not
-# evidence that the question is *about* a theme.
+# GRAPH (themes).  Only an explicit '테마' ("theme") question routes to the graph.  Theme aliases match
+# very broadly — '국내', '미국', '배당' fire on a third of all questions — so an implicit theme match is
+# not evidence that the question is *about* a theme.
 _THEME_Q = re.compile(r"테마")
+_THEME_Q_EN = re.compile(r"\b(?:themes?|thematic)\b")
 # Geography, index and structure "themes" are scope adjectives, not subjects.  A question is not a
 # theme question because it says '미국' or '레버리지'.
 _GENERIC_THEMES = {
@@ -77,12 +115,25 @@ _GENERIC_THEMES = {
 
 # DOCUMENT.  Narrative questions only — the ones whose answer is prose that no column holds.  The
 # organisers' own example ('국민성장펀드의 구조와 투자전략 동향', '…의 위험요인') is the shape being
-# matched.  Deliberately tight: '무엇인가요' and '알려줘' are *not* here, because they end attribute
-# lookups ('벤치마크 지수는 무엇인가요') far more often than they open a narrative one.
+# matched.  Deliberately tight: '무엇인가요' and '알려줘' ("what is", "tell me") are *not* here, because
+# they end attribute lookups ('벤치마크 지수는 무엇인가요') far more often than they open a narrative one.
+# The same holds in English: no 'what is', no bare 'strategy' (a short strategy is a product attribute)
+# and no bare 'risk' (the risk grade is a column).
 _DOC_Q = re.compile(
     r"위험\s*요인|리스크\s*요인|유의\s*사항|투자\s*전략|운용\s*전략|투자\s*방식|"
     r"구조와|의\s*구조|구조는|구조를|동향|배경|개요|취지|장단점|장점과\s*단점|"
     r"어떤\s*점|왜\s|무엇을\s*의미|의미하나|뜻인가|용어|설명해|설명\s*해|어떻게\s*운용"
+)
+_DOC_Q_EN = re.compile(
+    r"\brisk\s+factors?\b|\b(?:key|main|major)\s+risks\b|\brisks\s+(?:of|in|involved)\b"
+    r"|\bprecautions?\b|\bcaveats?\b|\bthings\s+to\s+(?:note|watch|consider|keep\s+in\s+mind)\b"
+    r"|\b(?:investment|management|operating|portfolio)\s+(?:strateg(?:y|ies)|approach|style)\b"
+    r"|\bstructure\b|\boverview\b|\bbackground\b|\bpurpose\b|\brationale\b|\btrends?\b"
+    r"|\bpros\s+and\s+cons\b|\b(?:advantages|strengths)\s+and\s+(?:disadvantages|weaknesses)\b"
+    r"|\bwhy\b|\bwhat\s+does\b.{0,60}?\bmean\b|\bmeaning\s+of\b|\bwhat\s+is\s+meant\s+by\b|\bstand\s+for\b"
+    r"|\bexplain\w*|\bdescribe\b|\bterminology\b"
+    r"|\bhow\s+(?:is|are|was|were)\b.{0,50}?\b(?:managed|run|operated)\b"
+    r"|\bhow\s+does\b.{0,50}?\b(?:manage|operate|work)\b"
 )
 
 
@@ -124,15 +175,17 @@ class RouteCall:
     # The relation the answer actually depends on.  ``graph_neighbors`` falls back to dumping *every*
     # relation of a node when the requested one is empty, which is right for a model that can read the
     # detour but wrong as an injected fact: 야놀자 has no constituentOf and the fallback handed back a
-    # 회사채 named 야놀자1-1 under "전체 15건" — for a question whose true answer is "편입 ETF 없음".
+    # corporate bond named 야놀자1-1 under "15 in total" — for a question whose true answer is "no ETF
+    # holds it".
     expect_relation: str | None = None
     # Views whose rows cannot hold this question's answer.  v_etf_constituent rows are *other* ETFs'
     # holdings, so on a product-attribute question they crowd out the row that has the answer
     # (measured: QQQ's v_etf_gl row, the one carrying manager_name, was pushed past the cut).
     drop_views: tuple[str, ...] = ()
     # The name the question actually asked about.  A search result is a *ranking*, not an identity:
-    # 'Invesco QQQ Trust' 검색의 상품 뷰 최상위는 'Invesco NASDAQ Internet ETF' 였다.  힌트라면 무해하지만
-    # 사실로 주입하면 다른 상품의 값을 그 상품의 값으로 만든다.  이름이 실제로 맞는 행만 남긴다.
+    # the top product-view hit for 'Invesco QQQ Trust' was 'Invesco NASDAQ Internet ETF'.  Harmless as
+    # a hint, but injected as a fact it makes another product's values this product's.  Only rows whose
+    # name really matches are kept.
     match_title: str | None = None
 
 
@@ -153,87 +206,111 @@ class RoutePlan:
         """One line naming every store and why it was or was not chosen — the federation evidence."""
         picked = {c.source: c.why for c in self.calls}
         parts = []
-        for src, ko in (("graph", "그래프"), ("vector", "벡터"), ("document", "문서")):
+        for src in ("graph", "vector", "document"):
             if src in picked:
-                parts.append(f"{ko}=실행({picked[src]})")
+                parts.append(f"{src}=ran({picked[src]})")
             else:
-                why = next((w for s, w in self.skipped if s == src), "해당 없음")
-                parts.append(f"{ko}=생략({why})")
+                why = next((w for s, w in self.skipped if s == src), "n/a")
+                parts.append(f"{src}=skipped({why})")
         return " / ".join(parts)
 
 
 # ---------------------------------------------------------------- signal extraction
 def holder_mentions(question: str) -> list[str]:
-    """The entities a '…를 보유/편입한 …' question is asking about, in order of appearance.
+    """The entities a '…를 보유/편입한 …' ("… that holds X") question is asking about, in order of appearance.
 
-    Surface extraction on purpose: '쿠팡'과 '야놀자'는 기업 사전에 없지만 두 문항 모두 정답이
-    '해당 없음'이고, 그 사실을 아는 곳은 그래프뿐이다.  사전 매칭만 믿으면 그 두 문항에서 라우터가
-    아예 켜지지 않는다.
+    Surface extraction on purpose: 쿠팡 and 야놀자 are not in the company lexicon, but the correct
+    answer to both questions is 'none', and only the graph knows that.  Trusting lexicon matches alone,
+    the router would not switch on for those two questions at all.
+
+    In an English question only a token written in Hangul is taken ('ETFs that hold 쿠팡').  The graph
+    labels are Korean, and an English token the lexicon does not know ('Coupang') would come back as a
+    false '0 holding relations' fact; English names the lexicon does know arrive through
+    ``Signals.companies`` instead.
     """
+    q = question or ""
     out: list[str] = []
-    for m in _HOLDER.finditer(question or ""):
+    for m in _HOLDER.finditer(q):
         tok = _PARTICLE.sub("", m.group(1).strip())
         if len(tok) < 2 or tok.lower() in _NOT_A_HOLDER:
             continue
         if tok not in out:
             out.append(tok)
+    if is_english(q):
+        for m in _HOLDER_EN.finditer(fold_sentence_starts(q)):
+            tok = _POSSESSIVE.sub("", m.group(1).strip())
+            if len(tok) < 2 or not _HANGUL.search(tok) or tok.lower() in _NOT_A_HOLDER:
+                continue
+            if tok not in out:
+                out.append(tok)
     return out
 
 
 def is_holding_question(question: str) -> bool:
-    return bool(_HOLDING_Q.search(question or ""))
+    q = question or ""
+    if _HOLDING_Q.search(q):
+        return True
+    return is_english(q) and bool(_HOLDING_Q_EN.search(fold_sentence_starts(q)))
 
 
 def wants_narrative(question: str) -> bool:
-    return bool(_DOC_Q.search(question or ""))
+    q = question or ""
+    if _DOC_Q.search(q):
+        return True
+    return is_english(q) and bool(_DOC_Q_EN.search(fold_sentence_starts(q)))
 
 
 def theme_subject(question: str, themes: list[ThemeSig]) -> ThemeSig | None:
-    """The theme a question is *about*, or None.  Requires the word 테마 and a non-generic theme."""
-    if not _THEME_Q.search(question or ""):
+    """The theme a question is *about*, or None.  Requires the word 테마 / theme and a non-generic theme."""
+    q = question or ""
+    if not (_THEME_Q.search(q) or (is_english(q) and _THEME_Q_EN.search(fold_sentence_starts(q)))):
         return None
     real = [t for t in themes if t.id not in _GENERIC_THEMES]
     if not real:
         return None
-    # 여러 개면 가장 구체적인 것(라벨이 긴 것)을 고른다: '중국반도체' > '반도체'.
+    # With several, pick the most specific (the longest label): '중국반도체' > '반도체'.
     return max(real, key=lambda t: len(t.label or ""))
 
 
-# 상품 검색을 붙일 테이블. v_etf_constituent 는 편입종목 뷰라 상품 자체의 속성을 갖지 않는다 —
-# 여기로 범위를 좁히면 '운용사'·'총보수' 를 묻는 질문에 종목 행만 돌아온다.
+# Tables a product search may be scoped to.  v_etf_constituent is the holdings view and carries no
+# attributes of the product itself — narrowing to it returns only holding rows for a question about
+# the manager or the total fee.
 _NOT_A_PRODUCT_VIEW = {"v_etf_constituent"}
 
 
 def plan_retrieval(sig: Signals) -> RoutePlan:
     """Which stores to hit before the first model turn.  Often none — that is the intended outcome.
 
-    순수 집계·정렬 질문(판매가능 채권 중 AA- 이상, 순자산 상위 3개 …)은 지금도 SQL 한 번으로 풀린다.
-    그런 질문에 그래프·벡터·문서를 켜는 것은 라우팅이 아니라 무차별 실행이고, 지연과 토큰만 늘린다.
+    Pure aggregation and sorting questions (sellable bonds rated AA- or higher, the top 3 by net
+    assets …) are already solved by one SQL query.  Switching on the graph, vector or document store
+    for them is not routing but indiscriminate execution; it only adds latency and tokens.
     """
     plan = RoutePlan()
     q = sig.question or ""
 
     if sig.forward_looking:
-        # 스키마에 미래 시점 값이 없다. 현재 스냅샷을 미리 넣어 주면 그것이 예측치로 둔갑한다.
+        # The schema holds no future values.  Prefetching the current snapshot would turn it into a forecast.
         for src in ("graph", "vector", "document"):
-            plan.skipped.append((src, "미래 시점 값 요구 — 스냅샷에 답이 없어 사전검색 무의미"))
+            plan.skipped.append((src, "asks for a future value — the snapshot has no answer, so prefetching is pointless"))
         return plan
 
     # ---- graph
     if is_holding_question(q):
         if sig.holding_blind:
-            plan.skipped.append(("graph", "지목된 상품군에 편입종목 데이터가 없음"))
+            plan.skipped.append(("graph", "the named product group has no holdings data"))
         else:
             holders = holder_mentions(q)
-            # 사전에 있는 기업명이면 그 표준명을 쓴다(그래프 라벨과 같은 표기).
+            # A company the lexicon knows is queried by its canonical name (the same spelling as the graph label).
             canon = {c.replace(" ", ""): c for c in sig.companies}
-            # 우선순위: (1) 사전이 아는 홀더 토큰 → (2) 사전분석이 해소한 기업 → (3) 표면 토큰.
+            # Priority: (1) a holder token the lexicon knows → (2) a company the pre-analysis resolved →
+            # (3) the surface token.
             #
-            # (2)가 (3)보다 앞서는 이유: 표면 추출은 동사 바로 앞 한 토큰만 보므로 '…의 자회사를
-            # 편입한' 처럼 주어가 한 칸 떨어져 있으면 엉뚱한 말을 회사로 잡는다.  _NOT_A_HOLDER 로
-            # 걸러도 목록이 닿지 않는 표현은 남으므로, 해소된 기업이 있으면 그쪽을 먼저 믿는다.
-            # (3)은 그대로 남긴다 — 쿠팡·야놀자는 사전에 없지만 두 문항 모두 정답이 '해당 없음'
-            # 이고, 그 사실을 아는 곳은 그래프뿐이라 표면 토큰으로라도 물어야 한다.
+            # Why (2) comes before (3): surface extraction looks at one token next to the verb, so when
+            # the subject sits a step away, as in '…의 자회사를 편입한' ("that holds …'s subsidiaries"), it
+            # takes the wrong word for the company.  _NOT_A_HOLDER filters some, but phrasings outside
+            # the list remain, so a resolved company is trusted first.  (3) stays — 쿠팡 and 야놀자 are
+            # not in the lexicon, yet the answer to both questions is 'none' and only the graph knows
+            # that, so it has to be asked even with a surface token.
             entity = None
             for h in holders:
                 hit = canon.get(h.replace(" ", ""))
@@ -245,40 +322,42 @@ def plan_retrieval(sig: Signals) -> RoutePlan:
             if entity is None and holders:
                 entity = holders[0]
             if entity is None:
-                plan.skipped.append(("graph", "편입 질의지만 대상 기업을 문장에서 특정하지 못함"))
+                plan.skipped.append(("graph", "holdings question, but the target company could not be identified in the sentence"))
             else:
                 plan.calls.append(RouteCall(
                     "graph", "graph_neighbors", {"entity": entity, "relation": "constituentOf"},
-                    f"'{entity}' 편입 관계 질의",
-                    caution="이 목록은 정렬돼 있지 않습니다. 순자산·수익률 등 순위는 SQL 로 확인하세요.",
+                    f"holding relation of '{entity}'",
+                    caution="This list is not sorted. Check rankings by net assets, returns etc. with SQL.",
                     expect_relation="constituentOf",
                 ))
     else:
-        plan.skipped.append(("graph", "보유·편입 등 관계를 묻지 않음"))
+        plan.skipped.append(("graph", "no holding or other relation asked"))
 
     theme = theme_subject(q, sig.themes)
     if theme is not None and len(plan.calls) < MAX_CALLS:
         plan.calls.append(RouteCall(
             "graph", "graph_neighbors",
             {"entity": f"d:theme/{theme.id}", "relation": "hasTheme_inverse"},
-            f"'{theme.label}' 테마 태깅 상품",
-            caution="이 목록은 정렬돼 있지 않습니다. 순위·기간 조건은 SQL 로 확인하세요.",
+            f"products tagged with the theme '{theme.label}'",
+            caution="This list is not sorted. Check rankings and period conditions with SQL.",
         ))
         plan.skipped = [(s, w) for s, w in plan.skipped if s != "graph"]
 
     # ---- document
     if wants_narrative(q):
         plan.calls.append(RouteCall(
-            "document", "search_documents", {"query": q, "k": 2}, "서술형 정보 요구(위험요인·전략·구조 등)"))
+            "document", "search_documents", {"query": q, "k": 2},
+            "narrative information requested (risk factors, strategy, structure, etc.)"))
     else:
-        plan.skipped.append(("document", "서술형 설명이 아니라 수치·목록 질의"))
+        plan.skipped.append(("document", "a numeric/list query, not a narrative explanation"))
 
     # ---- vector / lexical product lookup
     #
-    # 지목한 상품이 **실재할 때만** 켠다.  실재하지 않는 상품을 지목한 문항(KODEX AI로봇,
-    # TIGER 양자컴퓨팅커버드콜, KODEX 우주항공레버리지, 미래에셋탄소중립그린뉴딜)의 정답은
-    # '그런 상품 없음'이고, 그 질문에 이름이 비슷한 상품 행을 사실로 넣어 주는 것은 오답 쪽으로
-    # 미는 일이다.  사전분석이 이미 후보와 경고를 함께 싣고 있으므로 여기서 더 보탤 것이 없다.
+    # Switched on **only when the named product exists**.  For questions naming a product that does not
+    # exist (KODEX AI로봇, TIGER 양자컴퓨팅커버드콜, KODEX 우주항공레버리지, 미래에셋탄소중립그린뉴딜)
+    # the correct answer is 'no such product', and injecting rows of similarly named products as facts
+    # pushes toward a wrong answer.  The pre-analysis already carries the candidates and the warning, so
+    # there is nothing to add here.
     hit = next((m for m in sig.mentions if m.resolved), None)
     if hit is not None and len(plan.calls) < MAX_CALLS:
         table = hit.table if hit.table not in _NOT_A_PRODUCT_VIEW else None
@@ -286,13 +365,13 @@ def plan_retrieval(sig: Signals) -> RoutePlan:
         if table:
             args["table"] = table
         plan.calls.append(RouteCall(
-            "vector", "search_products", args, f"'{hit.text}' 상품 지목 — 해당 행의 속성이 곧 답",
+            "vector", "search_products", args, f"product '{hit.text}' named — its row's attributes are the answer",
             drop_views=() if is_holding_question(q) else tuple(_NOT_A_PRODUCT_VIEW),
             match_title=hit.text))
     elif any(sig.mentions):
-        plan.skipped.append(("vector", "지목된 상품이 데이터에 없음 — 유사 상품 주입은 오답 유도"))
+        plan.skipped.append(("vector", "the named product is not in the data — injecting similar products invites a wrong answer"))
     else:
-        plan.skipped.append(("vector", "특정 상품을 이름으로 지목하지 않음"))
+        plan.skipped.append(("vector", "no specific product named"))
 
     del plan.calls[MAX_CALLS:]
     return plan
@@ -318,15 +397,15 @@ def _relation_guard(call: RouteCall, content: str, total: int | None) -> tuple[s
 
     ``graph_neighbors`` answers an empty ``constituentOf`` by returning every *other* relation the node
     has.  As a hint to a model that can read the note, that is helpful.  As an injected fact it is a
-    trap: '야놀자를 보유한 국내 ETF가 있나요?' came back with a 회사채 named 야놀자1-1 and a headline count of
-    15, when the answer is that no ETF holds it.  So the absence is stated as the absence.
+    trap: '야놀자를 보유한 국내 ETF가 있나요?' came back with a corporate bond named 야놀자1-1 and a
+    headline count of 15, when the answer is that no ETF holds it.  So the absence is stated as the absence.
     """
     rel = call.expect_relation
     if not rel or f"{rel} (" in content:
         return content, total
     entity = call.args.get("entity", "")
-    return (f"'{entity}' 의 {rel}(편입) 관계는 그래프에 0건입니다. "
-            f"(이 이름을 가진 다른 노드가 있어도 편입 관계가 아니므로 답으로 쓸 수 없습니다.)"), 0
+    return (f"'{entity}' has 0 {rel} (holding) relations in the graph. "
+            f"(Another node with this name, if any, is not a holding relation and cannot be used as the answer.)"), 0
 
 
 _ROW = re.compile(r"^- \[([A-Za-z_0-9]+)\]\s*(?:id=\S*\s*\|)?\s*([^|]*)")
@@ -364,8 +443,8 @@ def _filter_rows(call: RouteCall, content: str, total: int | None) -> tuple[str,
     body = "\n".join(l for l in keep if l.strip())
     n = total if total is not None else "?"
     if not body:
-        return "", f"(검색 결과 {n}건 모두 '{call.match_title}' 와 다른 상품이거나 편입종목 뷰 행이라 제외했습니다)"
-    return body, f"(검색 결과 {n}건 중 {dropped}건은 다른 상품이거나 편입종목 뷰 행이라 제외했습니다)"
+        return "", f"(all {n} search results excluded: products other than '{call.match_title}' or holdings-view rows)"
+    return body, f"({dropped} of {n} search results excluded: other products or holdings-view rows)"
 
 
 def _clip(text: str, limit: int, total: int | None) -> str:
@@ -373,9 +452,9 @@ def _clip(text: str, limit: int, total: int | None) -> str:
     text = text or ""
     if len(text) <= limit:
         return text
-    note = f"\n… (출력 {len(text)}자 중 {limit}자만 표시"
-    note += f"; 전체 결과 {total}건" if total is not None else ""
-    note += ". 같은 도구를 다시 호출하면 전체를 볼 수 있습니다)"
+    note = f"\n… (showing {limit} of {len(text)} characters"
+    note += f"; {total} results in total" if total is not None else ""
+    note += ". Call the same tool again to see everything)"
     return text[:limit] + note
 
 
@@ -395,10 +474,11 @@ async def run_plan(plan: RoutePlan, tools, *, total_budget: float = TOTAL_BUDGET
     """Execute the plan against the tool registry.  Never raises; never blocks past the budget."""
     out = Prefetch()
     if not plan.calls:
-        # 이 줄만 읽으면 "아무 저장소도 안 썼다"로 보인다.  실제로는 라운드 0 에서 미리 부를 것이
-        # 없다는 뜻이고, 정형 집계·정렬은 다음 라운드에서 RDB 가 처리한다.  think_trace 는
-        # 채점 항목("도구 사용 과정")이므로 라우팅 판단을 그대로 읽히게 적는다.
-        out.steps.append("라운드 0 라우팅: 사전 검색 대상 없음 → 이 질문은 RDB(sql_query)로 처리합니다 — "
+        # Read alone, this line looks like "no store was used".  What it really means is that round 0
+        # had nothing to fetch in advance, and structured aggregation and sorting are handled by the RDB
+        # in the next round.  think_trace is a graded item ("the tool-use process"), so the routing
+        # decision is written out as it is.
+        out.steps.append("Round 0 routing: nothing to prefetch → this question is handled by the RDB (sql_query) — "
                          + plan.summary())
         return out
     t0 = time.monotonic()
@@ -406,52 +486,55 @@ async def run_plan(plan: RoutePlan, tools, *, total_budget: float = TOTAL_BUDGET
     for call in plan.calls:
         left = total_budget - (time.monotonic() - t0)
         if left <= 0.05:
-            out.steps.append(f"라운드 0: {call.tool} 생략 — 사전검색 시간 예산({total_budget:.1f}s) 소진")
+            out.steps.append(f"Round 0: {call.tool} skipped — prefetch time budget ({total_budget:.1f}s) used up")
             break
         try:
             res = await asyncio.wait_for(_execute(tools, call.tool, dict(call.args)),
                                          timeout=min(per_call_budget, left))
         except asyncio.TimeoutError:
-            out.steps.append(f"라운드 0: {call.tool} 시간 초과 — 건너뜀")
+            out.steps.append(f"Round 0: {call.tool} timed out — skipped")
             continue
         except Exception as e:  # noqa: BLE001 - one dead store must not take the answer down
             log.exception("prefetch %s failed", call.tool)
-            out.steps.append(f"라운드 0: {call.tool} 오류({type(e).__name__}) — 건너뜀")
+            out.steps.append(f"Round 0: {call.tool} error ({type(e).__name__}) — skipped")
             continue
         if res is None or getattr(res, "is_error", False):
-            out.steps.append(f"라운드 0: {call.tool} 오류 — 건너뜀")
+            out.steps.append(f"Round 0: {call.tool} error — skipped")
             continue
         ev = getattr(res, "evidence", None)
         total = getattr(ev, "row_count", None) if ev is not None else None
         content, total = _relation_guard(call, getattr(res, "content", "") or "", total)
         content, drop_note = _filter_rows(call, content, total)
         if not content.strip():
-            # 남는 행이 없다 = 이 저장소는 이 질문에 답할 것이 없다. 아무것도 싣지 않고 도구 루프에 맡긴다.
-            out.steps.append(f"라운드 0: {_describe(call)} → 사용할 행 없음, 주입하지 않음 {drop_note}".rstrip())
+            # No rows left = this store has nothing to answer this question with.  Inject nothing and
+            # leave it to the tool loop.
+            out.steps.append(f"Round 0: {_describe(call)} → no usable rows, nothing injected {drop_note}".rstrip())
             continue
         body = _clip(content, MAX_CHARS.get(call.source, 1000), total)
-        head = f"[{call.source}] {_describe(call)} — 선택 근거: {call.why}"
+        head = f"[{call.source}] {_describe(call)} — why chosen: {call.why}"
         if total is not None:
-            head += f" / 전체 {total}건"
+            head += f" / {total} in total"
         if drop_note:
             head += " " + drop_note
-        caution = call.caution if total else ""  # 0건에는 '정렬' 주의문이 의미 없다
+        caution = call.caution if total else ""  # a 'not sorted' caution means nothing on 0 rows
         lines.append(head + "\n" + body + (f"\n※ {caution}" if caution else ""))
         if ev is not None:
             out.evidences.append(ev)
         out.ran += 1
-        n = f", {total}건" if total is not None else ""
-        out.steps.append(f"라운드 0: {_describe(call)} → 결과 {len(body)}자{n}")
+        n = f", {total} rows" if total is not None else ""
+        out.steps.append(f"Round 0: {_describe(call)} → result {len(body)} chars{n}")
     out.seconds = time.monotonic() - t0
-    out.steps.insert(0, f"라운드 0 라우팅: {plan.summary()}")
+    out.steps.insert(0, f"Round 0 routing: {plan.summary()}")
     if lines:
-        # 머리말은 두 가지를 동시에 말해야 한다. (1) 아래는 이미 실행된 사실이다. (2) 그렇다고
-        # 도구를 부르지 말라는 뜻은 아니다 — 조회 0회로 낸 final_answer 는 서버가 되돌리고(약 11초)
-        # 정렬·집계·개수는 어차피 SQL 로만 나온다. '반복하지 마세요'만 적으면 그 라운드를 유발한다.
+        # The header has to say two things at once.  (1) What follows are facts already executed.
+        # (2) That does not mean "call no tools" — a final_answer after zero lookups is sent back by the
+        # server (about 11 seconds), and sorting, aggregation and counts come only from SQL anyway.
+        # Writing only "do not repeat" provokes exactly that round.
         out.block = (
-            "[사전 검색 — 라운드 0에서 서버가 이미 실행한 결과입니다. 아래 행은 조회된 사실이므로 "
-            "그대로 근거로 쓰고, 같은 조회를 반복하지 마세요. 다만 수치의 정렬·집계·개수는 이 결과로 "
-            "얻을 수 없으므로 sql_query 로 확인한 뒤 답변하세요]\n" + "\n\n".join(lines)
+            "[Prefetch — results the server already ran in round 0. The rows below are retrieved facts: "
+            "use them as evidence as they are and do not repeat the same lookup. Sorting, aggregation and "
+            "counts of values cannot be obtained from these results, though, so confirm them with sql_query "
+            "before answering]\n" + "\n\n".join(lines)
         )
     return out
 
@@ -531,5 +614,5 @@ async def prefetch(question: str, tools, *, resolver=None, lexicon=None, ontolog
         plan = plan_retrieval(sig)
     except Exception as e:  # noqa: BLE001 - routing is an optimisation, never a dependency
         log.exception("routing: planning failed")
-        return Prefetch(steps=[f"라운드 0 라우팅 실패({type(e).__name__}) — 기존 흐름으로 진행"])
+        return Prefetch(steps=[f"Round 0 routing failed ({type(e).__name__}) — continuing with the normal flow"])
     return await run_plan(plan, tools, total_budget=total_budget)

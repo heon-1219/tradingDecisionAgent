@@ -22,37 +22,37 @@ VIEW_ID_NAME = {
     "v_etf_constituent": ("etf_itm_no", "company_name"),
 }
 VIEW_LABEL = {
-    "v_bond_kr": "국내채권",
-    "v_etf_kr": "국내ETF/ETN",
-    "v_etf_gl": "해외ETF",
-    "v_fund_pub": "공모/사모펀드",
-    "v_etf_constituent": "국내ETF 편입종목",
+    "v_bond_kr": "domestic bonds",
+    "v_etf_kr": "domestic ETFs/ETNs",
+    "v_etf_gl": "foreign ETFs",
+    "v_fund_pub": "public/private funds",
+    "v_etf_constituent": "domestic ETF holdings",
 }
 SEMANTICS = {
-    "v_bond_kr": "판매가능(구매가능) 채권 = is_sellable=1 (상환 미도래 종목 21,866건). buyable_quantity 컬럼은 값이 무효이므로 사용 금지. 매수수익률·세후수익률이 실제로 수록된 종목은 has_buy_yield=1 (634건)뿐이므로 수익률을 묻는 질의는 이 조건을 함께 쓴다. crd_grd는 국공채에 NULL. 'AA- 이상' = crd_grd IN ('AAA','AA+','AA0','AA-'). 한 종목이 여러 행일 수 있다(장내/장외 + 장외 판매 LOT info_seq, 최대 4행). 따라서 '몇 개'를 물으면 COUNT(DISTINCT pd_no) 를 쓴다. LOT 마다 매수수익률·단가가 다르므로 행 자체는 의미가 있다.",
-    "v_etf_kr": "판매중(구매가능) = is_on_sale=1 (상장 유지 + 거래정지 아님, 1,534건). ETF만 = pd_grp_no='ETF' (ETN 제외). 총보수 cu_charge_rt는 일부만 수록(NULL이면 '데이터 없음'이라고 답하고 0으로 취급하지 않는다). 순자산 pd_net_tamt(KRW). 상장일 listing_date, 상장종료일 delisting_date(9999-12-31=상장 유지). 대표명 pd_abrv_nm. "
-                "이 뷰는 ETF 1,235건과 ETN 545건을 함께 담는다 — 'ETF' 를 물으면 pd_grp_no='ETF' 를 반드시 건다(안 걸면 위험등급 1등급이 223건 대신 594건으로 2.7배가 된다). "
-                "자산군은 wu_inv_ast_type: 주식·채권·원자재·대체투자·혼합자산·단기자금·통화·기타. '채권에 투자하는 ETF' = wu_inv_ast_type='채권' (컬럼 접두어는 cu_ 가 아니라 wu_ 다). "
-                "분배주기는 pd_dvid_cycl: 'M'=매월(월배당)·'Q'=분기·'A'=연1회·'S'=반기, 공백 두 칸과 NULL은 분배 미지급/미수록이다. '월배당 상품' = pd_dvid_cycl='M'. pd_dvid_pay_cnt(연 지급 횟수 12/4/1/2)도 같은 사실을 담는다.",
-    "v_etf_gl": "전 종목 미국 상장(pd_mkt_id='US'), 기준일 2026-08-22. 구매가능 = is_on_sale=1(거래정지 아님). 주식형 = wu_inv_ast_type='Equity'. 총보수 expense_ratio_pct(%, 전 종목 수록). 운용규모 du_last_aum(USD). 이름·전략(cu_strtegy)은 영문 → 영문 키워드로 LIKE 검색. "
-                "인버스/숏을 **세려면** cu_inverse_short_yn='Y' 를 쓴다(값은 'Y' 문자열 183건과 NULL뿐이며, 숫자 1이나 IS NOT NULL 로 비교하면 답이 틀린다). "
-                "cu_lev_fector 는 레버리지 '배수'(2.0·3.0, 음수 -2.0·-3.0 은 인버스 배수)이지 인버스 여부가 아니다. 레버리지·인버스를 모두 제외할 때만 cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL 을 쓴다. "
-                "이 뷰도 ETF 5,972건과 ETN 65건을 함께 담으므로 'ETF' 를 물으면 pd_grp_no='ETF' 를 건다. 편입종목 데이터 없음.",
-    "v_fund_pub": "공모펀드 = product_type='공모펀드'(14,716건), 사모도 섞여 있으므로 반드시 조건에 넣는다. 판매중(구매가능) = is_on_sale=1. 한 펀드의 클래스들이 여러 행 → fund_family로 GROUP BY 하고 대표 1개만 제시. "
-                  "**'펀드가 몇 개인가'를 물으면 COUNT(DISTINCT fund_family) 로 센다** — 클래스(행)를 세면 같은 펀드를 여러 번 세는 것이다(예: 환헤지 해외 채권형 판매중은 클래스 130행이지만 펀드는 63개). 클래스 수 자체를 물을 때만 COUNT(*). "
-                  "국내/해외 구분은 ovrs_fd_desc: '국내'·'해외'·'국내외혼합'·'해당없음'. '해외 펀드' = ovrs_fd_desc='해외'. 투자지역 fd_ivst_rgn_desc(글로벌·아시아·남미/북미…)는 다른 축이므로 섞지 않는다. "
-                  "환헤지 여부는 is_hedged: 1=환헤지형(H), 0=환노출형(UH), NULL=미수록. 운용속성 or_attr_desc: 주식형·채권형·채권혼합·주식혼합·재간접·MMF·파생상품·특별자산·혼합자산 등. "
-                  "보수 컬럼(or_co_rwrd_r 등)은 단위 미공개(절대값 해석 금지, 상대 비교만). 수익률은 약 30%만 수록(NULL은 0이 아니라 미수록). 편입종목 데이터 없음.",
-    "v_etf_constituent": "국내 ETF의 편입종목(네이버금융 수집, 1,162개 ETF·22,599행). "
-                         "**이 뷰의 컬럼은 8개가 전부다: etf_itm_no, etf_ticker, etf_name, company_code, company_name, weight_pct, is_cash, as_of.** "
-                         "순자산(pd_net_tamt)·판매여부(is_on_sale)·ETF/ETN 구분(pd_grp_no)·총보수 같은 상품 속성은 이 뷰에 없다 — 그 조건은 "
-                         "v_etf_kr 과 조인한 뒤 상품 쪽 별칭에 건다: FROM v_etf_constituent c JOIN v_etf_kr e ON e.pd_itm_no = c.etf_itm_no "
+    "v_bond_kr": "Sellable (buyable) bonds = is_sellable=1 (21,866 bonds not yet redeemed). The buyable_quantity column holds invalid values; do not use it. Only has_buy_yield=1 bonds (634) actually carry a purchase yield and after-tax yield, so a question about yields adds that condition too. crd_grd is NULL for government and public bonds. 'AA- or higher' = crd_grd IN ('AAA','AA+','AA0','AA-'). One bond can have several rows (exchange/OTC + OTC sale LOT info_seq, up to 4 rows), so when asked 'how many', use COUNT(DISTINCT pd_no). Purchase yield and unit price differ per LOT, so the rows themselves are meaningful.",
+    "v_etf_kr": "On sale (buyable) = is_on_sale=1 (still listed and not suspended, 1,534). ETFs only = pd_grp_no='ETF' (excludes ETNs). Total fee cu_charge_rt is only partly populated (if NULL, answer 'no data' and do not treat it as 0). Net assets pd_net_tamt (KRW). Listing date listing_date, delisting date delisting_date (9999-12-31 = still listed). Display name pd_abrv_nm. "
+                "This view holds 1,235 ETFs and 545 ETNs together — when 'ETF' is asked, always add pd_grp_no='ETF' (without it risk grade 1 returns 594 instead of 223, 2.7 times too many). "
+                "Asset class is wu_inv_ast_type: 주식·채권·원자재·대체투자·혼합자산·단기자금·통화·기타. 'ETFs that invest in bonds' = wu_inv_ast_type='채권' (the column prefix is wu_, not cu_). "
+                "Distribution frequency is pd_dvid_cycl: 'M'=monthly (monthly dividend), 'Q'=quarterly, 'A'=once a year, 'S'=semi-annual; two spaces and NULL mean no distribution / not recorded. 'Monthly dividend products' = pd_dvid_cycl='M'. pd_dvid_pay_cnt (payments per year 12/4/1/2) carries the same fact.",
+    "v_etf_gl": "Every product is US-listed (pd_mkt_id='US'), base date 2026-08-22. Buyable = is_on_sale=1 (not suspended). Equity = wu_inv_ast_type='Equity'. Total fee expense_ratio_pct (%, populated for every product). AUM du_last_aum (USD). Names and strategy (cu_strtegy) are in English → LIKE search with English keywords. "
+                "To **count** inverse/short products use cu_inverse_short_yn='Y' (the only values are the string 'Y' (183) and NULL; comparing with the number 1 or IS NOT NULL gives a wrong answer). "
+                "cu_lev_fector is the leverage 'multiple' (2.0, 3.0; negative -2.0, -3.0 are inverse multiples), not whether a product is inverse. Use cu_lev_fector IS NULL AND cu_inverse_short_yn IS NULL only when excluding both leverage and inverse. "
+                "This view also holds 5,972 ETFs and 65 ETNs together, so when 'ETF' is asked add pd_grp_no='ETF'. No holdings data.",
+    "v_fund_pub": "Public funds = product_type='공모펀드' (14,716); private funds are mixed in, so always put it in the condition. On sale (buyable) = is_on_sale=1. A fund's classes are separate rows → GROUP BY fund_family and present one representative. "
+                  "**When asked 'how many funds', count COUNT(DISTINCT fund_family)** — counting classes (rows) counts the same fund several times (e.g. hedged foreign bond funds on sale are 130 class rows but 63 funds). Use COUNT(*) only when the number of classes itself is asked. "
+                  "Domestic/foreign is ovrs_fd_desc: '국내'·'해외'·'국내외혼합'·'해당없음'. 'Foreign funds' = ovrs_fd_desc='해외'. The investment region fd_ivst_rgn_desc (글로벌·아시아·남미/북미…) is a different axis; do not mix the two. "
+                  "Currency hedging is is_hedged: 1=hedged (H), 0=unhedged (UH), NULL=not recorded. Management type or_attr_desc: 주식형·채권형·채권혼합·주식혼합·재간접·MMF·파생상품·특별자산·혼합자산 etc. "
+                  "The fee columns (or_co_rwrd_r etc.) have an undisclosed unit (do not interpret absolute values; relative comparison only). Returns are populated for only about 30% (NULL means not recorded, not 0). No holdings data.",
+    "v_etf_constituent": "Holdings of domestic ETFs (collected from Naver Finance, 1,162 ETFs / 22,599 rows). "
+                         "**This view has exactly 8 columns: etf_itm_no, etf_ticker, etf_name, company_code, company_name, weight_pct, is_cash, as_of.** "
+                         "Product attributes such as net assets (pd_net_tamt), on-sale status (is_on_sale), ETF/ETN type (pd_grp_no) and total fee are not in this view — put those conditions "
+                         "on the product-side alias after joining v_etf_kr: FROM v_etf_constituent c JOIN v_etf_kr e ON e.pd_itm_no = c.etf_itm_no "
                          "WHERE c.company_code = '...' AND e.is_on_sale = 1 ORDER BY e.pd_net_tamt DESC. "
-                         "편입종목 뷰에 상품 마스터 컬럼을 직접 걸면 'no such column' 이 나며, 그것은 데이터가 없다는 뜻이 아니라 조인이 빠졌다는 뜻이다. "
-                         "etf_itm_no 로 v_etf_kr.pd_itm_no 와 조인한다. "
-                         "'삼성전자를 보유한 ETF' 같은 질의는 이 뷰를 조인해서 푼다. 종목 지정은 company_code(종목코드, 79% 수록)가 가장 정확하고, "
-                         "없으면 company_name 을 쓴다(해외 종목은 한글 표기). 삼성전자(005930)와 삼성전자우(005935)는 다른 종목이다. "
-                         "현금·예금 행은 is_cash=1 이므로 종목을 셀 때는 is_cash=0 을 건다. weight_pct 는 비중(%). 해외ETF·펀드는 편입종목 데이터가 없다.",
+                         "Putting a product-master column directly on the holdings view gives 'no such column', which means the join is missing, not that the data is missing. "
+                         "Join on etf_itm_no = v_etf_kr.pd_itm_no. "
+                         "A query such as 'ETFs that hold 삼성전자' is solved by joining this view. company_code (stock code, 79% populated) identifies a stock most precisely; "
+                         "otherwise use company_name (foreign stocks are written in Korean). 삼성전자 (005930) and 삼성전자우 (005935) are different stocks. "
+                         "Cash/deposit rows have is_cash=1, so add is_cash=0 when counting stocks. weight_pct is the weight (%). Foreign ETFs and funds have no holdings data.",
 }
 
 
@@ -65,26 +65,28 @@ class ToolResult:
 
 _UNITS = ((10**12, "조"), (10**8, "억"), (10**4, "만"))
 
-# graph_neighbors 가 관계마다 실제로 찍는 라벨 수(총 건수는 항상 그대로 보고한다).
+# How many labels graph_neighbors actually prints per relation (the total is always reported as is).
 #
-# 40이던 것을 8로 줄인다.  측정: 삼성전자(관계 462건)는 1,501자, 미래에셋자산운용(9,056건)은
-# 1,504자를 한 호출에 쏟아냈고, 그 텍스트는 대화에 남아 이후 라운드마다 다시 전송된다.
-# 8이면 각각 455자·406자로 70%·73% 줄어든다(우주항공 1,281 -> 252자).
+# Reduced from 40 to 8.  Measured: 삼성전자 (462 relations) dumped 1,501 characters and 미래에셋자산운용
+# (9,056) 1,504 characters in one call, and that text stays in the conversation and is re-sent every
+# later round.  At 8 they shrink to 455 and 406 characters, 70% and 73% less (우주항공 1,281 -> 252).
 #
-# 8인 이유: 이 목록은 정렬돼 있지 않다.  순자산·수익률·AUM "상위 N개"를 묻는 문항(T-001·T-002·
-# T-007·T-008·T-010·T-017·T-018)은 어차피 SQL 로만 풀 수 있으므로 라벨을 40개 찍어도 답이 되지
-# 않는다.  그래프가 실제로 답하는 것은 (a) 그 관계가 있는가 (b) 몇 건인가 (c) 어떤 것들인가의 예시
-# 셋이고, 개수를 명시한 평가 문항의 최대치는 5개다.  8은 그 위의 여유다.
-# 편입종목은 이제 v_etf_constituent(SQL)에 있어서 목록 자체를 그래프에서 길게 받을 이유도 없다.
+# Why 8: this list is not sorted.  Questions asking for the "top N" by net assets, return or AUM (T-001,
+# T-002, T-007, T-008, T-010, T-017, T-018) can only be solved with SQL anyway, so printing 40 labels does
+# not answer them.  What the graph really answers is three things: (a) does the relation exist, (b) how
+# many, (c) examples of which ones — and the largest count any evaluation question names is 5.  8 is the
+# margin above that.  Holdings now live in v_etf_constituent (SQL), so there is no reason to pull long
+# lists from the graph either.
 GRAPH_LABELS_SHOWN = 8
-# 목록이 이 수 이하면 자르지 않고 전부 보여준다.  8 로 자르는 것은 삼성전자(229건)처럼 큰 목록의
-# 지연을 막으려던 것인데, 작은 목록에는 해가 됐다: '캠브리콘이 편입된 중국 반도체 ETF' 는 그래프가
-# 15건을 정확히 찾아놓고 8개만 보여주자, 모델이 목록이 불완전하다고 보고 이름으로 다시 좁히려다
-# 8라운드를 돌고 119초에 죽었다.  완전한 목록을 주면 그 탐색이 아예 일어나지 않는다.
+# A list this short or shorter is shown in full, uncut.  Cutting to 8 was meant to avoid the latency of big
+# lists like 삼성전자 (229), but it hurt small ones: for '캠브리콘이 편입된 중국 반도체 ETF' the graph found
+# exactly 15 and showed 8, the model took the list for incomplete, tried to narrow it down again by name,
+# ran 8 rounds and died at 119 seconds.  Given the complete list, that search never starts.
 GRAPH_LABELS_FULL_UNDER = 25
-# 이름 옆에 함께 주는 식별자 개수.  코드는 라벨보다 짧고(12자 안팎) SQL 에 바로 들어가므로 더 많이 준다.
+# How many identifiers go next to the names.  Codes are shorter than labels (about 12 characters) and go
+# straight into SQL, so more of them are given.
 GRAPH_IDS_SHOWN = 60
-# 대상이 '상품'인 관계 — 이 관계들의 ID 는 v_etf_kr.pd_itm_no 로 조인된다.
+# Relations whose target is a 'product' — their IDs join to v_etf_kr.pd_itm_no.
 _PRODUCT_RELATIONS = {"hasTheme_inverse", "manages", "tracksIndex_inverse", "constituentOf",
                       "hasConstituent_inverse", "memberOfFamily_inverse", "investsInRegion_inverse",
                       "hasAssetClass_inverse", "hasRiskGrade_inverse"}
@@ -94,7 +96,7 @@ def korean_magnitude(v: float) -> str:
     """25474813891225 -> '25조 4,748억'.
 
     Large amounts arrive as raw integers and the model converts them to Korean units itself, which it
-    gets wrong: KODEX 200's 순자산 came back as '254조 4,818십억' in one run and '25조 4,748십억' in the
+    gets wrong: KODEX 200's net assets came back as '254조 4,818십억' in one run and '25조 4,748십억' in the
     next — the same query, an order of magnitude apart.  Doing the conversion here removes the step
     that was failing.  No currency is named: the magnitude is what gets mistranscribed, and the column
     already says whether it is KRW or USD.
@@ -129,12 +131,12 @@ def _fmt_val(v, width: int = 70) -> str:
 
 def rows_to_text(cols: list[str], rows: list[dict], max_rows: int = 40) -> str:
     if not rows:
-        return "(0건)"
+        return "(0 rows)"
     lines = [" | ".join(cols)]
     for r in rows[:max_rows]:
         lines.append(" | ".join(_fmt_val(r.get(c)) for c in cols))
     if len(rows) > max_rows:
-        lines.append(f"... (표시 {max_rows}건 / 반환 {len(rows)}건)")
+        lines.append(f"... (showing {max_rows} of {len(rows)} returned rows)")
     return "\n".join(lines)
 
 
@@ -147,35 +149,35 @@ class ToolRegistry:
 
     # ------------------------------------------------------------------ specs
     def specs(self) -> list[ToolSpec]:
-        tables = "v_bond_kr(국내채권) | v_etf_kr(국내ETF/ETN) | v_etf_gl(해외ETF) | v_fund_pub(공모/사모펀드)"
+        tables = "v_bond_kr (domestic bonds) | v_etf_kr (domestic ETFs/ETNs) | v_etf_gl (foreign ETFs) | v_fund_pub (public/private funds)"
         return [
             ToolSpec(
                 "table_info",
-                f"테이블(뷰)의 컬럼 정의·한글 의미·허용값·기준일·판매가능 판정 규칙을 반환합니다. 테이블: {tables}. SQL 작성 전에 컬럼명이 불확실하면 호출하세요.",
+                f"Returns a table's (view's) column definitions, Korean meanings, allowed values, base date and the rules for judging sellability. Tables: {tables}. Call it before writing SQL when unsure of a column name.",
                 {"type": "object", "properties": {"table": {"type": "string", "enum": list(VIEW_ID_NAME)}}, "required": ["table"]},
             ),
             ToolSpec(
                 "sql_query",
-                "SQLite 읽기 전용 SELECT 를 실행합니다(단일 문장, 최대 200행, 5초). 뷰 이름: v_bond_kr, v_etf_kr, v_etf_gl, v_fund_pub. "
-                "필터·정렬·집계·비교는 이 도구로 수행하세요. 문자열 매칭은 LIKE '%키워드%' (해외ETF는 영문). 결과 0건이면 조건을 완화해 재시도할 수 있습니다.",
+                "Runs a read-only SQLite SELECT (single statement, at most 200 rows, 5 seconds). Views: v_bond_kr, v_etf_kr, v_etf_gl, v_fund_pub. "
+                "Do filtering, sorting, aggregation and comparison with this tool. String matching is LIKE '%keyword%' (English for foreign ETFs). With 0 rows you may relax the conditions and retry.",
                 {
                     "type": "object",
                     "properties": {
-                        "sql": {"type": "string", "description": "실행할 SELECT 문"},
-                        "purpose": {"type": "string", "description": "이 질의의 목적(추적용, 한 문장)"},
+                        "sql": {"type": "string", "description": "The SELECT statement to run"},
+                        "purpose": {"type": "string", "description": "The purpose of this query (for the trace, one sentence)"},
                     },
                     "required": ["sql"],
                 },
             ),
             ToolSpec(
                 "search_products",
-                "상품명·운용사·기초지수·전략 텍스트 검색. mode=hybrid(기본)는 어휘검색(BM25) 결과를 상위에 두고 하위 약 30% 슬롯만 의미검색(벡터)이 단독으로 찾아낸 상품에 배정합니다. lexical은 정확한 표기 매칭, vector는 표현이 달라도 의미가 가까운 상품을 찾습니다. "
-                "상품명·코드·티커를 알고 있으면 이 도구가 아니라 sql_query 가 정확합니다(실측: 정식명칭 recall@1 어휘 93.8% 대 벡터 33.8%). 이름을 모르고 테마·성격·전략만 아는 경우에 쓰세요(예: 우주항공, robot, China semiconductor). 해외ETF는 영문 키워드도 함께 넣으세요. 반환: 테이블, id(상품코드), 이름, 핵심 필드.",
+                "Text search over product names, managers, underlying indices and strategies. mode=hybrid (default) keeps the lexical (BM25) results on top and gives only the bottom ~30% of slots to products that semantic (vector) search alone found. lexical matches the exact spelling; vector finds products close in meaning even when worded differently. "
+                "If you know the product name, code or ticker, sql_query is more precise than this tool (measured: official-name recall@1, lexical 93.8% vs vector 33.8%). Use it when you do not know the name and only know the theme, character or strategy (e.g. 우주항공, robot, China semiconductor). For foreign ETFs include English keywords too. Returns: table, id (product code), name, key fields.",
                 {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"},
-                        "table": {"type": "string", "enum": list(VIEW_ID_NAME), "description": "특정 테이블로 제한(선택)"},
+                        "table": {"type": "string", "enum": list(VIEW_ID_NAME), "description": "Restrict to one table (optional)"},
                         "k": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
                         "mode": {"type": "string", "enum": ["hybrid", "lexical", "vector"], "default": "hybrid"},
                     },
@@ -184,37 +186,37 @@ class ToolRegistry:
             ),
             ToolSpec(
                 "resolve_entity",
-                "질문 속 고유명사(상품명, 기업명, 운용사, 테마)를 사전·색인으로 해석합니다. 정확 일치 여부(exact), 유사 후보, 기업의 모회사/자회사·상장 여부, 테마 동의어를 반환합니다. "
-                "상품이 실제로 존재하는지 확인할 때 먼저 호출하세요.",
+                "Resolves a proper noun in the question (product, company, manager, theme) against the lexicon and index. Returns whether it matched exactly (exact), similar candidates, a company's parent/subsidiaries and listing status, and theme synonyms. "
+                "An English company name resolves to the Korean name used in the data. Call it first when checking whether a product really exists.",
                 {"type": "object", "properties": {"mention": {"type": "string"}}, "required": ["mention"]},
             ),
             ToolSpec(
                 "graph_neighbors",
-                "지식그래프에서 엔티티(상품명/코드/티커/기업명/테마명/운용사명)의 관계를 조회합니다. 관계 예: managedBy, hasTheme, hasConstituent(편입종목), affiliateOf(계열사), "
-                "subsidiaryOf, hasSubsidiary, tracksIndex, hasBenchmark, memberOfFamily, investsInRegion, hasAssetClass, hasRiskGrade, hasTheme_inverse(테마→상품). "
-                "예: graph_neighbors('에코프로','hasSubsidiary'), graph_neighbors('에코프로비엠','constituentOf'), graph_neighbors('우주항공','hasTheme_inverse').",
+                "Looks up the relations of an entity (product name/code/ticker, company, theme, manager) in the knowledge graph. Relations include: managedBy, hasTheme, hasConstituent (holdings), affiliateOf (affiliates), "
+                "subsidiaryOf, hasSubsidiary, tracksIndex, hasBenchmark, memberOfFamily, investsInRegion, hasAssetClass, hasRiskGrade, hasTheme_inverse (theme→products). "
+                "E.g. graph_neighbors('에코프로','hasSubsidiary'), graph_neighbors('에코프로비엠','constituentOf'), graph_neighbors('우주항공','hasTheme_inverse').",
                 {
                     "type": "object",
-                    "properties": {"entity": {"type": "string"}, "relation": {"type": "string", "description": "특정 관계만(선택)"}},
+                    "properties": {"entity": {"type": "string"}, "relation": {"type": "string", "description": "Only this relation (optional)"}},
                     "required": ["entity"],
                 },
             ),
             ToolSpec(
                 "graph_query",
-                "지식그래프 SPARQL SELECT. 접두사 fp:(스키마), d:(데이터)는 자동 추가. 상품 IRI: d:etf_kr/{ISIN}, d:etf_gl/{RIC}, d:bond/{ISIN}, d:fund/{itm_no}. "
-                "예: SELECT ?etf ?name WHERE { ?etf fp:hasConstituent ?c . ?c fp:subsidiaryOf ?p . ?p fp:name '에코프로' . ?etf fp:name ?name } / "
+                "Knowledge-graph SPARQL SELECT. The prefixes fp: (schema) and d: (data) are added automatically. Product IRIs: d:etf_kr/{ISIN}, d:etf_gl/{RIC}, d:bond/{ISIN}, d:fund/{itm_no}. "
+                "E.g. SELECT ?etf ?name WHERE { ?etf fp:hasConstituent ?c . ?c fp:subsidiaryOf ?p . ?p fp:name '에코프로' . ?etf fp:name ?name } / "
                 "SELECT ?p ?n WHERE { ?p fp:hasTheme d:theme/space_aero ; fp:name ?n ; fp:listingDate ?d . FILTER(?d >= '2026-02-21'^^xsd:date) }",
                 {"type": "object", "properties": {"sparql": {"type": "string"}}, "required": ["sparql"]},
             ),
             ToolSpec(
                 "search_documents",
-                "외부 참고 문서(마크다운: 국민성장펀드 개요, ETF 용어·지표 해설, ETF 위험요인 일반)를 검색합니다. 상품 마스터에 없는 배경 설명·위험요인·용어가 필요할 때 사용. "
-                "출처·기준일이 함께 반환되며, 주최측 제공 데이터가 우선합니다.",
+                "Searches the external reference documents (markdown: 국민성장펀드 overview, ETF terms and metrics explained, general ETF risk factors). Use it when you need background, risk factors or terminology the product masters do not hold. "
+                "Source and base date come with each result; the organisers' data takes precedence.",
                 {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 8}}, "required": ["query"]},
             ),
             ToolSpec(
                 "final_answer",
-                "최종 답변을 제출하고 종료합니다. 반드시 마지막에 한 번 호출하세요. status: answered(근거 있음) / cannot_confirm(제공 데이터로 확인 불가) / clarify(조건 모호·역질문).",
+                "Submits the final answer and ends. Always call it once, at the end. status: answered (backed by evidence) / cannot_confirm (cannot be confirmed with the provided data) / clarify (ambiguous condition; ask back).",
                 FINAL_ANSWER_SCHEMA,
             ),
         ]
@@ -224,15 +226,15 @@ class ToolRegistry:
         try:
             fn = getattr(self, f"_t_{name}", None)
             if fn is None:
-                return ToolResult(f"알 수 없는 도구: {name}", True)
+                return ToolResult(f"Unknown tool: {name}", True)
             return fn(**(args or {}))
         except TypeError as e:
-            return ToolResult(f"잘못된 인자: {e}", True)
+            return ToolResult(f"Invalid arguments: {e}", True)
         except SQLGuardError as e:
             return ToolResult(str(e), True)
         except Exception as e:  # noqa: BLE001 - tool errors go back to the model
             log.exception("tool %s failed", name)
-            return ToolResult(f"도구 오류({type(e).__name__}): {e}", True)
+            return ToolResult(f"Tool error ({type(e).__name__}): {e}", True)
 
     def _meta_line(self, view: str) -> tuple[str | None, str | None]:
         m = self.meta.get(view) or {}
@@ -240,27 +242,27 @@ class ToolRegistry:
 
     def _t_table_info(self, table: str) -> ToolResult:
         if table not in VIEW_ID_NAME:
-            return ToolResult(f"알 수 없는 테이블: {table}. 사용 가능: {', '.join(VIEW_ID_NAME)}", True)
+            return ToolResult(f"Unknown table: {table}. Available: {', '.join(VIEW_ID_NAME)}", True)
         kname, base = self._meta_line(table)
         m = self.meta.get(table) or {}
         card = self.ontology.schema_card(table) if self.ontology is not None else "### " + table + "\n- " + "\n- ".join(self.rdb.columns(table))
-        text = f"{card}\n기준일: {base} · 행수: {m.get('row_count')}\n판정 규칙: {SEMANTICS[table]}"
+        text = f"{card}\nBase date: {base} · rows: {m.get('row_count')}\nRules: {SEMANTICS[table]}"
         return ToolResult(text, False, Evidence("schema", table, kname, base, "table_info", None))
 
-    # 한 상품이 여러 행인 뷰: 행 수와 상품 수가 다르다.
-    #   v_bond_kr  — 장내/장외 + 장외 판매 LOT(info_seq) 로 한 종목이 최대 4행
-    #   v_fund_pub — 한 펀드가 클래스별로 여러 행
+    # Views where one product spans several rows, so the row count and the product count differ.
+    #   v_bond_kr  — exchange/OTC + OTC sale LOTs (info_seq): up to 4 rows per bond
+    #   v_fund_pub — one fund has a row per class
     ROW_UNIT = {
-        "v_bond_kr": ("pd_no", "채권 종목"),
-        "v_fund_pub": ("fund_family", "펀드(클래스 합산)"),
+        "v_bond_kr": ("pd_no", "bonds"),
+        "v_fund_pub": ("fund_family", "funds (classes combined)"),
     }
     _COUNT_STAR = re.compile(r"count\s*\(\s*\*\s*\)", re.I)
 
     def _unit_warning(self, sql: str, view: str | None) -> str:
-        """COUNT(*) 로 '몇 개'를 물으면 행 수가 나온다. 실제 상품 수를 함께 알려줘 오답을 막는다.
+        """Asking 'how many' with COUNT(*) returns a row count.  Stating the real product count too prevents a wrong answer.
 
-        프롬프트에 'DISTINCT 를 쓰라'고 적어두었지만 모델이 무시해 16,023(행) vs 15,837(종목) 오답이
-        실제로 나왔다. 지시 대신 결과에 정답을 같이 얹는다.
+        The prompt says 'use DISTINCT', but the model ignored it and a wrong answer of 16,023 (rows) vs
+        15,837 (bonds) actually happened.  Instead of an instruction, the right number rides on the result.
         """
         if not view or view not in self.ROW_UNIT:
             return ""
@@ -269,7 +271,7 @@ class ToolRegistry:
         # Only a query whose whole result is one count can be restated as a different count.  A
         # GROUP BY returns one row per group with the dimension in the first column, and rewriting it
         # produced ValueError("Cannot specify ',' with 's'") when the group key hit the f-string's
-        # thousands separator — breaking the very "펀드 패밀리 요약" pattern the prompt teaches.
+        # thousands separator — breaking the very "fund family summary" pattern the prompt teaches.
         if re.search(r"\bgroup\s+by\b", sql, re.I):
             return ""
         key, unit = self.ROW_UNIT[view]
@@ -282,14 +284,14 @@ class ToolRegistry:
         n = list(alt.rows[0].values())[0]
         if not isinstance(n, (int, float)) or isinstance(n, bool):
             return ""
-        return (f"\n⚠ 위 숫자는 '행 수'입니다. {view} 는 한 상품이 여러 행일 수 있어 "
-                f"실제 {unit} 수는 {int(n):,}개입니다. 개수를 묻는 질문이라면 {int(n):,}개로 답하세요.")
+        return (f"\n⚠ The number above is a row count. In {view} one product can span several rows, so "
+                f"the actual number of {unit} is {int(n):,}. If the question asks how many, answer {int(n):,}.")
 
     def _true_total(self, sql: str) -> int | None:
         """How many rows the query really matches, ignoring the row cap.
 
         The cap exists to bound query cost, but reporting the capped number as the total is the same
-        mistake the graph made with its 60-neighbour limit: '총 200건' for a filter that matches 15,837
+        mistake the graph made with its 60-neighbour limit: '200 in total' for a filter that matches 15,837
         products invites the model to answer 200.  A cap may hide rows; it must never change a count.
         """
         inner = re.sub(r"\blimit\s+\d+(\s+offset\s+\d+)?\s*$", "", sql.strip().rstrip(";"), flags=re.I).strip()
@@ -302,52 +304,55 @@ class ToolRegistry:
         return int(list(r.rows[0].values())[0]) if r.rows else None
 
     def _zero_warnings(self, sql: str, columns: list[str], rows: list[dict]) -> str:
-        """0 이 답을 오염시키는 두 경우를 결과에 바로 붙인다.
+        """Attach, right to the result, the two cases where a 0 contaminates the answer.
 
-        주최측은 값이 없을 때 0 이나 NULL 을 그대로 두었다고 공지했다. 프롬프트에 '0 을 값으로 쓰지 말라'고
-        적어도 모델은 총보수 0% 상품 3개를 최저 총보수로 답했고(실제 MDY 는 0.24%), 조건 표기가 어긋나
-        COUNT 가 0 으로 나온 것을 그대로 '0개'라고 답했다. 결과가 나온 시점에 경고하는 편이 확실하다.
+        The organisers announced that missing values were left as 0 or NULL.  Even with 'do not use 0 as
+        a value' in the prompt, the model answered three products with a 0% total fee as the lowest fee
+        (MDY is actually 0.24%), and when a mismatched condition spelling made COUNT return 0 it answered
+        '0' as is.  A warning at the moment the result arrives is more reliable.
         """
         out = ""
         if len(rows) == 1 and len(columns) == 1:
             v = rows[0].get(columns[0])
             if isinstance(v, (int, float)) and v == 0 and re.search(r"count\s*\(", sql, re.I):
-                out += ("\n⚠ 0건입니다. 조건 값의 표기가 실제 데이터와 다를 수 있으니, 조건을 하나씩 빼서 "
-                        "어느 조건이 0을 만드는지 확인한 뒤 답하세요. 컬럼의 실제 값은 table_info 로 확인합니다.")
+                out += ("\n⚠ 0 rows. A condition value may be spelled differently from the actual data: drop the "
+                        "conditions one at a time to find which one produces 0, then answer. Check a column's actual values with table_info.")
         m = re.search(r"order\s+by\s+([A-Za-z_][A-Za-z0-9_]*)\s*(asc)?\b", sql, re.I)
         if m and rows:
             col = m.group(1)
             if col in columns and sum(1 for r in rows if r.get(col) == 0) and (m.group(2) or "").lower() != "desc":
-                out += (f"\n⚠ 정렬 기준 {col} 에 0 이 섞여 있습니다. 0 은 값이 제공되지 않은 것이므로 순위에 넣으면 안 됩니다. "
-                        f"AND {col} > 0 을 추가해 다시 조회하세요.")
+                out += (f"\n⚠ The sort column {col} contains 0s. A 0 means the value was not provided, so it must not be ranked. "
+                        f"Add AND {col} > 0 and query again.")
         return out
 
-    # ------------------------------------------- SQL 오류를 '가르치는' 메시지로 바꾼다
-    # 이 자리는 도구 계층이지 가드가 아니다. RDB.query 는 ETL·평가 스크립트와 바로 위
-    # _true_total/_unit_warning 의 내부 재질의까지 함께 쓰는 범용 접근자여서, 가드에 LLM 용
-    # 안내문을 넣으면 사람이 읽을 로그와 내부 재시도 경로까지 오염된다. 뷰 카탈로그를 알고
-    # 있고 문자열이 그대로 모델에게 전달되는 곳은 이 계층이다.
+    # ------------------------------------------- turn SQL errors into messages that teach
+    # This lives in the tool layer, not in the guard.  RDB.query is a general accessor shared by the ETL,
+    # the evaluation scripts and the internal re-queries of _true_total/_unit_warning just above, so
+    # putting LLM-facing guidance into the guard would pollute human-readable logs and the internal retry
+    # paths.  The place that knows the view catalogue and whose strings reach the model verbatim is here.
     #
-    # 근거(G-007): "no such column: pd_ticker" 는 무엇이 틀렸는지만 말하고 무엇이 맞는지는
-    # 말하지 않는다. 모델은 다시 추측할 수밖에 없고, 추측이 반복되면 8라운드가 사라진다.
+    # Evidence (G-007): "no such column: pd_ticker" says only what is wrong, not what is right.  The model
+    # can only guess again, and repeated guessing burns all 8 rounds.
     _NO_COLUMN = re.compile(r"no such column:\s*(?:(?P<alias>[A-Za-z_]\w*)\.)?(?P<col>[A-Za-z_]\w*)", re.I)
     _NO_TABLE = re.compile(r"no such table:\s*(?P<tbl>[A-Za-z_]\w*)", re.I)
-    # 컬럼 목록을 SQL 로 알아내려는 시도(PRAGMA/sqlite_master)는 가드가 막는다 — 막힌 이유가
-    # 아니라 대신 쓸 도구를 알려줘야 다음 라운드가 살아난다.
+    # Attempts to discover the column list through SQL (PRAGMA/sqlite_master) are blocked by the guard —
+    # the next round survives only if we name the tool to use instead, not the reason for the block.
     _CATALOG_SQL = re.compile(r"\b(pragma|sqlite_master|sqlite_schema|describe|show\s+columns)\b", re.I)
-    # 소스 시스템 접두어. 모델이 'pd_ticker' 라고 쓰고 뷰에는 'ticker' 만 있는 혼동이 실제로 났다.
+    # Source-system prefixes.  The model writing 'pd_ticker' when the view only has 'ticker' really happened.
     _SRC_PREFIX = re.compile(r"^(?:pd|cu|du|wu|ru|fn|ref|etf|or|zrin|fd|std|bd|crd)_", re.I)
-    _MAX_COLS_SHOWN = 24   # 이보다 좁은 뷰는 전부 나열해도 컨텍스트를 해치지 않는다
-    _NEAR_COLS_SHOWN = 10  # 넓은 뷰는 근접 후보만 보이고 전체 개수를 알린다
+    _MAX_COLS_SHOWN = 24   # a view narrower than this can be listed in full without hurting the context
+    _NEAR_COLS_SHOWN = 10  # a wide view shows only nearby candidates and states the total count
 
-    # 근거(119초 문항): "SELECT ... du_er_1y FROM v_etf_gl" 이 실패한 직후 모델이 궤도를 벗어나
-    # 답 대신 '접근 방법'을 쓰기 시작했다. 위의 제안은 'du_er_1d 를 쓰세요'라고 말하는데,
-    # 1일 수익률은 1년 수익률의 대체재가 아니다 — 이름이 가까운 것과 뜻이 같은 것은 다르다.
-    # 무엇이 맞는지만 알려주고 '그래서 무엇을 하라'를 말하지 않으면 그 다음 라운드가 계획 수립으로 샌다.
-    # 제안이 있을 때도 붙인다: du_er_1y 는 제안이 나오는데도 그 제안이 답이 될 수 없는 경우였다.
+    # Evidence (the 119-second question): right after "SELECT ... du_er_1y FROM v_etf_gl" failed, the model
+    # went off track and started writing 'an approach' instead of an answer.  The suggestion above says
+    # 'use du_er_1d', but a 1-day return is no substitute for a 1-year return — a close name is not the same
+    # meaning.  Saying only what is right, without 'so do this', lets the next round leak into planning.
+    # It is attached even when there is a suggestion: du_er_1y was exactly a case where a suggestion came
+    # out and still could not be the answer.
     _NO_COLUMN_DIRECTIVE = (
-        "\n이름이 가깝다고 뜻(기간·단위)까지 같지는 않습니다. 그 뷰에서 뜻이 맞는 컬럼을 쓰고, 없으면 다른 기간·단위 값으로 "
-        "대체하지 말고 그 상품군을 비교에서 제외했다고 한 문장으로 밝힌 뒤 나머지 상품군으로 바로 답하세요(방법 설명 금지)."
+        "\nA similar name does not mean the same meaning (period, unit). Use the column in that view whose meaning matches; if there is none, "
+        "do not substitute a value of another period or unit — say in one sentence that the product group was excluded from the comparison "
+        "and answer right away with the remaining groups (do not describe the method)."
     )
 
     def _view_columns(self, view: str) -> list[str]:
@@ -357,20 +362,20 @@ class ToolRegistry:
         if view not in cache:
             try:
                 cache[view] = list(self.rdb.columns(view))
-            except Exception:  # noqa: BLE001 - 카탈로그 조회 실패가 오류 메시지를 삼키면 안 된다
+            except Exception:  # noqa: BLE001 - a failed catalogue lookup must not swallow the error message
                 cache[view] = []
         return cache[view]
 
     @classmethod
     def _core_name(cls, col: str) -> str:
-        """접두어를 뗀 형태. 'pd_ticker' -> 'ticker', 'etf_itm_no' -> 'itm_no'."""
+        """The name without its prefix.  'pd_ticker' -> 'ticker', 'etf_itm_no' -> 'itm_no'."""
         return cls._SRC_PREFIX.sub("", col.lower())
 
     def _column_suggestions(self, wanted: str, cols: list[str], n: int = 4) -> list[str]:
-        """wanted 와 가장 가까운 실제 컬럼명. 접두어 혼동을 먼저, 그다음 편집거리."""
+        """The real column names closest to wanted.  Prefix confusion first, then edit distance."""
         want, core = wanted.lower(), self._core_name(wanted)
         out: list[str] = []
-        for c in cols:  # 접두어만 다른 경우를 최우선으로 올린다(G-007 의 pd_ticker -> ticker)
+        for c in cols:  # a prefix-only difference ranks first (G-007's pd_ticker -> ticker)
             if c.lower() != want and self._core_name(c) == core:
                 out.append(c)
         for c in difflib.get_close_matches(wanted, cols, n=n, cutoff=0.6):
@@ -388,26 +393,26 @@ class ToolRegistry:
         return [v for v in VIEW_ID_NAME if re.search(rf"\b{v}\b", sql, re.I)]
 
     def _sql_error_hint(self, sql: str, msg: str) -> str:
-        """실패한 질의에 '무엇이 맞는지'를 덧붙인다. 더할 게 없으면 빈 문자열."""
+        """Append 'what is right' to a failed query.  Empty string when there is nothing to add."""
         m = self._NO_TABLE.search(msg)
         if m:
             bad = m.group("tbl")
             near = difflib.get_close_matches(bad, list(VIEW_ID_NAME), n=1, cutoff=0.5)
-            head = f"\n'{bad}' 대신 {near[0]} 를 쓰세요. " if near else "\n"
-            return (head + "사용 가능한 뷰는 다음 5개뿐입니다: "
-                    + ", ".join(f"{v}({VIEW_LABEL[v]})" for v in VIEW_ID_NAME)
-                    + ". 컬럼 정의는 table_info 도구로 확인합니다.")
+            head = f"\nUse {near[0]} instead of '{bad}'. " if near else "\n"
+            return (head + "Only these 5 views are available: "
+                    + ", ".join(f"{v} ({VIEW_LABEL[v]})" for v in VIEW_ID_NAME)
+                    + ". Check column definitions with the table_info tool.")
         m = self._NO_COLUMN.search(msg)
         if m:
             bad, alias = m.group("col"), m.group("alias")
             views = self._referenced_views(sql)
-            if alias:  # 별칭이 붙었으면 그 별칭이 가리키는 뷰만 본다 — JOIN 질의에서 정확도가 올라간다
+            if alias:  # with an alias, look only at the view it points to — more precise on JOIN queries
                 am = re.search(rf"\b(v_\w+)\s+(?:as\s+)?{re.escape(alias)}\b", sql, re.I)
                 if am and am.group(1) in VIEW_ID_NAME:
                     views = [am.group(1)]
             if not views:
-                return ("\n질의가 참조한 뷰를 알 수 없습니다. 사용 가능한 뷰: "
-                        + ", ".join(VIEW_ID_NAME) + " (컬럼 정의는 table_info).")
+                return ("\nCannot tell which view the query refers to. Available views: "
+                        + ", ".join(VIEW_ID_NAME) + " (column definitions via table_info).")
             best: list[str] = []
             listing: list[str] = []
             for v in views:
@@ -417,25 +422,25 @@ class ToolRegistry:
                 sug = self._column_suggestions(bad, cols)
                 best += [f"{v}.{c}" for c in sug[:2]]
                 if len(cols) <= self._MAX_COLS_SHOWN:
-                    listing.append(f"- {v} 컬럼 {len(cols)}개: " + ", ".join(cols))
+                    listing.append(f"- {v} has {len(cols)} columns: " + ", ".join(cols))
                 else:
-                    # 넓은 뷰를 통째로 실으면 컨텍스트를 잡아먹는다. 가까운 이름 + 총 개수만 준다.
+                    # Listing a wide view in full eats the context.  Give the nearby names + the total only.
                     near = sug or difflib.get_close_matches(bad, cols, n=self._NEAR_COLS_SHOWN, cutoff=0.0)
                     listing.append(
-                        f"- {v} 컬럼 {len(cols)}개 중 '{bad}' 와 가까운 이름: "
+                        f"- {v} has {len(cols)} columns; names close to '{bad}': "
                         + ", ".join(near[: self._NEAR_COLS_SHOWN])
-                        + f" (전체 목록은 table_info('{v}'))"
+                        + f" (full list: table_info('{v}'))"
                     )
             out = ""
             if best:
-                out += f"\n'{bad}' 대신 " + " 또는 ".join(best[:3]) + " 를 쓰세요."
+                out += "\nUse " + " or ".join(best[:3]) + f" instead of '{bad}'."
             if listing:
                 out += "\n" + "\n".join(listing)
             return out + self._NO_COLUMN_DIRECTIVE
-        # 가드가 막은 카탈로그 조회: 막힌 이유가 아니라 대신 쓸 도구를 알려준다.
-        # (컬럼명을 몰라 PRAGMA 로 알아내려는 시도는 바로 이 막다른 길에서 나온다.)
+        # A catalogue query blocked by the guard: name the tool to use instead, not the reason for the block.
+        # (Trying PRAGMA because the column name is unknown is exactly how this dead end arises.)
         if self._CATALOG_SQL.search(sql or ""):
-            return "\n컬럼 목록·기준일·판정 규칙은 SQL 이 아니라 table_info 도구로 조회하세요. 예: table_info(table='v_etf_kr')."
+            return "\nLook up column lists, base dates and rules with the table_info tool, not with SQL. E.g. table_info(table='v_etf_kr')."
         return ""
 
     def _t_sql_query(self, sql: str, purpose: str = "") -> ToolResult:
@@ -455,12 +460,12 @@ class ToolRegistry:
         text = rows_to_text(r.columns, r.rows)
         total = self._true_total(r.sql) if r.truncated else r.row_count
         if r.truncated:
-            text += (f"\n조건에 맞는 행은 총 {total:,}건이며, 위는 그중 {r.row_count}건입니다."
+            text += (f"\n{total:,} rows match in total; the above shows {r.row_count} of them."
                      if total is not None else
-                     f"\n총 {r.row_count}건 이상 (행 수 상한에 걸렸습니다 — 정확한 개수는 COUNT 로 확인하세요)")
-            text += " 개수를 묻는 질문이면 이 총계로 답하고, 나열이 필요하면 정렬 기준을 붙여 상위 N개만 뽑으세요."
+                     f"\nAt least {r.row_count} rows (the row cap was hit — get the exact number with COUNT).")
+            text += " If the question asks how many, answer with this total; if a list is needed, add a sort criterion and take only the top N."
         else:
-            text += f"\n총 {r.row_count}건"
+            text += f"\nTotal rows: {r.row_count}"
         text += self._unit_warning(r.sql, view)
         text += self._zero_warnings(r.sql, r.columns, r.rows)
         return ToolResult(text, False, Evidence("sql", view, kname, base, r.sql, total if total is not None else r.row_count, refs))
@@ -482,7 +487,7 @@ class ToolRegistry:
             )
         detail = f"search_products('{query}', mode={mode}" + (f", table={table}" if table else "") + ")"
         if not hits:
-            return ToolResult("검색 결과 없음", False, Evidence("search", table, None, None, detail, 0))
+            return ToolResult("No search results", False, Evidence("search", table, None, None, detail, 0))
         lines, refs = [], []
         for h in hits:
             idc, _ = VIEW_ID_NAME.get(h.table, ("id", "name"))
@@ -497,108 +502,109 @@ class ToolRegistry:
         for c in r.companies:
             subs = self.lexicon.subsidiaries_of(c.id)
             if subs:
-                text += f"\n{c.name_ko}의 자회사(사전): " + ", ".join(s.name_ko for s in subs)
+                text += f"\nSubsidiaries of {c.name_ko} (lexicon): " + ", ".join(s.name_ko for s in subs)
             elif self.kg is not None:
-                # 지분 기준 자회사가 없을 때의 차선책. '자회사'가 아니라 '계열사'로 적는다.
+                # Second best when there is no ownership-based subsidiary.  Written as affiliates, not subsidiaries.
                 cand = self.kg.subsidiary_candidates(c.name_ko, limit=40)
                 if cand["kind"] == "affiliate":
                     text += (
-                        f"\n{c.name_ko}의 계열사({'/'.join(cand['groups']) or '그룹주 ETF'} 편입 기준, {cand['total']}개): "
+                        f"\nAffiliates of {c.name_ko} (from the holdings of {'/'.join(cand['groups']) or 'group-stock ETFs'}, {cand['total']}): "
                         + ", ".join(x["label"] for x in cand["items"][:20])
-                        + " — 같은 기업집단이라는 뜻이며 지분 소유(자회사) 관계가 아닙니다."
+                        + " — this means the same business group, not an ownership (subsidiary) relation."
                     )
             if self.kg is not None:
                 nb = self.kg.neighbors(c.name_ko, relation="constituentOf", limit=30)
                 cons = nb.get("constituentOf", [])
                 if cons:
-                    text += f"\n{c.name_ko}를 편입한 상품(그래프, {len(cons)}건): " + ", ".join(x["label"] for x in cons[:15])
+                    text += f"\nProducts holding {c.name_ko} (graph, {len(cons)}): " + ", ".join(x["label"] for x in cons[:15])
                 elif not c.not_listed:
-                    text += f"\n{c.name_ko}를 편입한 상품: 편입 데이터 없음"
+                    text += f"\nProducts holding {c.name_ko}: no holdings data"
             if c.note:
-                text += f"\n비고: {c.note}"
+                text += f"\nNote: {c.note}"
         refs = [f"{h.id} {h.title}" for h in r.products[:5]]
         return ToolResult(text, False, Evidence("entity", None, None, None, f"resolve_entity('{mention}') exact={r.exact}", None, refs))
 
     def _t_graph_neighbors(self, entity: str, relation: str | None = None) -> ToolResult:
         if self.kg is None:
-            return ToolResult("지식그래프가 로드되지 않았습니다.", True)
+            return ToolResult("The knowledge graph is not loaded.", True)
         totals: dict[str, int] = {}
         nb = self.kg.neighbors(entity, relation=relation, limit=60, totals=totals)
         note = ""
         if not nb and relation in ("hasSubsidiary", "subsidiaryOf_inverse"):
-            # 주최측 예시가 '자회사'라는 단어를 쓴다. 지분 기준 자회사 엣지는 손으로 확인한 4건뿐이라
-            # 나머지 회사는 전부 답변불가로 떨어졌다(실제 사고: "한화 에어로스페이스의 자회사를 편입한
-            # ETF"). 같은 기업집단 계열사로 대신 답하되, 관계 이름을 바꿔치기하지 않고 무엇을 돌려주는
-            # 것인지 밝힌다 — 계열은 '같은 그룹'이지 '지분 50%+ 소유'가 아니다.
+            # The organisers' example uses the word 'subsidiary' (자회사).  Ownership-based subsidiary edges
+            # exist for only 4 hand-checked cases, so every other company fell to 'cannot answer' (real
+            # incident: "한화 에어로스페이스의 자회사를 편입한 ETF").  Answer with affiliates of the same
+            # business group instead, but do not swap the relation's name — say what is being returned.
+            # An affiliate is 'the same group', not '50%+ ownership'.
             cand = self.kg.subsidiary_candidates(entity, limit=60)
             if cand["kind"] == "affiliate":
                 totals, nb = {"affiliateOf": cand["total"]}, {"affiliateOf": cand["items"]}
                 note = (
-                    f"('{entity}' 의 지분 소유 기준 자회사는 제공 데이터에 없습니다. 대신 같은 기업집단"
-                    f"({'/'.join(cand['groups']) or '그룹주 ETF'})의 **계열사**를 반환합니다 — 그룹주 ETF 가 함께 편입한 "
-                    f"종목에서 유도한 관계이며 지분 관계가 아닙니다. 답변에는 '계열사'로 표기하고 "
-                    f"'X는 Y의 자회사입니다'라고 쓰지 마세요.)\n"
+                    f"(The provided data has no ownership-based subsidiaries of '{entity}'. Returning **affiliates** of the same "
+                    f"business group ({'/'.join(cand['groups']) or 'group-stock ETFs'}) instead — a relation derived from stocks that "
+                    f"group-stock ETFs hold together, not an ownership relation. Call them affiliates (계열사) in the answer and "
+                    f"do not write 'X is a subsidiary of Y'.)\n"
                 )
         if not nb and relation:
             # An empty *filtered* result is nearly always the wrong direction, not a missing entity:
             # 삼성전자 has no hasConstituent but constituentOf has 238.  Returning the relations it does
             # have — as data, not as advice — answers in this round; a hint alone was ignored and the
-            # model replied "확인할 수 없습니다" while the graph held the answer.
+            # model replied "확인할 수 없습니다" (cannot be confirmed) while the graph held the answer.
             totals = {}
             nb = self.kg.neighbors(entity, limit=60, totals=totals)
             if nb:
-                note = f"('{relation}' 관계는 없어 이 엔티티의 전체 관계를 대신 보여줍니다)\n"
+                note = f"(No '{relation}' relation, so all relations of this entity are shown instead)\n"
         if not nb:
-            return ToolResult(f"'{entity}' 에 해당하는 노드/관계 없음", False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", 0))
+            return ToolResult(f"No node or relation found for '{entity}'", False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", 0))
         lines, refs = [], []
         for rel, items in nb.items():
             # report the untruncated total — the model quotes this number verbatim as its answer
             total = totals.get(rel, len(items))
             head = items if total <= GRAPH_LABELS_FULL_UNDER else items[:GRAPH_LABELS_SHOWN]
             more = total > len(head)
-            # "상위"가 아니라 "예시": 이 목록에는 순서가 없다. 순자산·수익률 상위는 SQL 로만 나온다.
-            shown = f"{total}건" + (f", 예시 {len(head)}건" if more else "")
+            # "Examples", not "top": this list has no order.  The top by net assets or return only comes from SQL.
+            shown = f"{total} total" + (f", {len(head)} examples shown" if more else "")
             lines.append(f"{rel} ({shown}): " + ", ".join(x["label"] for x in head) + (" ..." if more else ""))
-            # 이름 옆에 스토어의 식별자를 함께 준다.  이름만으로는 SQL 을 짤 수 없다: '최근 6개월
-            # 우주항공 테마 ETF' 에서 그래프가 100건을 찾아 이름 8개를 줬더니, 모델은 그것을 버리고
-            # 편입종목 회사명에서 '우주'·'항공'을 LIKE 로 찾아 무관한 53건을 받았고, "테마와의
-            # 연관성을 나타내는 정보는 포함되어 있지 않습니다" 로 끝냈다.  ID 를 주면 WHERE ... IN
-            # (...) 한 번으로 순자산·수익률·총보수를 붙일 수 있다.  사전분석이 회사 코드를 넘겨주자
-            # 캠브리콘·네이버·TSMC 가 풀린 것과 같은 처방이다.
+            # Give the store's identifiers next to the names.  Names alone do not make SQL: for '최근 6개월
+            # 우주항공 테마 ETF' the graph found 100 and returned 8 names; the model discarded them, searched
+            # the holdings' company names for '우주'/'항공' with LIKE, got 53 unrelated rows and ended with
+            # "there is no information linking them to the theme".  With IDs a single WHERE ... IN (...)
+            # attaches net assets, returns and total fees.  Same remedy as when the pre-analysis started
+            # passing company codes and 캠브리콘, 네이버 and TSMC got solved.
             ids = [x["iri"].rsplit("/", 1)[-1] for x in items if x.get("iri")]
             ids = [i for i in ids if i][:GRAPH_IDS_SHOWN]
             if ids and rel in _PRODUCT_RELATIONS:
                 lines.append(
-                    f"  └ 위 상품의 조회용 ID {len(ids)}개"
-                    + (f" (전체 {total}건 중)" if total > len(ids) else "")
-                    + ": pd_itm_no IN (" + ", ".join(f"'{i}'" for i in ids) + ")"
-                    + " — 이름으로 다시 찾지 말고 이 ID 로 v_etf_kr 을 조회해 순자산·수익률·총보수를 붙이세요."
+                    f"  └ lookup IDs of the products above ({len(ids)}"
+                    + (f" of {total}" if total > len(ids) else "")
+                    + "): pd_itm_no IN (" + ", ".join(f"'{i}'" for i in ids) + ")"
+                    + " — do not search by name again; query v_etf_kr with these IDs to attach net assets, returns and total fees."
                 )
             refs += [x["label"] for x in items[:10]]
         return ToolResult(note + "\n".join(lines), False, Evidence("graph", None, None, None, f"graph_neighbors('{entity}', {relation})", sum(totals.values()) or sum(len(v) for v in nb.values()), refs[:30]))
 
     def _t_graph_query(self, sparql: str) -> ToolResult:
         if self.kg is None:
-            return ToolResult("지식그래프가 로드되지 않았습니다.", True)
+            return ToolResult("The knowledge graph is not loaded.", True)
         try:
             rows = self.kg.query(sparql, limit=100)
         except Exception as e:  # noqa: BLE001
-            return ToolResult(f"SPARQL 오류: {e}", True)
+            return ToolResult(f"SPARQL error: {e}", True)
         if not rows:
-            return ToolResult("(0건)", False, Evidence("graph", None, None, None, sparql.strip(), 0))
+            return ToolResult("(0 rows)", False, Evidence("graph", None, None, None, sparql.strip(), 0))
         lines = [" | ".join(f"{k}={v}" for k, v in r.items()) for r in rows[:60]]
         refs = [next(iter(r.values())) for r in rows[:20]]
-        return ToolResult("\n".join(lines) + f"\n총 {len(rows)}건", False, Evidence("graph", None, None, None, sparql.strip(), len(rows), refs))
+        return ToolResult("\n".join(lines) + f"\nTotal rows: {len(rows)}", False, Evidence("graph", None, None, None, sparql.strip(), len(rows), refs))
 
     def _t_search_documents(self, query: str, k: int = 8) -> ToolResult:
         if self.docs is None or len(self.docs) == 0:
-            return ToolResult("외부 문서 없음", False)
+            return ToolResult("No external documents", False)
         hits = self.docs.search(query, k=int(k))
         if not hits:
-            return ToolResult("관련 문서 없음", False, Evidence("docs", None, None, None, f"search_documents('{query}')", 0))
+            return ToolResult("No matching documents", False, Evidence("docs", None, None, None, f"search_documents('{query}')", 0))
         lines, refs = [], []
         for c in hits:
-            lines.append(f"### {c.title} › {c.heading} (출처: {c.source or '내부 정리'}, 기준 {c.as_of or '-'})\n{c.text}")
+            lines.append(f"### {c.title} › {c.heading} (source: {c.source or 'internal notes'}, as of {c.as_of or '-'})\n{c.text}")
             refs.append(f"{c.title} › {c.heading}")
         return ToolResult("\n\n".join(lines), False, Evidence("docs", None, None, hits[0].as_of or None, f"search_documents('{query}')", len(hits), refs))
 

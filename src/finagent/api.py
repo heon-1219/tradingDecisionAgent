@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 
 from .agent.answer import fallback_answer
 from .config import get_settings
+from .i18n import detect_lang
 from .models import AnswerResponse
 
 log = logging.getLogger("finagent.api")
@@ -41,11 +42,11 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
             app.state.fin = AppState.load(get_settings())
         yield
 
-    app = FastAPI(title="금융상품 Agent API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Financial Product Agent API", version="0.1.0", lifespan=lifespan)
 
     @app.get("/", response_class=PlainTextResponse)
     async def root():
-        return "금융상품 Agent API — GET /answer?question_id=Q-001&question=...  ·  테스트 콘솔: /ui"
+        return "Financial Product Agent API — GET /answer?question_id=Q-001&question=...  ·  test console: /ui"
 
     @app.get("/ui", response_class=HTMLResponse)
     async def ui():
@@ -53,7 +54,7 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
         opening the file directly would put it on file:// and the browser would block the call."""
         page = Path(__file__).resolve().parents[2] / "web" / "console.html"
         if not page.exists():
-            return HTMLResponse("<p>web/console.html 이 없습니다.</p>", status_code=404)
+            return HTMLResponse("<p>web/console.html is missing.</p>", status_code=404)
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
     @app.get("/health")
@@ -82,11 +83,12 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
         question_id = (qp.get("question_id") or "").strip()
         question = (qp.get("question") or "").strip()
         if not question:
+            # No question, no language to detect: the reply is English (the English edition's default).
             return _json(
                 AnswerResponse(
                     question_id=question_id, question=question, retrieved_context="",
-                    think_trace="입력 검증: question 파라미터 누락",
-                    answer="question 파라미터가 필요합니다. 예: /answer?question_id=Q-001&question=질의문",
+                    think_trace="Input validation: question parameter missing",
+                    answer="The question parameter is required. E.g. /answer?question_id=Q-001&question=your+question",
                 )
             )
         t0 = time.time()
@@ -96,8 +98,8 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
             log.exception("answer failed for %s", question_id)
             resp = AnswerResponse(
                 question_id=question_id, question=question, retrieved_context="",
-                think_trace=f"내부 오류: {type(e).__name__}: {str(e)[:200]}",
-                answer=fallback_answer("internal_error"),
+                think_trace=f"Internal error: {type(e).__name__}: {str(e)[:200]}",
+                answer=fallback_answer("internal_error", detect_lang(question)),
             )
         log.info("answered %s in %.1fs: %s", question_id, time.time() - t0, resp.answer[:80].replace("\n", " "))
         return _json(resp)
@@ -115,7 +117,7 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
 
         async def gen():
             if not question:
-                yield _sse({"type": "error", "message": "question 파라미터가 필요합니다."})
+                yield _sse({"type": "error", "message": "The question parameter is required."})
                 return
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()

@@ -1,9 +1,10 @@
-"""해소된 개체 식별자를 SQL 까지 데려가는 경로의 테스트.
+"""Tests for the path that carries resolved entity identifiers all the way to SQL.
 
-측정된 결함: 지식그래프는 기업 사전의 별칭·티커로 개체를 해소하는데, 모델이 쓰는 SQL 은 그 결과를
-받지 못해서 질문의 표면 문자열을 그대로 WHERE 리터럴로 넣고 0건을 받는다.  실측(사전의 기업 97개):
-한글명이 편입종목 뷰 표기와 그대로 일치하는 기업 61개, 표기가 어긋나 코드로만 찾아지는 기업 32개,
-편입종목 뷰에 행이 아예 없는 기업 4개.  캠브리콘은 뷰에 '한무기'(688256.SS) 로 15행 들어 있다.
+The measured defect: the knowledge graph resolves entities through the company lexicon's aliases and
+tickers, but the SQL the model writes never received that result, so it put the question's surface
+string straight into a WHERE literal and got 0 rows.  Measured (the lexicon's 97 companies): 61 whose
+Korean name matches the holdings view's spelling as is, 32 whose spelling differs and are found only by
+code, 4 with no rows in the holdings view at all.  캠브리콘 is in the view as '한무기' (688256.SS), 15 rows.
 """
 import pathlib
 import sqlite3
@@ -19,17 +20,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class _Tools:
-    """Orchestrator 가 매핑을 만들 때 실제로 만지는 것은 ``tools.rdb`` 뿐이다."""
+    """All the Orchestrator really touches when building the map is ``tools.rdb``."""
 
     def __init__(self, rdb):
         self.rdb = rdb
 
 
 def _orch(rdb, lexicon):
-    """스토어와 사전만 붙인 Orchestrator — 매핑과 주입문 형성은 이 둘로 끝난다.
+    """An Orchestrator with only the store and the lexicon attached — the map and the injected text need nothing else.
 
-    ToolRegistry·LLM·온톨로지까지 세우지 않는 이유는 새로 넣은 코드가 그것들을 쓰지 않기 때문이다.
-    (뷰 이름은 온톨로지가 주지만, 없으면 v_etf_constituent 로 떨어진다 — 그 경로도 함께 확인한다.)
+    ToolRegistry, LLM and ontology are not set up because the new code does not use them.
+    (The view name comes from the ontology, but without one it falls back to v_etf_constituent — that
+    path is checked too.)
     """
     o = object.__new__(Orchestrator)
     o.tools, o.lexicon, o.ontology = _Tools(rdb), lexicon, None
@@ -45,7 +47,7 @@ def lexicon():
 _COLS = ["etf_itm_no", "etf_ticker", "etf_name", "company_code", "company_name",
          "company_id", "weight_pct", "is_cash", "as_of"]
 
-# 사전의 한글명과 뷰 표기가 어긋나는 실제 사례들 + 그대로 일치하는 사례 + 현금 행.
+# Real cases where the lexicon's Korean name and the view's spelling differ + cases that match + a cash row.
 _ROWS = [
     ("E1", "1", "ETF1", "688256.SS", "한무기", "cambricon", 5.0, 0, "2026-09-05"),
     ("E2", "2", "ETF2", "688256.SS", "한무기", "cambricon", 4.0, 0, "2026-09-05"),
@@ -77,27 +79,27 @@ def _store(dirpath, rows, *, with_company_id=True):
 
 
 def test_key_map_is_read_from_the_store_not_guessed(tmp_path, lexicon):
-    """매핑은 ETL 이 붙여 둔 company_id 에서 온다 — 사전의 티커로 뷰를 뒤지는 추측이 아니다.
+    """The map comes from the company_id the ETL attached — not from guessing by searching the view with the lexicon's ticker.
 
-    추측이 왜 안 되는지의 실제 사례: 에어버스의 사전 티커 'AIR' 는 이 데이터에서 AAR 을 가리킨다.
+    A real case of why guessing fails: Airbus's lexicon ticker 'AIR' points to AAR in this data.
     """
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     assert o.constituent_keys["cambricon"] == [("688256.SS", "한무기", 2)]
     assert o.constituent_keys["naver"] == [("035420", "NAVER", 1)]
-    # 코드가 여러 개면 행 수가 많은 것부터
+    # several codes: the one with the most rows first
     assert [c for c, _, _ in o.constituent_keys["smic"]] == ["0981.HK", "688981.SS"]
-    # is_cash=1 행과 사전에 없는 company_id 는 들어오지 않는다
+    # is_cash=1 rows and company_ids not in the lexicon do not come in
     assert "auto_원화현금" not in o.constituent_keys
 
 
 def test_mismatched_korean_name_gets_the_working_key(tmp_path, lexicon):
-    """캠브리콘: 그래프는 15건을 찾는데 SQL 은 0건이던 그 문항."""
+    """캠브리콘: the question where the graph found 15 and SQL found 0."""
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     note = o._constituent_key_note(lexicon.company("cambricon"))
-    assert "company_code = '688256.SS'" in note      # 쓸 수 있는 키가 들어간다
-    assert "'한무기'" in note                         # 뷰의 실제 표기를 사실로 밝힌다
-    assert "한글명으로 WHERE 하면 0건" in note          # 하지 말아야 할 것을 명시한다
-    assert "\n" not in note                          # 기업 하나당 한 줄을 넘기지 않는다
+    assert "company_code = '688256.SS'" in note                   # a key that works goes in
+    assert "'한무기'" in note                                      # the view's real spelling is stated as a fact
+    assert "a WHERE on the Korean name returns 0 rows" in note    # what not to do is stated
+    assert "\n" not in note                                       # no more than one line per company
 
 
 def test_multiple_codes_become_an_in_list(tmp_path, lexicon):
@@ -107,53 +109,53 @@ def test_multiple_codes_become_an_in_list(tmp_path, lexicon):
 
 
 def test_matching_korean_name_is_left_alone(tmp_path, lexicon):
-    """한글명이 그대로 통하는 61개 기업의 동작은 바뀌면 안 된다 — 한 글자도 붙이지 않는다."""
+    """The behaviour for the 61 companies whose Korean name works as is must not change — not a character is added."""
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     assert o._constituent_key_note(lexicon.company("samsung_elec")) == ""
     assert o._constituent_key_note(lexicon.company("ecopro_bm")) == ""
 
 
 def test_absent_company_states_the_absence_as_a_fact(tmp_path, lexicon):
-    """0건을 '내 SQL 이 틀렸나' 가 아니라 '데이터에 없다' 로 읽게 만드는 줄."""
+    """The line that makes 0 rows read as 'not in the data' rather than 'is my SQL wrong'."""
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     note = o._constituent_key_note(lexicon.company("ecopro_hn"))
-    assert "0건" in note and "편입종목 데이터에 이 기업이 없다" in note
-    assert "company_code" not in note                # 없는 키를 지어내지 않는다
+    assert "0 rows" in note and "the holdings data does not contain this company" in note
+    assert "company_code" not in note                # no key is invented
 
 
 def test_store_without_company_id_degrades_to_previous_behaviour(tmp_path, lexicon):
-    """열이 없는 스토어에서는 매핑이 비고, 매핑이 비면 주입문은 예전 그대로다."""
+    """A store without the column gets an empty map, and with an empty map the injected text is as before."""
     o = _orch(_store(tmp_path, _ROWS, with_company_id=False), lexicon)
     assert o.constituent_keys == {}
     assert o._constituent_key_note(lexicon.company("cambricon")) == ""
-    assert o._constituent_key_note(lexicon.company("ecopro_hn")) == ""   # 없음 단정도 하지 않는다
+    assert o._constituent_key_note(lexicon.company("ecopro_hn")) == ""   # no absence is asserted either
     assert o._subsidiary_key_line(lexicon.subsidiaries_of("ecopro")) == ""
 
 
 def test_subsidiary_keys_appear_when_a_name_is_off(tmp_path, lexicon):
-    """'에코프로의 자회사를 편입한 ETF' — 모델이 WHERE 에 넣는 것은 이 자회사 이름들이다.
+    """'에코프로의 자회사를 편입한 ETF' (ETFs holding 에코프로's subsidiaries) — these subsidiary names are what the model puts in WHERE.
 
-    셋 중 에코프로머티리얼즈는 뷰 표기가 다르고 에코프로에이치엔은 행이 없다.  하나라도 어긋나면
-    전부를 싣는다 — 일부만 주면 나머지가 다시 추측 대상이 되기 때문이다.
+    Of the three, 에코프로머티리얼즈 is spelled differently in the view and 에코프로에이치엔 has no rows.
+    If even one is off, all of them are given — giving only some leaves the rest to guesswork again.
     """
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     line = o._subsidiary_key_line(lexicon.subsidiaries_of("ecopro"))
     assert "에코프로비엠 → company_code='247540'" in line
     assert "'450080'" in line and "에코프로머티" in line
-    assert "에코프로에이치엔" in line and "0건" in line
+    assert "에코프로에이치엔" in line and "0 rows" in line
     assert "\n" not in line
 
 
 def test_subsidiary_line_is_silent_when_every_name_matches(tmp_path, lexicon):
-    """어긋나는 것이 없으면 한 줄도 늘리지 않는다 — 주입은 매 질문마다 나간다."""
+    """With nothing off, not a single line is added — the injection goes out with every question."""
     o = _orch(_store(tmp_path, _ROWS), lexicon)
     assert o._subsidiary_key_line([lexicon.company("ecopro_bm")]) == ""
     assert o._subsidiary_key_line([]) == ""
 
 
-# ---------------------------------------------------------------- 홀더 추출 (routing.py)
+# ---------------------------------------------------------------- holder extraction (routing.py)
 def test_relation_words_are_not_holders():
-    """graph_neighbors('자회사', constituentOf) -> 0건 이던 실측 결함."""
+    """The measured defect of graph_neighbors('자회사' (subsidiary), constituentOf) -> 0 rows."""
     for word, q in (("자회사", "에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘"),
                     ("계열사", "한화 에어로스페이스의 계열사를 편입한 ETF"),
                     ("관련주", "에코프로 관련주를 담은 ETF"),
@@ -162,7 +164,7 @@ def test_relation_words_are_not_holders():
 
 
 def test_resolved_company_beats_a_surface_token():
-    """표면 추출은 동사 앞 한 토큰만 본다 — 해소된 기업이 있으면 그쪽을 먼저 믿는다."""
+    """Surface extraction looks at one token next to the verb — a resolved company is trusted first."""
     plan = routing.plan_retrieval(routing.Signals(
         question="에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘",
         companies=["에코프로"]))
@@ -170,7 +172,7 @@ def test_resolved_company_beats_a_surface_token():
 
 
 def test_surface_fallback_survives_for_companies_not_in_the_lexicon():
-    """쿠팡·야놀자는 사전에 없지만 정답이 '해당 없음'이고 그것을 아는 곳은 그래프뿐이다."""
+    """쿠팡 and 야놀자 are not in the lexicon, yet the answer is 'none', and only the graph knows that."""
     for q, who in (("쿠팡을 편입한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘", "쿠팡"),
                    ("야놀자를 보유한 국내 ETF가 있나요?", "야놀자")):
         plan = routing.plan_retrieval(routing.Signals(question=q))
@@ -178,7 +180,7 @@ def test_surface_fallback_survives_for_companies_not_in_the_lexicon():
 
 
 def test_named_holder_still_wins_over_another_company_in_the_sentence():
-    """문장에 기업이 둘이면 동사 앞의 그 기업이 대상이다 — 순서가 뒤집히면 안 된다."""
+    """With two companies in the sentence, the one next to the verb is the target — the order must not flip."""
     plan = routing.plan_retrieval(routing.Signals(
         question="엔비디아 테마 ETF 중 삼성전자를 편입한 상품", companies=["엔비디아", "삼성전자"]))
     assert [c.args["entity"] for c in plan.calls if c.source == "graph"] == ["삼성전자"]
