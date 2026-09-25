@@ -285,8 +285,16 @@ class WebSearch:
         cache_key = f"websearch:fetch:{url}"
         cached = self._evidence.cache_get(cache_key, _TTL_FETCH)
         if cached is not None:
-            raw_text = cached["text"]
-            page_truncated = cached["truncated"]
+            if isinstance(cached, dict):
+                raw_text = cached["text"]
+                page_truncated = cached["truncated"]
+            else:
+                # Deploy-safety: an entry cached by a prior version of this connector stored the
+                # raw page as a bare string (no truncation flag). Treat it as untruncated rather
+                # than raising - it'll be replaced with the new {"text","truncated"} shape once
+                # this key's TTL expires.
+                raw_text = cached
+                page_truncated = False
         else:
             fetched = await self._fetch_raw(url)
             if fetched is None:

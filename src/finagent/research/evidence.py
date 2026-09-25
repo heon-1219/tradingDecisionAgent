@@ -52,6 +52,25 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
 _WS_RE = re.compile(r"\s+")
 
+# After the "complete" passes above (_COMMENT_RE, _SCRIPT_STYLE_RE, _HIDDEN_BLOCK_RE) have removed
+# every hidden element/comment/script/style whose closer is present in `text`, anything left that
+# still opens one of them can only be *unterminated* - its closer was never in `text` to begin
+# with (typically because an upstream caller cut the raw text at some boundary, e.g.
+# websearch.RAW_PAGE_MAX_CHARS, landing between the opener and closer). We can't know what's
+# inside an element we never saw the end of, so treat "opener with no closer" as hidden too and
+# drop it and everything after it, rather than let the (potentially huge) partial payload up to
+# the cut point leak out as plain text once _TAG_RE strips just the bare opening tag.
+#
+# One alternation, one `.search()` call: this finds the single leftmost leftover opener in one
+# linear scan, however many kinds of opener are in play - no separate per-kind search-and-compare,
+# no nested backtracking.
+_LEFTOVER_OPEN_RE = re.compile(
+    r"<!--"
+    r"|<(?:script|style)\b"
+    r"|<[a-zA-Z][\w-]*\b[^>]*(?:" + "|".join(_HIDDEN_CONDITIONS) + r")[^>]*>",
+    re.I | re.S,
+)
+
 
 def strip_hidden_markup(text: str) -> str:
     """Strip markup, hidden/zero-width text and comments, without collapsing whitespace or
@@ -62,11 +81,17 @@ def strip_hidden_markup(text: str) -> str:
     *first*, then cut. Cutting first and stripping second is unsafe: a cut landing between a
     hidden element's opening and closing tag leaves `_HIDDEN_BLOCK_RE` nothing to match, and the
     hidden payload survives in the truncated excerpt as if it were visible text.
+
+    This also holds when `text` itself is already a truncated excerpt (e.g. a fetched page cut at
+    some raw-size bound *before* this function ever saw it): see `_LEFTOVER_OPEN_RE`.
     """
     s = text or ""
     s = _COMMENT_RE.sub(" ", s)
     s = _SCRIPT_STYLE_RE.sub(" ", s)
     s = _HIDDEN_BLOCK_RE.sub(" ", s)
+    leftover = _LEFTOVER_OPEN_RE.search(s)
+    if leftover is not None:
+        s = s[: leftover.start()]
     s = _TAG_RE.sub(" ", s)
     s = _ZERO_WIDTH_RE.sub("", s)
     return s
