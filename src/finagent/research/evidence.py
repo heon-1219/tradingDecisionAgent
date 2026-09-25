@@ -24,9 +24,28 @@ from ..store.appdb import AppDB
 
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
-# Drops an element (tags + contents) whose inline style hides it, e.g. <span style="display:none">.
+
+# Conditions under which an element's opening tag marks it (and its contents) as hidden from the
+# user. Each is a self-contained fragment (with its own boundary anchors) so they can be OR'd
+# together inside one tag-open scan; see _HIDDEN_BLOCK_RE below.
+_HIDDEN_CONDITIONS = (
+    # style="...display:none..."
+    r'style\s*=\s*["\'][^"\']*display\s*:\s*none[^"\']*["\']',
+    # style="...visibility:hidden..."
+    r'style\s*=\s*["\'][^"\']*visibility\s*:\s*hidden[^"\']*["\']',
+    # style="...opacity:0..." (but not e.g. opacity:0.5)
+    r'style\s*=\s*["\'][^"\']*opacity\s*:\s*0(?:\.0+)?(?![.\d])[^"\']*["\']',
+    # style="...font-size:0<unit>..." for any (or no) unit, but not e.g. font-size:0.5em
+    r'style\s*=\s*["\'][^"\']*font-size\s*:\s*0(?:\.0+)?(?![.\d])[a-zA-Z%]*[^"\']*["\']',
+    # the boolean `hidden` attribute (bare, or with any value, e.g. hidden="until-found")
+    r"(?<=[\s])hidden\b(?!-)(?=[\s=>/])",
+    # aria-hidden="true" (aria-hidden="false" is left alone)
+    r'aria-hidden\s*=\s*["\']true["\']',
+)
+# Drops an element (tags + contents) matching any _HIDDEN_CONDITIONS, e.g.
+# <span style="display:none">, <div hidden>, <span aria-hidden="true">.
 _HIDDEN_BLOCK_RE = re.compile(
-    r"<([a-zA-Z][\w-]*)\b[^>]*\bstyle\s*=\s*[\"'][^\"']*display\s*:\s*none[^\"']*[\"'][^>]*>.*?</\1\s*>",
+    r"<([a-zA-Z][\w-]*)\b[^>]*(?:" + "|".join(_HIDDEN_CONDITIONS) + r")[^>]*>.*?</\1\s*>",
     re.I | re.S,
 )
 _TAG_RE = re.compile(r"<[^>]+>")

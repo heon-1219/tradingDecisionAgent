@@ -42,6 +42,72 @@ def test_sanitize_untrusted_collapses_whitespace():
     assert out == "a b c"
 
 
+def test_sanitize_untrusted_strips_visibility_hidden():
+    raw = '<p>Visible content</p><span style="visibility:hidden">Secret A</span>'
+    out = sanitize_untrusted(raw)
+    assert "Visible content" in out
+    assert "Secret A" not in out
+
+
+def test_sanitize_untrusted_strips_opacity_zero():
+    raw = '<p>Visible content</p><div style="opacity:0">Secret B</div>'
+    out = sanitize_untrusted(raw)
+    assert "Visible content" in out
+    assert "Secret B" not in out
+
+
+def test_sanitize_untrusted_strips_opacity_zero_decimal_with_semicolon():
+    raw = '<p>Visible content</p><div style="color:red; opacity: 0.0; ">Secret B2</div>'
+    out = sanitize_untrusted(raw)
+    assert "Secret B2" not in out
+
+
+def test_sanitize_untrusted_keeps_nonzero_opacity():
+    raw = '<div style="opacity:0.5">Still shown</div>'
+    out = sanitize_untrusted(raw)
+    assert "Still shown" in out
+
+
+def test_sanitize_untrusted_strips_font_size_zero_any_unit():
+    raw = (
+        "<p>Visible content</p>"
+        '<span style="font-size:0px">Secret C</span>'
+        '<span style="font-size:0">Secret D</span>'
+        '<span style="font-size:0em">Secret D2</span>'
+    )
+    out = sanitize_untrusted(raw)
+    assert "Visible content" in out
+    assert "Secret C" not in out
+    assert "Secret D" not in out
+    assert "Secret D2" not in out
+
+
+def test_sanitize_untrusted_keeps_nonzero_font_size():
+    raw = '<span style="font-size:0.5em">Still shown</span>'
+    out = sanitize_untrusted(raw)
+    assert "Still shown" in out
+
+
+def test_sanitize_untrusted_strips_hidden_attribute():
+    raw = "<p>Visible content</p><div hidden>Secret E</div>"
+    out = sanitize_untrusted(raw)
+    assert "Visible content" in out
+    assert "Secret E" not in out
+
+
+def test_sanitize_untrusted_strips_aria_hidden_true():
+    raw = '<p>Visible content</p><span aria-hidden="true">Secret F</span>'
+    out = sanitize_untrusted(raw)
+    assert "Visible content" in out
+    assert "Secret F" not in out
+
+
+def test_sanitize_untrusted_keeps_aria_hidden_false():
+    raw = '<span aria-hidden="false">Still shown</span>'
+    out = sanitize_untrusted(raw)
+    assert "Still shown" in out
+
+
 def test_wrap_untrusted_format():
     wrapped = wrap_untrusted("E3", "hello")
     assert wrapped == '<untrusted source="E3">hello</untrusted>'
