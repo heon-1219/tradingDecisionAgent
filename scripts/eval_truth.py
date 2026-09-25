@@ -41,12 +41,30 @@ from finagent.kb.rdb import RDB  # noqa: E402
 # ("items with no value were excluded") as cannot-confirm.  Leaving it out instead grades an answer that correctly
 # denies existence, like "Kimi 관련 투자상품은 없습니다" ("there are no Kimi-related products"), as wrong
 # (G-018 was actually graded that way), so a negation counts only when its subject is a product or the data.
-DECLINE = ("확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없")
-DECLINE_RX = re.compile(r"(상품|종목|펀드|ETF|ETN|채권|데이터|정보|결과)[^.\n]{0,12}?없(습니다|음|어요)")
-CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인")
-# Fallback answers produced by a system failure.  Their wording starts with '확인할 수 없습니다' ("cannot be
-# confirmed"), so left alone every cannot-confirm item would look like a pass — when the model never even got to judge.
-ERROR_MARKERS = ("시스템 처리 중 문제가 발생", "<요청 실패", "내부 오류")
+#
+# The agent package was translated (Task 0.1): an English question now gets an English answer, with its own
+# decline wording, while a Korean question still gets the Korean wording above and older recorded runs
+# (data/eval/*.jsonl from before the translation) are Korean regardless of question language.  Every marker
+# below therefore carries both forms so grading works on old and new recordings alike.
+DECLINE = (
+    "확인할 수 없", "확인되지 않", "제공되지 않", "존재하지 않", "찾을 수 없", "데이터에 없",
+    "cannot be confirmed", "could not be found", "does not exist", "is not available", "not provided",
+)
+DECLINE_RX = re.compile(
+    r"(상품|종목|펀드|ETF|ETN|채권|데이터|정보|결과)[^.\n]{0,12}?없(습니다|음|어요)"
+    r"|\bno\s+(?:matching\s+|such\s+)?(?:product|item|bond|fund|ETF|ETN|data|information|result)s?\b",
+    re.I,
+)
+CLARIFY = ("혹시", "말씀하시", "찾으시는", "다시 확인", "Could you", "looking for", "Did you mean")
+# Fallback answers produced by a system failure.  Their wording starts with '확인할 수 없습니다' / 'This cannot
+# be confirmed with the provided data.' ("cannot be confirmed"), so left alone every cannot-confirm item
+# would look like a pass — when the model never even got to judge.
+# "<요청 실패" ("request failed") stays Korean: it is this script's own placeholder for its HTTP request
+# failing, not something the server emits, so there is no English variant to add for it.
+ERROR_MARKERS = (
+    "시스템 처리 중 문제가 발생", "<요청 실패", "내부 오류",
+    "A system problem prevented an answer from being generated",
+)
 
 
 def is_infra_error(answer: str, trace: str = "") -> bool:

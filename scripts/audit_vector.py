@@ -531,9 +531,11 @@ def section_d(settings, sig: str, cache_ok: bool, info: dict, index, vectors) ->
 
 
 # --------------------------------------------------------------------------- E
-# These match the Korean think_trace lines ("라운드 N: tool(...)") recorded in data/eval/*.jsonl.
-_ROUND = re.compile(r"라운드\s*\d+:\s*([a-z_]+)\s*\(")
-_NOTOOL = re.compile(r"라운드\s*\d+:\s*도구 호출 없이")
+# These match the think_trace round lines recorded in data/eval/*.jsonl: the Korean "라운드 N: tool(...)"
+# form from before the agent package was translated (Task 0.1), and the "Round N: tool(...)" form the
+# code emits now.
+_ROUND = re.compile(r"(?:라운드|Round)\s*\d+:\s*([a-z_]+)\s*\(")
+_NOTOOL = re.compile(r"(?:라운드|Round)\s*\d+:\s*(?:도구 호출 없이|text reply without a tool call)")
 KNOWN_TOOLS = ["sql_query", "search_products", "search_documents", "resolve_entity",
                "table_info", "graph_neighbors", "graph_query", "final_answer"]
 
@@ -593,7 +595,7 @@ def section_e(root: pathlib.Path) -> None:
                 print(f"    {line.strip()[:150]}")
         print(f"    final answer: {r['answer'][:150]}")
         print(f"    does the evidence (retrieved_context) include search evidence? "
-              f"{'yes' if ('search' in r['context'] or '문서' in r['context']) else 'no'}")
+              f"{'yes' if ('search' in r['context'] or '문서' in r['context'] or 'document' in r['context'].lower()) else 'no'}")
 
     # For reference: how many rounds each question used (did it even get a chance to call a tool?)
     rounds = collections.Counter(len(r["calls"]) for r in merged)
