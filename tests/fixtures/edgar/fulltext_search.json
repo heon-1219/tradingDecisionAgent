@@ -1,0 +1,17 @@
+{
+  "hits": {
+    "total": {"value": 1},
+    "hits": [
+      {
+        "_id": "0000320193-24-000005:aapl-20231230.htm",
+        "_source": {
+          "ciks": ["0000320193"],
+          "display_names": ["Apple Inc. (AAPL)"],
+          "form": "10-K",
+          "file_date": "2024-02-01",
+          "adsh": "0000320193-24-000005"
+        }
+      }
+    ]
+  }
+}
