@@ -19,6 +19,11 @@ Round-0 prefetch evidence is deliberately NOT injected into ``retrieved_context`
 repeats the same lookup, and orchestrator.py's comment there explains why double-counting is avoided) —
 so the routing-prefetch tests below assert on ``think_trace``'s ``"Round 0 routing:"`` line instead, per
 ``agent/routing.py``'s ``RoutePlan.summary()``.
+
+Two layers per source family: a direct ``ToolRegistry.execute`` call (proves the source has non-empty,
+correctly-kinded evidence to give) and an ``Orchestrator.answer`` call driven by a scripted ``StubLLM``
+(proves that evidence actually reaches ``AnswerResponse.retrieved_context`` — the field graded as cited
+evidence — not just that the tool itself returns something).
 """
 from __future__ import annotations
 
@@ -82,7 +87,69 @@ async def test_docs_source_contributes_etf_risk_factors(real_state):
     assert not r.is_error
     assert r.evidence is not None and r.evidence.kind == "docs"
     assert r.evidence.row_count and r.evidence.row_count > 0
-    assert "위험" in r.content
+    # the specific source document, not just any hit containing "risk" somewhere
+    assert "ETF·ETN 유형별 일반 위험요인" in r.content
+    assert any("ETF·ETN 유형별 일반 위험요인" in ref for ref in r.evidence.refs)
+
+
+# ------------------------------------------------------------------ end-to-end: evidence reaches retrieved_context
+# The four tests above prove each source *can* produce evidence; they call ToolRegistry.execute directly
+# and never go through Orchestrator.answer(), so they do not prove that evidence actually lands in
+# AnswerResponse.retrieved_context — the field the competition grades as cited evidence. These drive the
+# orchestrator with a StubLLM script (the family's tool, then final_answer) and assert on
+# resp.retrieved_context instead. The question text is deliberately neutral (matches no routing pattern in
+# agent/routing.py) so round 0 has nothing to prefetch and does not call the same tool a second time —
+# confirmed via a scratch run: "Round 0 routing: nothing to prefetch" for all four, so retrieved_context
+# here comes only from the round-1 tool call the script drives, not from round 0.
+_NEUTRAL_QUESTION = "Please verify evidence propagation for this regression test."
+
+
+async def test_sql_evidence_reaches_retrieved_context(real_state):
+    script = [
+        Turn("", [ToolCall("c1", "sql_query", {
+            "sql": "select ticker, pd_nm, is_on_sale from v_etf_gl where is_on_sale=1 limit 5"})], "tool_use"),
+        Turn("", [ToolCall("c2", "final_answer", {"status": "answered", "answer": "5 example foreign ETFs."})], "tool_use"),
+    ]
+    _script(real_state, script)
+    resp = await real_state.orchestrator.answer("CTX-SQL", _NEUTRAL_QUESTION)
+    assert "[Evidence 1]" in resp.retrieved_context
+    assert "v_etf_gl" in resp.retrieved_context
+
+
+async def test_graph_evidence_reaches_retrieved_context(real_state):
+    script = [
+        Turn("", [ToolCall("c1", "graph_neighbors", {"entity": "삼성전자", "relation": "constituentOf"})], "tool_use"),
+        Turn("", [ToolCall("c2", "final_answer", {"status": "answered", "answer": "Graph lookup result."})], "tool_use"),
+    ]
+    _script(real_state, script)
+    resp = await real_state.orchestrator.answer("CTX-GRAPH", _NEUTRAL_QUESTION)
+    assert "[Evidence 1]" in resp.retrieved_context
+    assert "Knowledge graph" in resp.retrieved_context           # graph's evidence label (no table)
+    assert "graph_neighbors('삼성전자'" in resp.retrieved_context  # the call that produced it
+
+
+async def test_vector_evidence_reaches_retrieved_context(real_state):
+    script = [
+        Turn("", [ToolCall("c1", "search_products", {"query": "로봇", "mode": "hybrid"})], "tool_use"),
+        Turn("", [ToolCall("c2", "final_answer", {"status": "answered", "answer": "Robot-themed products."})], "tool_use"),
+    ]
+    _script(real_state, script)
+    resp = await real_state.orchestrator.answer("CTX-VEC", _NEUTRAL_QUESTION)
+    assert "[Evidence 1]" in resp.retrieved_context
+    assert "Product search" in resp.retrieved_context
+    assert "search_products('로봇'" in resp.retrieved_context
+
+
+async def test_docs_evidence_reaches_retrieved_context(real_state):
+    script = [
+        Turn("", [ToolCall("c1", "search_documents", {"query": "ETF 위험요인"})], "tool_use"),
+        Turn("", [ToolCall("c2", "final_answer", {"status": "answered", "answer": "ETF risk factors summary."})], "tool_use"),
+    ]
+    _script(real_state, script)
+    resp = await real_state.orchestrator.answer("CTX-DOCS", _NEUTRAL_QUESTION)
+    assert "[Evidence 1]" in resp.retrieved_context
+    assert "External documents" in resp.retrieved_context
+    assert "ETF·ETN 유형별 일반 위험요인" in resp.retrieved_context  # the specific source document
 
 
 # ------------------------------------------------------------------ cross-source: one answer, two sources cited
