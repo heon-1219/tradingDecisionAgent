@@ -68,8 +68,44 @@ tests/test_chat_toolbox.py, test_grounding_check.py, test_chat_agent.py, test_ap
 
 ### Task 0.1: Integrate the translation work and align coupled strings
 **Files:** modify `src/finagent/ontology/loader.py`, `src/finagent/agent/prompts.py` (the `값:` marker becomes `values:`); `scripts/eval_truth.py`, `scripts/eval_run.py`, `scripts/audit_vector.py` (match both the Korean and the new English answer/trace strings); `web/console.html` (step filters match both `라운드 N:` and the new English round lines); `docs/api_spec.md` (labels match the code); `scripts/fetch_constituents_naver.py` (`write_readme()` writes the bilingual README); `Wolves_of_Walnut_Street_Proposal.html` (render 장세헌 as "David Seheon Chang"), then regenerate the PDF with headless Edge.
-- [ ] Take the exact new strings from the agent-package report: fallback answer, internal-error trace, round trace format, evidence header, decline/clarify phrasing.
-- [ ] Update every matcher so it accepts both the Korean and the English string. Add a unit test in `tests/test_eval_truth_markers.py` feeding one Korean and one English sample of each kind.
+- [ ] New English strings the code now emits (the Korean variants still exist for Korean questions, and older recorded results are Korean):
+  - Round trace lines:
+    - `Round {n}: {tool}({args}) → result {len} chars, {rows} rows`
+    - `Round {n}: … → error: …`
+    - `Round {n}: text reply without a tool call`
+    - `Round {n}: final_answer(status=…)`
+    - `Round 0 routing: graph=ran(…)/skipped(…) / vector=… / document=…`
+    - The old Korean form was `라운드 N: …`.
+  - Internal-error trace: `Internal error: {Type}: …` (was `내부 오류`). Validation trace: `Input validation: question parameter missing`.
+  - Fallback answer (English): `This cannot be confirmed with the provided data. A system problem prevented an answer from being generated ({reason}). Please rephrase…`. The Korean one still contains `시스템 처리 중 문제가 발생`.
+  - Evidence labels:
+    - `[Evidence N] …`
+    - `External documents` (was `외부 문서`)
+    - `Knowledge graph`, `Product search`, `Entity resolution`, `Schema`
+    - `· base date …`, `· N rows`
+    - `Refs:`
+    - `[Answer evidence summary]`
+    - `No data referenced`
+  - Decline and clarify wording:
+    - `This cannot be confirmed with the provided data.`
+    - `Could you tell me which condition you mean?`
+    - `A product exactly matching '…' cannot be confirmed in the provided data.`
+    - `Is one of these the product you are looking for?`
+    - `Could you check the product name you are looking for?`
+    - The English decline markers are `cannot be confirmed`, `could not be found`, `does not exist`, `is not available`, `not provided`.
+- [ ] Update every matcher so it accepts both the Korean and the English string:
+  - `scripts/eval_truth.py`: `DECLINE`, `DECLINE_RX`, `CLARIFY`, `ERROR_MARKERS`, and the `<요청 실패` marker.
+  - `scripts/eval_run.py`: `classify`.
+  - `scripts/audit_vector.py`: the `_ROUND`/`_NOTOOL` regexes and the `'문서'` evidence check.
+  - `web/console.html`:
+    - the step filter becomes `/^(?:라운드|Round) \d+: (sql_query|graph_|search_|resolve_|table_info)/`
+    - "fix" words add `corrected|stated|warning`
+    - "error" words add `error|timed out|exceeded|rejected|failed|refused`
+  - Add a unit test in `tests/test_eval_truth_markers.py` feeding one Korean and one English sample of each kind.
+- [ ] Fix English mention extraction in `src/finagent/kb/entity.py` (`extract_product_mentions`). Today "Which domestic ETF has the largest net assets…" yields `['Which domestic ETF']`, "Which ETF tracks the KOSPI 200 index?" yields `['Which ETF']`, and "Will KODEX 200 rise next year?" yields `['KODEX 200 rise next year']`. These become false "product does not exist" clarifications.
+  - Rule for English questions (`detect_lang == "en"`): a mention never starts with a question or stop word (Which, What, How, Will, Does, Is, Are, Do, Show, List, Tell, Give, Find, Compare, the, a, an), and ends before the first lower-case English word that isn't part of a known product-name pattern.
+  - Tests: the three examples above yield `[]`, `[]` and `['KODEX 200']`. `"What is the expense ratio of TIGER 미국S&P500?"` yields `['TIGER 미국S&P500']`. Every existing Korean mention test stays unchanged.
+  - Then add an orchestrator test: an English question naming an existing product is not rewritten into a clarification.
 - [ ] Change the `값:` marker to `values:` in `schema_card` and in the `prompts.py` check together. Assert in `tests/test_ontology.py` that a card line reads `(values:A/B)`.
 - [ ] Run the full suite. Expected: all pass (≥ 240 tests).
 
