@@ -286,7 +286,7 @@ class Ontology:
             if p.unit:
                 extra.append(f"unit:{p.unit}")
             if p.enum:
-                extra.append("값:" + "/".join(e.code for e in p.enum))
+                extra.append("values:" + "/".join(e.code for e in p.enum))
             if p.comment and not compact:
                 extra.append(p.comment)
             lines.append(f"- {p.column}: {p.label_ko}" + (f" ({'; '.join(extra)})" if extra else ""))

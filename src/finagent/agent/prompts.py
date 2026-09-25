@@ -223,8 +223,8 @@ def build_system_prompt(ontology, rdb_meta: dict, doc_titles: list[str] | None =
                 for ln in card.splitlines():
                     col = ln[2:].split(":", 1)[0] if ln.startswith("- ") else None
                     vals = hints.get((view, col)) if col else None
-                    if vals and "값:" not in ln:
-                        ln = f"{ln} (값:{'/'.join(vals)})" if "(" not in ln else f"{ln[:-1]}; 값:{'/'.join(vals)})"
+                    if vals and "values:" not in ln:
+                        ln = f"{ln} (values:{'/'.join(vals)})" if "(" not in ln else f"{ln[:-1]}; values:{'/'.join(vals)})"
                     lines.append(ln)
                 card = "\n".join(lines)
             parts.append(card)

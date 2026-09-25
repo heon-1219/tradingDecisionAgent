@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from finagent.ontology.loader import Ontology
+from finagent.ontology.loader import EnumValue, Ontology, PropInfo
 
 ONT = Path(__file__).resolve().parents[1] / "ontology"
 
@@ -19,6 +19,20 @@ def test_schema_card_mentions_columns_and_enums():
     assert "expense_ratio_pct" in o.schema_card("v_etf_gl")
     assert "fund_family" in o.schema_card("v_fund_pub")
     assert "is_on_sale" in o.schema_card("v_etf_kr")
+
+
+def test_schema_card_enum_uses_values_marker():
+    """The enum-values marker on a card line is the English 'values:', not the Korean '값:' (Task 0.1)."""
+    o = Ontology.load(ONT)
+    fake = PropInfo(
+        iri="http://mafest.ai/product#__fakeEnumProp", name="__fakeEnumProp", label_ko="가짜속성",
+        comment="", table="v_bond_kr", column="__fake_enum_col", range_iri=None, unit=None,
+        is_object=False, enum=[EnumValue("A", "A"), EnumValue("B", "B")],
+    )
+    o.properties.append(fake)
+    card = o.schema_card("v_bond_kr", columns=["__fake_enum_col"], compact=True)
+    assert "(values:A/B)" in card
+    assert "값:" not in card
 
 
 def test_validators():
