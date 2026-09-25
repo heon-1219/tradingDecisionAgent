@@ -46,6 +46,11 @@ class HttpError(Exception):
         self.body = body
 
 
+def _body_excerpt(text: str, limit: int = 200) -> str:
+    """Collapse whitespace and truncate a response body for safe inclusion in an error message."""
+    return " ".join((text or "").split())[:limit]
+
+
 def _redact_headers(headers: dict[str, str] | None) -> dict[str, str]:
     if not headers:
         return {}
@@ -137,7 +142,14 @@ class HttpClient:
         self, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: float = 20.0
     ) -> Any:
         resp = await self._get(url, params=params, headers=headers, timeout=timeout)
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            # A 200 with a non-JSON body (e.g. an HTML interstitial/error page from an upstream
+            # that doesn't bother setting a 4xx/5xx status) would otherwise raise a raw
+            # json.JSONDecodeError past every connector's HttpError-only handling. Surface it as
+            # an HttpError instead so callers only ever need to guard against one exception type.
+            raise HttpError(resp.status_code, f"{_body_excerpt(resp.text)} (invalid JSON)") from None
 
     async def get_text(
         self, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: float = 20.0

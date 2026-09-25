@@ -83,6 +83,9 @@ class _HTMLTextExtractor(HTMLParser):
     def text(self) -> str:
         raw = "".join(self._parts)
         lines = [re.sub(r"[ \t]+", " ", ln).strip(" \t") for ln in raw.splitlines()]
+        # A table row's first cell leaves a leading "| " artifact (the " | " separator is
+        # emitted before every <td>/<th>, including the first one in a row) - drop it.
+        lines = [re.sub(r"^\|\s*", "", ln) for ln in lines]
         lines = [ln for ln in lines if ln]
         return "\n".join(lines)
 
@@ -372,9 +375,12 @@ class Edgar:
             preferred = [e for e in entries if e.get("form") in _PREFERRED_FORMS]
             pool = preferred if preferred else entries
 
+            # Sort by filed date first so "last one wins" below means "latest-filed wins",
+            # regardless of what order the source JSON happens to list entries in.
+            pool_by_filed = sorted(pool, key=lambda e: e.get("filed") or "")
             deduped: dict[tuple, dict] = {}
-            for entry in pool:
-                deduped[(entry.get("end"), entry.get("fp"))] = entry  # last occurrence wins
+            for entry in pool_by_filed:
+                deduped[(entry.get("end"), entry.get("fp"))] = entry
             ordered = sorted(deduped.values(), key=lambda e: e.get("end") or "", reverse=True)
             selected = ordered[:periods]
 

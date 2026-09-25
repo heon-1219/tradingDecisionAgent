@@ -130,6 +130,26 @@ async def test_fulltext_missing_user_agent_is_error_not_crash():
     assert "SEC_USER_AGENT" in result.text
 
 
+# --- malformed upstream responses -----------------------------------------------
+
+
+async def test_filings_200_html_response_is_error_not_crash():
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A 200 with an HTML body (e.g. an interstitial/error page) instead of the expected JSON.
+        return httpx.Response(200, text="<html><body>Service unavailable, try again later</body></html>")
+
+    transport = httpx.MockTransport(handler)
+    http = HttpClient(client=httpx.AsyncClient(transport=transport))
+    evidence = EvidenceStore(AppDB(":memory:"))
+    edgar = Edgar(http, evidence, "Test Agent test@example.com")
+
+    # A raw CIK skips the ticker lookup, so this exercises the submissions fetch directly.
+    result = await edgar.filings("s1", "0000320193")
+
+    assert result.is_error is True
+    assert result.sources == []
+
+
 # --- filings -------------------------------------------------------------------
 
 
