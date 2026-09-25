@@ -72,11 +72,22 @@ def strip_hidden_markup(text: str) -> str:
     return s
 
 
+def collapse_whitespace(text: str, max_chars: int = 4000) -> str:
+    """Collapse whitespace runs and cap length.
+
+    Companion to `strip_hidden_markup`: `sanitize_untrusted` is just `collapse_whitespace(
+    strip_hidden_markup(text), max_chars)`. Exposed separately so a caller that already ran
+    `strip_hidden_markup` on the full text (e.g. before selecting/cutting an excerpt of it) can
+    finish the job on that excerpt without re-running the stripping regexes over text that's
+    already clean of markup.
+    """
+    s = _WS_RE.sub(" ", text or "").strip()
+    return s[:max_chars].rstrip()
+
+
 def sanitize_untrusted(text: str, max_chars: int = 4000) -> str:
     """Strip markup, hidden/zero-width text and comments out of externally-sourced text."""
-    s = strip_hidden_markup(text)
-    s = _WS_RE.sub(" ", s).strip()
-    return s[:max_chars].rstrip()
+    return collapse_whitespace(strip_hidden_markup(text), max_chars)
 
 
 # Matches the wrapper's own closing tag (however it's spaced/cased) so injected text can't fake

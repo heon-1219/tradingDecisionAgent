@@ -6,6 +6,7 @@ from finagent.research.evidence import (
     EvidenceStore,
     ResearchResult,
     SourceRecord,
+    collapse_whitespace,
     sanitize_untrusted,
     strip_hidden_markup,
     wrap_untrusted,
@@ -138,6 +139,19 @@ def test_strip_hidden_markup_cutting_after_is_safe_even_mid_hidden_tag():
     # Even a cut that would have landed mid-tag in the raw text is safe post-strip.
     for cut in range(1, len(stripped)):
         assert "Secret payload" not in stripped[:cut]
+
+
+# --- collapse_whitespace (the other half of sanitize_untrusted) -----------------
+
+
+def test_collapse_whitespace_collapses_and_caps():
+    assert collapse_whitespace("a\n\n\n   b\t\tc") == "a b c"
+    assert len(collapse_whitespace("a" * 5000, max_chars=100)) == 100
+
+
+def test_sanitize_untrusted_equals_collapse_of_strip_hidden_markup():
+    raw = '<p>Visible</p><span style="display:none">Secret</span>  spaced   out'
+    assert sanitize_untrusted(raw) == collapse_whitespace(strip_hidden_markup(raw))
 
 
 def test_wrap_untrusted_format():

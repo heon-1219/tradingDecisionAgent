@@ -26,6 +26,7 @@ from .evidence import (
     EvidenceStore,
     ResearchResult,
     SourceRecord,
+    collapse_whitespace,
     sanitize_untrusted,
     strip_hidden_markup,
     wrap_untrusted,
@@ -43,6 +44,16 @@ _TTL_FETCH = 12 * 3600
 _SNIPPET_MAX_CHARS = 1000  # per-result search snippet cap, independent of fetch's max_chars
 _TITLE_MAX_CHARS = 200
 _PUBLISHED_MAX_CHARS = 40
+
+# Hard cap on a fetched page's raw text, applied at ingestion - before caching and before any
+# stripping - independent of the caller's max_chars. Without this, strip_hidden_markup's
+# regex-based scan (and _focus_paragraphs' BM25 pass) would run synchronously over an unbounded
+# (multi-MB, or adversarially large) page on every fetch, and again on every focus_query re-slice
+# of the same cached raw_text, which can stall the event loop.
+RAW_PAGE_MAX_CHARS = 500_000
+_PAGE_TRUNCATED_NOTICE = (
+    " (note: the fetched page exceeded the size limit and was truncated before processing)"
+)
 
 _WORD_RE = re.compile(r"\w+")
 
@@ -99,6 +110,17 @@ def _hostname(url: str | None) -> str | None:
     if not url:
         return None
     return urlsplit(url).hostname
+
+
+def _bound_raw_page(text: str) -> tuple[str, bool]:
+    """Cap fetched page text at RAW_PAGE_MAX_CHARS. Pure length-based slicing (no regex), so it's
+    cheap even for a huge page, and it runs before strip_hidden_markup ever sees the text -
+    bounding the regex work that follows regardless of what focus_query/max_chars a caller passes.
+    Returns (bounded_text, was_truncated).
+    """
+    if len(text) <= RAW_PAGE_MAX_CHARS:
+        return text, False
+    return text[:RAW_PAGE_MAX_CHARS], True
 
 
 # --- focus_query paragraph selection (BM25, like edgar.py's passage ranking) ------
@@ -261,12 +283,18 @@ class WebSearch:
         tier = _tier_for_host(host)
 
         cache_key = f"websearch:fetch:{url}"
-        raw_text = self._evidence.cache_get(cache_key, _TTL_FETCH)
-        if raw_text is None:
-            raw_text = await self._fetch_raw(url)
-            if raw_text is None:
+        cached = self._evidence.cache_get(cache_key, _TTL_FETCH)
+        if cached is not None:
+            raw_text = cached["text"]
+            page_truncated = cached["truncated"]
+        else:
+            fetched = await self._fetch_raw(url)
+            if fetched is None:
                 return ResearchResult(text=f"Could not fetch {url}.", sources=[], is_error=True)
-            self._evidence.cache_put(cache_key, raw_text)
+            # Bound BEFORE caching and before any stripping, independent of max_chars - see
+            # RAW_PAGE_MAX_CHARS above.
+            raw_text, page_truncated = _bound_raw_page(fetched)
+            self._evidence.cache_put(cache_key, {"text": raw_text, "truncated": page_truncated})
 
         if focus_query:
             body = _focus_paragraphs(raw_text, focus_query, max_chars)
@@ -275,7 +303,10 @@ class WebSearch:
             # evidence.strip_hidden_markup for why cutting first is unsafe.
             body = strip_hidden_markup(raw_text)[:max_chars]
 
-        clean = sanitize_untrusted(body, max_chars=max_chars)
+        # body already went through strip_hidden_markup (directly above, or inside
+        # _focus_paragraphs); only the whitespace-collapse-and-cap half of sanitize_untrusted is
+        # still needed, so use collapse_whitespace directly rather than re-stripping.
+        clean = collapse_whitespace(body, max_chars)
         source = self._evidence.add(
             session_id,
             connector="websearch",
@@ -287,7 +318,10 @@ class WebSearch:
             snippet=clean,
             untrusted=True,
         )
-        return ResearchResult(text=f"[{source.id}] {wrap_untrusted(source.id, clean)}", sources=[source])
+        notice = _PAGE_TRUNCATED_NOTICE if page_truncated else ""
+        return ResearchResult(
+            text=f"[{source.id}] {wrap_untrusted(source.id, clean)}{notice}", sources=[source]
+        )
 
     async def _fetch_raw(self, url: str) -> str | None:
         if self._tavily_key:

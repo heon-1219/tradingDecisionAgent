@@ -3,7 +3,7 @@ import pytest
 
 from finagent.research.evidence import EvidenceStore
 from finagent.research.http import HttpClient
-from finagent.research.websearch import WebSearch
+from finagent.research.websearch import RAW_PAGE_MAX_CHARS, WebSearch
 from finagent.store.appdb import AppDB
 
 
@@ -464,3 +464,54 @@ async def test_fetch_caches_page_second_fetch_no_new_request():
     await ws.fetch("s1", "https://example.com/a")
     await ws.fetch("s1", "https://example.com/a", focus_query="anything")
     assert len(calls) == 1
+
+
+# --- fetch: raw page size is bounded at ingestion --------------------------------
+
+
+async def test_fetch_bounds_raw_page_size_at_ingestion():
+    huge_page = "Visible intro. " + ("A" * (RAW_PAGE_MAX_CHARS + 1000))
+    assert len(huge_page) > RAW_PAGE_MAX_CHARS
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=huge_page)
+
+    ws, _, evidence = _websearch(handler, tavily_key=None)
+    result = await ws.fetch("s1", "https://example.com/a", max_chars=50)
+
+    assert result.is_error is False
+    assert "truncated" in result.text
+
+    # The bound applies at ingestion, independent of max_chars: the cached raw text (what would
+    # get re-scanned by strip_hidden_markup/_focus_paragraphs on every future focus_query) is
+    # capped at RAW_PAGE_MAX_CHARS, not just the small excerpt shown in the result.
+    cached = evidence.cache_get("websearch:fetch:https://example.com/a", ttl_sec=10**9)
+    assert cached is not None
+    assert len(cached["text"]) <= RAW_PAGE_MAX_CHARS
+    assert cached["truncated"] is True
+
+
+async def test_fetch_small_page_is_not_marked_truncated():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="A short page.")
+
+    ws, _, evidence = _websearch(handler, tavily_key=None)
+    result = await ws.fetch("s1", "https://example.com/a")
+
+    assert "truncated" not in result.text
+    cached = evidence.cache_get("websearch:fetch:https://example.com/a", ttl_sec=10**9)
+    assert cached["truncated"] is False
+
+
+async def test_fetch_cached_truncation_flag_survives_second_fetch_no_new_request():
+    huge_page = "A" * (RAW_PAGE_MAX_CHARS + 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=huge_page)
+
+    ws, calls, _ = _websearch(handler, tavily_key=None)
+    await ws.fetch("s1", "https://example.com/a")
+    result2 = await ws.fetch("s1", "https://example.com/a", focus_query="anything")
+
+    assert len(calls) == 1  # served from cache, no re-fetch
+    assert "truncated" in result2.text  # truncation flag persisted through the cache
