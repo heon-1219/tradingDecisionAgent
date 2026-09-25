@@ -34,6 +34,18 @@ def test_extract_product_mentions():
     assert "VanEck China Semiconductor ETF" in extract_product_mentions("VanEck China Semiconductor ETF 총보수는?")
 
 
+def test_extract_product_mentions_english_questions():
+    """English questions must not turn a leading question/stop word into part of the product mention,
+    and must stop before a trailing lower-case English word that is plain sentence text, not part of
+    the product name (Task 0.1)."""
+    from finagent.kb.entity import extract_product_mentions
+
+    assert extract_product_mentions("Which domestic ETF has the largest net assets among Korean equity ETFs?") == []
+    assert extract_product_mentions("Which ETF tracks the KOSPI 200 index?") == []
+    assert extract_product_mentions("Will KODEX 200 rise next year?") == ["KODEX 200"]
+    assert extract_product_mentions("What is the expense ratio of TIGER 미국S&P500?") == ["TIGER 미국S&P500"]
+
+
 def test_resolver_exact_match():
     r = EntityResolver(_idx(), Lexicon.load(ENRICH)).resolve("KODEX 로봇액티브")
     assert r.exact and r.products[0].id == "1"

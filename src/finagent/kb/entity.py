@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..i18n import detect_lang
 from .lexicon import Company, Lexicon, Manager, Theme
 from .search import Hit, SearchIndex, _strip_generic, norm_title, tokenize
 
@@ -80,6 +81,16 @@ _FUND_MENTION = re.compile(r"[A-Za-z0-9가-힣&+\-.()]{2,}(?:펀드|투자신탁
 _EN_ETF_MENTION = re.compile(r"\b[A-Z][A-Za-z0-9&+\-.]*(?:\s+[A-Za-z0-9&+\-.]+){0,6}\s+ETF\b")
 _TRAIL = re.compile(r"(의|은|는|이|가|을|를|에|도|와|과|로|에서)$")
 _STOP_WORDS = {"etf", "etn", "정보", "알려줘", "알려", "주세요", "찾아서", "비교해줘", "추천해줘", "정리해줘", "구조와", "총보수는?", "총보수는"}
+# English questions: a mention never *starts* with a question/stop word ('Which domestic ETF' / 'Which
+# ETF' are the question asking about ETFs in general, not naming one), and it ends before the first
+# plain lower-case English word ('rise', 'next', 'year' in 'KODEX 200 rise next year') that is sentence
+# text rather than part of a product-name pattern (a brand, a number, an all-caps ticker, a mixed
+# Korean/English token such as '미국S&P500').  See src/finagent/i18n.py:detect_lang.
+_EN_QUESTION_STARTS = {
+    "which", "what", "how", "will", "does", "is", "are", "do", "show", "list", "tell", "give", "find",
+    "compare", "the", "a", "an",
+}
+_EN_PLAIN_WORD = re.compile(r"^[a-z]+$")
 
 # Category words, not product names.  "…펀드" matches the fund pattern, so "환헤지형 해외 채권형 공모펀드
 # 중 판매중인 상품은 몇 개?" used to extract 공모펀드, fail to resolve it, and get rewritten into a
@@ -100,17 +111,23 @@ def _is_generic_category(span: str) -> bool:
 def extract_product_mentions(question: str) -> list[str]:
     """Pull likely product-name spans out of a question (brand + name, ...펀드, English '... ETF')."""
     out: list[str] = []
+    is_en = detect_lang(question) == "en"
     for rx in (_EN_ETF_MENTION, _BRAND_MENTION, _FUND_MENTION):
         for m in rx.finditer(question):
             span = m.group(0).strip()
+            words = span.split()
+            if is_en and words and words[0].lower() in _EN_QUESTION_STARTS:
+                continue  # 'Which domestic ETF' / 'Which ETF' names the question, not a product
             cut: list[str] = []
-            for w in span.split():
+            for w in words:
                 if w.lower() in ("etf", "etn"):
                     if rx is _EN_ETF_MENTION:  # keep the trailing ETF of an English fund name
                         cut.append(w)
                     break
                 if w.lower() in _STOP_WORDS:
                     break
+                if is_en and _EN_PLAIN_WORD.fullmatch(w):
+                    break  # plain lower-case English word ('rise', 'next', 'year') → sentence text, not the name
                 stripped = _TRAIL.sub("", w) if re.search(r"[가-힣]$", w) and len(w) >= 3 else w
                 cut.append(stripped)
                 if stripped != w:  # a particle ended the product name

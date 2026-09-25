@@ -386,6 +386,26 @@ async def test_real_product_is_not_falsely_flagged(tiny_store, tmp_path):
     assert s.orchestrator.pre_analyze("삼성 KODEX 2차전지산업의 위험등급은?").unresolved == []
 
 
+async def test_english_question_naming_a_real_product_is_not_rewritten_into_a_clarification(tiny_store, tmp_path):
+    """Task 0.1: extract_product_mentions used to swallow trailing English sentence words into the mention
+    ('KODEX 로봇액티브 currently trade actively' instead of 'KODEX 로봇액티브'), and a bare 'Which ETF ...'
+    question used to extract 'Which ETF' as if it were a product name. Both used to fail to resolve and
+    get the answer rewritten into a false clarification, even though the product is real / no product was
+    named. (Neither question uses a forecast word, so the unrelated forward-looking guard stays out of it.)"""
+    s = _state(tiny_store, StubLLM([]), tmp_path)
+    assert s.orchestrator.pre_analyze("Does KODEX 로봇액티브 currently trade actively today?").unresolved == []
+    assert s.orchestrator.pre_analyze("Which ETF has the largest net assets among domestic ETFs?").unresolved == []
+
+    script = [Turn("", [ToolCall("c", "final_answer", {
+        "status": "answered",
+        "answer": "KODEX 로봇액티브 is managed by 삼성자산운용 and its net assets are 50 billion won.",
+    })], "tool_use")]
+    s2 = _state(tiny_store, StubLLM(script), tmp_path)
+    resp = await s2.orchestrator.answer("U-EN1", "Does KODEX 로봇액티브 currently trade actively today?")
+    assert resp.answer == "KODEX 로봇액티브 is managed by 삼성자산운용 and its net assets are 50 billion won."
+    assert "corrected to a clarifying question" not in resp.think_trace
+
+
 async def test_acknowledged_decline_is_left_alone(tiny_store, tmp_path):
     """If the model already said 'there is none', the server adds nothing."""
     script = [Turn("", [ToolCall("c", "final_answer", {
