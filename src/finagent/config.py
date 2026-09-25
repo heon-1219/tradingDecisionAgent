@@ -84,6 +84,33 @@ class Settings(BaseSettings):
     def vector_cache_path(self) -> Path:
         return self.data_dir / "store" / "vector_cache.npz"
 
+    # Paper-trading assistant (research + trading layers)
+    # Alpaca paper-trading credentials. The trading host itself is a hard-coded constant in
+    # trading/broker.py (never derived from settings, per the paper-only constraint) - these keys
+    # only authenticate against it.
+    alpaca_api_key_id: str | None = None
+    alpaca_api_secret_key: str | None = None
+    # Tavily web search API key (research/websearch.py); Jina Reader (r.jina.ai) needs no key.
+    tavily_api_key: str | None = None
+    # SEC EDGAR requires a descriptive User-Agent with contact info on every request, or it 403s.
+    sec_user_agent: str | None = None
+    # Gemini's native google_search grounding model (research/grounding.py). Kept separate from
+    # llm_model since grounding goes through a different SDK code path and its results are never
+    # cached (the whole point is a fresh search).
+    grounding_model: str = "gemini-3.8-flash"
+    # Kill switch: when False, the chat agent can still research but ticket confirmation is refused.
+    trading_enabled: bool = True
+
+    # App DB: sessions, messages, mandates, tickets, orders, ledger, evidence, http_cache.
+    app_db_path: Path = DATA_DIR / "store" / "app.db"
+
+    # Chat turn budget - separate from the QA agent's time_budget_sec/max_tool_rounds above, since
+    # the chat agent's tool loop (research + trading) has different latency characteristics.
+    chat_time_budget_sec: float = 90.0
+    chat_max_rounds: int = 8
+    # How long a proposed ticket stays confirmable before it expires and must be regenerated.
+    ticket_ttl_sec: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:
