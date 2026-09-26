@@ -37,8 +37,11 @@ Prices and estimates:
 Clamps: a qty clamp floors to whole shares unless fractional trading is allowed for the leg
 (asset fractionable, `mandate.allow_fractional`, time_in_force "day"), in which case it floors to
 9 decimals; a notional clamp floors to cents. A clamp (or tick rounding) that leaves nothing, or
-less than $1.00, rejects the leg with that rule's own code. Accepted and clamped legs come back with plain-form Decimals (qty without
-exponent or trailing zeros, notional in cents, limit price at its tick precision).
+less than $1.00, rejects the leg with that rule's own code. The $1.00 floor never blocks a sell of
+the whole working position, so a sub-$1 residual can always be closed. Accepted and clamped legs
+come back with plain-form Decimals (qty without exponent or trailing zeros, notional in cents,
+limit price at its tick precision); a leg with more than MAX_LEG_DIGITS digits is rejected
+(`precision`) up front, so no value is ever rounded silently.
 """
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ from decimal import (
     Context,
     Decimal,
     DivisionByZero,
+    Inexact,
     InvalidOperation,
     Overflow,
     localcontext,
@@ -75,6 +79,10 @@ MARKET_SLIPPAGE_PCT = Decimal("1.0")  # buffer on ask for market-buy cost estima
 LARGE_ORDER_PCT = Decimal("10")  # warn when one leg's estimated cost exceeds this % of equity
 MIN_NOTIONAL_USD = Decimal("1.00")  # a notional clamp may not go below Alpaca's $1 minimum
 FRACTIONAL_DECIMALS = 9  # Alpaca accepts fractional qty to 9 decimal places
+# Most digits (in plain positional form) a leg's qty / notional / limit_price may have. Half the
+# 40-digit working precision: a leg value times a price (quotes carry <= ~17 digits) stays exact,
+# and tick/cent quantizing never overflows. 20 digits is far beyond any real order.
+MAX_LEG_DIGITS = 20
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -110,24 +118,32 @@ def _reference(quote: Quote | None) -> Decimal | None:
     return None
 
 
+def _market_buy_price(quote: Quote | None, ref: Decimal | None) -> Decimal | None:
+    """Per-share estimate for a buy with no limit price: max(ask, reference) x (1 + slippage), so a
+    stale low ask can't understate it. Used for new legs and for pending open buys alike."""
+    ask = _positive(quote.ask) if quote is not None else None
+    known = [p for p in (ask, ref) if p is not None]
+    return max(known) * (1 + MARKET_SLIPPAGE_PCT / _HUNDRED) if known else None
+
+
 def _est_price(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decimal | None:
     if leg.limit_price is not None:
         return leg.limit_price
     if leg.side == "buy":
-        ask = _positive(quote.ask) if quote is not None else None
-        known = [p for p in (ask, ref) if p is not None]
-        return max(known) * (1 + MARKET_SLIPPAGE_PCT / _HUNDRED) if known else None
+        return _market_buy_price(quote, ref)
     bid = _positive(quote.bid) if quote is not None else None
     return bid if bid is not None else ref
 
 
-def _shares_sold(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decimal:
+def _shares_sold(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decimal | None:
     """Shares a sell leg takes out of the position. A notional sell converts at the LOWER of the
-    bid and the reference price (whichever exists), so a stale high bid can't understate it."""
+    bid and the reference price (whichever exists), so a stale high bid can't understate it.
+    None only for a notional with no price at all (which `_no_quote` rejects)."""
     if leg.qty is not None:
         return leg.qty
     bid = _positive(quote.bid) if quote is not None else None
-    return leg.notional / min(p for p in (bid, ref) if p is not None)
+    known = [p for p in (bid, ref) if p is not None]
+    return leg.notional / min(known) if known else None
 
 
 def _est_cost(leg: OrderLeg, price: Decimal | None) -> Decimal | None:
@@ -171,37 +187,58 @@ def _is_fractional(qty: Decimal) -> bool:
     return qty != qty.to_integral_value()
 
 
+def _plain_digits(value: Decimal) -> int:
+    """Digits needed to write `value` in plain positional form, trailing zeros ignored
+    (123.45 -> 5, 0.001 -> 3, 1E+3 -> 4). Read off the exact tuple, so nothing is rounded."""
+    _, digits, exponent = value.as_tuple()
+    significant = list(digits)
+    while len(significant) > 1 and significant[-1] == 0:
+        significant.pop()
+        exponent += 1
+    if exponent >= 0:
+        return len(significant) + exponent
+    return max(len(significant), -exponent)
+
+
 def _open_buy_value(order: OrderSnapshot, ctx: MarketContext) -> Decimal | None:
     """What a pending open buy order still commits: the unfilled notional, or the unfilled qty x
-    its limit price (else the reference price, else the position's current price). None when it
-    can't be priced at all."""
+    its limit price. With no limit price (a market order, or a stop order - stop prices aren't
+    modeled) the unfilled qty is valued like a new market buy, `_market_buy_price`, with the
+    position's current price standing in for a missing reference. None when it can't be priced."""
     filled = order.filled_qty or _ZERO
     if order.notional is not None:
         return max(order.notional - filled * (order.filled_avg_price or _ZERO), _ZERO)
     remaining = max((order.qty or _ZERO) - filled, _ZERO)
+    limit = _positive(order.limit_price)
+    if limit is not None:
+        return remaining * limit
     symbol = order.symbol.upper()
+    quote = ctx.quotes.get(symbol)
+    ref = _reference(quote)
     position = ctx.positions.get(symbol)
-    for price in (
-        _positive(order.limit_price),
-        _reference(ctx.quotes.get(symbol)),
-        _positive(position.current_price) if position is not None else None,
-    ):
-        if price is not None:
-            return remaining * price
-    return _ZERO if remaining == 0 else None
+    if ref is None and position is not None:
+        ref = _positive(position.current_price)
+    price = _market_buy_price(quote, ref)
+    if price is None:
+        return _ZERO if remaining == 0 else None
+    return remaining * price
 
 
 def _normalized(leg: OrderLeg) -> OrderLeg:
     """The same leg with plain-form Decimals, so a ticket serializes cleanly (5E+2 -> 500.00).
-    Values never change: by now qty has at most 9 decimals, the notional at most 2 (cents) and
-    the limit price sits on its tick."""
+    Values never change - by now qty has at most 9 decimals and MAX_LEG_DIGITS digits, the
+    notional is in cents and the limit price sits on its tick - and `Inexact` is trapped here so
+    a slip could only ever raise, never round. (`Rounded` is not trapped: dropping trailing zeros,
+    100.000 -> 100.00, signals it without changing the value.)"""
     update: dict[str, Decimal] = {}
-    if leg.qty is not None:
-        update["qty"] = _plain(leg.qty)
-    if leg.notional is not None:
-        update["notional"] = leg.notional.quantize(_CENT)
-    if leg.limit_price is not None:
-        update["limit_price"] = leg.limit_price.quantize(_tick_for(leg.limit_price))
+    with localcontext() as exact:
+        exact.traps[Inexact] = True
+        if leg.qty is not None:
+            update["qty"] = _plain(leg.qty)
+        if leg.notional is not None:
+            update["notional"] = leg.notional.quantize(_CENT)
+        if leg.limit_price is not None:
+            update["limit_price"] = leg.limit_price.quantize(_tick_for(leg.limit_price))
     return leg.model_copy(update=update)
 
 
@@ -320,6 +357,18 @@ class _Check:
     def est_cost(self) -> Decimal | None:
         return _est_cost(self.leg, self.est_price)
 
+    @property
+    def closes_position(self) -> bool:
+        """A sell of everything still available to sell in the symbol (more than that is a
+        `_short_sell`). Exempt from the $1.00 floor, so a sub-$1 residual - which fractional clamps
+        can leave behind - can always be sold."""
+        leg = self.leg
+        if leg.side != "sell":
+            return False
+        have = self.book.qty_available.get(leg.symbol, _ZERO)
+        sold = _shares_sold(leg, self.quote, self.ref)
+        return have > 0 and sold is not None and sold >= have
+
     def block(self, code: str, message: str) -> None:
         self.reasons.append(RiskReason(code=code, message=message, severity="block"))
         self.blocked = True
@@ -410,6 +459,25 @@ def _order_type_not_allowed(c: _Check) -> None:
         )
 
 
+def _precision(c: _Check) -> None:
+    """Runs before any rule does arithmetic on the leg: a value with more than MAX_LEG_DIGITS
+    digits would otherwise be rounded silently by the working context (e.g. 0.999...9 with 41
+    nines normalizes UP to 1)."""
+    leg = c.leg
+    too_long = [
+        f"{name} {value:f}"
+        for name, value in (("qty", leg.qty), ("notional", leg.notional),
+                            ("limit_price", leg.limit_price))
+        if value is not None and _plain_digits(value) > MAX_LEG_DIGITS
+    ]
+    if too_long:
+        c.block(
+            "precision",
+            f"{'; '.join(too_long)}: more than {MAX_LEG_DIGITS} digits, too precise to check "
+            "exactly",
+        )
+
+
 def _notional_needs_market_day(c: _Check) -> None:
     # OrderLeg's own validation already forbids this; kept as defense in depth for legs that
     # bypassed it (model_construct / unvalidated assignment).
@@ -426,11 +494,13 @@ def _notional_invalid(c: _Check) -> None:
     """Order size: a notional must be at least $1.00 in whole cents, and so must any leg's
     estimated cost (Alpaca rejects sub-$1 orders). A qty leg with no estimate yet has no quote,
     which `_no_quote` blocks. Later price/qty changes keep the $1.00 floor themselves: `_bad_tick`
-    and `_shrink` reject under their own codes."""
+    and `_shrink` reject under their own codes. A sell of the whole working position is exempt
+    from the $1.00 floor (not from whole cents)."""
     leg = c.leg
     notional = leg.notional
+    closing = c.closes_position
     if notional is not None:
-        if notional < MIN_NOTIONAL_USD:
+        if notional < MIN_NOTIONAL_USD and not closing:
             c.block(
                 "notional_invalid",
                 f"Notional {_price(notional)} is below the {_usd(MIN_NOTIONAL_USD)} minimum",
@@ -441,7 +511,7 @@ def _notional_invalid(c: _Check) -> None:
             )
         return
     cost = c.est_cost
-    if cost is not None and cost < MIN_NOTIONAL_USD:
+    if cost is not None and cost < MIN_NOTIONAL_USD and not closing:
         c.block(
             "notional_invalid",
             f"Estimated cost {_price(cost)} of {_qty(leg.qty)} {leg.symbol} is below the "
@@ -495,11 +565,12 @@ def _bad_tick(c: _Check) -> None:
         return
     if rounded != price:
         direction = "down" if leg.side == "buy" else "up"
-        if leg.qty is not None and rounded * leg.qty < MIN_NOTIONAL_USD:
+        cost = rounded * leg.qty if leg.qty is not None else None
+        if cost is not None and cost < MIN_NOTIONAL_USD and not c.closes_position:
             c.block(
                 "bad_tick",
                 f"Rounding the limit price {_price(price)} {direction} to {_price(rounded)} "
-                f"would make the estimated cost {_price(rounded * leg.qty)}, below the "
+                f"would make the estimated cost {_price(cost)}, below the "
                 f"{_usd(MIN_NOTIONAL_USD)} minimum order size",
             )
             return
@@ -694,13 +765,14 @@ def _large_order(c: _Check) -> None:
         )
 
 
-# Evaluation order = the plan's reason-code table (plus `notional_invalid`, placed with the other
-# notional-shape check). Each rule is named after the one code it emits.
+# Evaluation order = the plan's reason-code table, plus `precision` (fix round 2), which must run
+# before the first rule that does arithmetic on the leg. Each rule is named after the code it emits.
 _RULES: tuple[Callable[[_Check], None], ...] = (
     _account_blocked,
     _asset_not_tradable,
     _denied_symbol,
     _order_type_not_allowed,
+    _precision,
     _notional_needs_market_day,
     _notional_invalid,
     _fractional_not_allowed,
