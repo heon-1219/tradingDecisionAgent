@@ -400,16 +400,18 @@ MARKET_SLIPPAGE_PCT = Decimal("1.0")   # buffer on ask for market-buy cost estim
 | `short_sell` | reject | sell qty > qty_available (or no position) |
 | `wash_trade` | reject | an open order on the opposite side for the same symbol |
 | `max_order_usd` | clamp | shrink qty/notional to the cap (floor; for whole-share assets floor to an integer) |
-| `max_position_pct` | clamp | post-trade position value > pct × equity → shrink |
+| `max_position_pct` | clamp | post-trade position value (filled + pending open buys + earlier legs) > pct × base (base = min(equity, budget_usd) if a budget is set, else equity) → shrink |
 | `max_positions` | reject | the buy would open a new position beyond the limit |
-| `buying_power` | clamp | cost > buying_power × (1 − cash_buffer_pct/100) → shrink; reject if nothing is left |
+| `buying_power` | clamp | cost > cash buying power (min(buying_power, non_marginable_buying_power)) × (1 − cash_buffer_pct/100), minus earlier buys → shrink; reject if nothing is left. No margin, ever |
+| `budget` | clamp | with `budget_usd` set: total invested value (filled positions + pending open buys + earlier buys in this ticket + this buy) > budget_usd → shrink; reject if nothing is left |
 | `orders_per_day` | reject | `ctx.orders_today + legs accepted so far ≥ max_orders_per_day` |
 | `market_closed` | warn | clock.is_open False: "queues until next open" |
 | `large_order` | warn | est_cost > 10% of equity |
 
-- `est_price`: limit price if set; otherwise ask × (1 + MARKET_SLIPPAGE_PCT/100) for buys and bid for sells.
+- `est_price`: limit price if set; otherwise max(ask, reference) × (1 + MARKET_SLIPPAGE_PCT/100) for buys (so a stale low ask can't understate cost) and bid for sells.
 - `est_cost_usd`: est_price × qty, or notional.
-- Legs are evaluated in order, and the account and position effects of earlier accepted legs carry into later ones.
+- Legs are evaluated in order, and the effects of earlier accepted legs carry into later ones: buys consume buying power and budget and add to position value, but never make shares sellable (an unfilled buy isn't a position); a later leg on the opposite side of the same symbol is a `wash_trade` rejection; sells never free buying power, budget or position value.
+- Pending open buy orders in `ctx.open_orders` count toward position value, `max_positions` and `budget` (qty × limit price, or notional).
 
 - [ ] **Tests:** a table-driven test with a fixture context and at least one case per code, including these exact cases:
   ```python
