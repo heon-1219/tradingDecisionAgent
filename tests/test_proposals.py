@@ -80,7 +80,7 @@ def _create(store: TicketStore, session_id="sess-1", decisions=None, legs=None, 
         ttl_sec=300,
     )
     fields.update(over)
-    return store.create(session_id, decisions, legs, **fields)
+    return store.create(session_id, decisions=decisions, legs=legs, **fields)
 
 
 # --- canonical_hash -----------------------------------------------------------------------
@@ -296,6 +296,16 @@ def test_create_rejects_explicit_legs_with_wrong_count():
         _create(store, decisions=[make_decision(a)], legs=[a, b])
 
 
+def test_create_rejects_explicit_legs_with_wrong_symbol_against_an_accepted_decision():
+    store, _db, _clock = make_store()
+    accepted_leg = make_leg(symbol="AAPL")
+    wrong_leg = make_leg(symbol="TSLA", side="sell")
+    decisions = [make_decision(accepted_leg, verdict="accept")]
+    with pytest.raises(ValueError, match="must equal the executable legs"):
+        _create(store, decisions=decisions, legs=[wrong_leg])
+    assert store.active("sess-1") is None
+
+
 def test_create_rejects_decisions_index_mismatch():
     store, _db, _clock = make_store()
     leg = make_leg()
@@ -400,6 +410,43 @@ def test_expire_stale_skips_a_corrupt_row_and_still_expires_the_good_one():
     assert corrupt_row["status"] == "proposed"  # left alone, not crashed on
 
 
+def test_create_normalizes_a_model_construct_decision_and_returns_exactly_what_get_returns():
+    """Regression for N2: a `model_construct`'d decision with an un-normalized field (a lower-case
+    symbol) must not be stored raw. `create()` re-parses every decision before deriving anything
+    from it, so the symbol comes out upper-cased, `create()`'s return value is byte-for-byte the
+    same as `get()`, and the stored hash matches a hash recomputed from the fetched ticket."""
+    store, _db, _clock = make_store()
+    lowercase_leg = OrderLeg.model_construct(
+        symbol="aapl", side="buy", qty=D("1"), notional=None, type="market",
+        time_in_force="day", limit_price=None,
+    )
+    decision = RiskDecision.model_construct(
+        index=0, verdict="accept", leg=lowercase_leg, original=lowercase_leg, reasons=[],
+        est_price=None, est_cost_usd=None,
+    )
+    ticket = _create(store, decisions=[decision])
+    fetched = store.get(ticket.id)
+
+    assert ticket.legs[0].symbol == "AAPL"
+    assert fetched.legs[0].symbol == "AAPL"
+    assert ticket == fetched
+    assert canonical_hash(fetched.legs, fetched.decisions, fetched.id) == ticket.hash
+
+
+def test_create_decisions_and_legs_are_keyword_only():
+    """Regression for N3: calling `create()` the old (brief-era) positional way -
+    `create(session_id, legs, decisions, ...)` - must fail with a clear `TypeError`, not silently
+    swap the two lists or raise a confusing `AttributeError` deep inside the method."""
+    store, _db, _clock = make_store()
+    leg = make_leg()
+    with pytest.raises(TypeError):
+        store.create(
+            "sess-1", [leg], [make_decision(leg)],
+            thesis="t", risks="r", invalidation="i", evidence_ids=[], mandate_version=1,
+            quote_as_of=FIXED_NOW,
+        )
+
+
 # --- TicketStore.create: supersede ----------------------------------------------------------
 
 
@@ -485,6 +532,19 @@ def test_get_json_round_trip_equals_created_ticket():
     created = _create(store)
     fetched = store.get(created.id)
     assert fetched == created
+
+
+def test_get_raises_ticket_state_error_for_an_unparseable_row():
+    """`get()` used to let a raw `pydantic.ValidationError` escape; it now raises the same
+    `TicketStateError` every other store-state failure in this module raises."""
+    store, db, _clock = make_store()
+    db.execute(
+        "INSERT INTO tickets (id, session_id, status, body, created_at, expires_at) "
+        "VALUES (?,?,?,?,?,?)",
+        ("Tbad", "sess-1", "proposed", "{bad", FIXED_NOW.isoformat(), FIXED_NOW.isoformat()),
+    )
+    with pytest.raises(TicketStateError):
+        store.get("Tbad")
 
 
 def test_active_returns_none_when_no_ticket():
@@ -676,6 +736,98 @@ def test_concurrent_transition_race_with_real_threads_exactly_one_succeeds():
     assert results.count("ok") == 1
     assert results.count("fail") == 7
     assert store.get(ticket.id).status == TicketStatus.submitting
+
+
+# --- exact CAS across two TicketStore instances on one AppDB (Fix round 2, N1) ----------------
+#
+# `transition()`'s own `self._lock` only serializes calls made *through the same TicketStore
+# instance*. These tests use a second, independent instance (its own, unsynchronized RLock)
+# sharing the same AppDB, with a query hook that fires a real transition() on the SECOND instance
+# from inside the FIRST instance's own read - simulating a genuinely concurrent writer landing in
+# the narrow window between the first instance's read and its write. The exact status+body CAS on
+# the final UPDATE must catch this regardless of any lock.
+
+
+class _HookDB(AppDB):
+    """An AppDB whose `query()` can fire an arbitrary callback the first time a SELECT matching
+    `trigger` runs - simulating another writer's call landing between this call's own read and
+    its write."""
+
+    hook = None
+    trigger = None
+
+    def query(self, sql, params=()):
+        rows = super().query(sql, params)
+        if self.hook and self.trigger and sql.startswith(self.trigger):
+            hook, self.hook = self.hook, None
+            hook()
+        return rows
+
+
+def test_transition_exact_cas_refuses_a_stale_write_out_of_a_terminal_state():
+    """Regression for N1 (probe case A): a second TicketStore instance moves the ticket to the
+    terminal state `failed` while the first instance's own transition() call is mid-read; the
+    first instance's stale write (submitting/failed -> submitted) must be refused, and the ticket
+    must stay in the terminal state the second instance set."""
+    db = _HookDB(":memory:")
+    s1 = TicketStore(db, clock=lambda: FIXED_NOW)
+    s2 = TicketStore(db, clock=lambda: FIXED_NOW)
+    ticket = _create(s1)
+    s1.transition(ticket.id, {TicketStatus.proposed}, TicketStatus.submitting)
+
+    db.trigger = "SELECT body FROM tickets WHERE id=?"
+    db.hook = lambda: s2.transition(ticket.id, {TicketStatus.submitting}, TicketStatus.failed)
+
+    with pytest.raises(TicketStateError):
+        s1.transition(
+            ticket.id, {TicketStatus.submitting, TicketStatus.failed}, TicketStatus.submitted,
+            broker_order_ids=["b1"],
+        )
+
+    row = db.query("SELECT status FROM tickets WHERE id=?", (ticket.id,))[0]
+    assert row["status"] == TicketStatus.failed.value  # never moved out of the terminal state
+    assert s1.get(ticket.id).status == TicketStatus.failed
+
+
+def test_transition_exact_cas_prevents_a_lost_update_across_two_instances():
+    """Regression for N1 (probe case A3): a second instance commits broker_order_ids=["BROKER-1"]
+    while the first instance's own transition() call is mid-read. The first instance's stale
+    write must be refused - never silently overwriting/losing the second instance's committed
+    broker_order_ids."""
+    db = _HookDB(":memory:")
+    s1 = TicketStore(db, clock=lambda: FIXED_NOW)
+    s2 = TicketStore(db, clock=lambda: FIXED_NOW)
+    ticket = _create(s1)
+    s1.transition(ticket.id, {TicketStatus.proposed}, TicketStatus.submitting)
+
+    db.trigger = "SELECT body FROM tickets WHERE id=?"
+    db.hook = lambda: s2.transition(
+        ticket.id, {TicketStatus.submitting}, TicketStatus.submitted,
+        broker_order_ids=["BROKER-1"],
+    )
+
+    with pytest.raises(TicketStateError):
+        s1.transition(ticket.id, {TicketStatus.submitting, TicketStatus.submitted}, TicketStatus.submitted)
+
+    assert s1.get(ticket.id).broker_order_ids == ["BROKER-1"]  # not lost/overwritten
+
+
+def test_create_supersede_exact_cas_across_two_instances():
+    """A concurrent transition() (on a second instance) that lands between create()'s supersede
+    SELECT and its per-row UPDATE must not be clobbered - same guarantee as the single-instance
+    interleaving test above, but across two independent TicketStore instances/locks."""
+    db = _HookDB(":memory:")
+    s1 = TicketStore(db, clock=lambda: FIXED_NOW)
+    s2 = TicketStore(db, clock=lambda: FIXED_NOW)
+    first = _create(s1, session_id="sess-1")
+
+    db.trigger = "SELECT id, body FROM tickets WHERE session_id"
+    db.hook = lambda: s2.transition(first.id, {TicketStatus.proposed}, TicketStatus.submitting)
+    _create(s1, session_id="sess-1")  # its supersede SELECT triggers the hook above
+
+    row = db.query("SELECT status FROM tickets WHERE id=?", (first.id,))[0]
+    assert row["status"] == TicketStatus.submitting.value  # not clobbered to "superseded"
+    assert s1.get(first.id).status == TicketStatus.submitting
 
 
 # --- TicketStore.expire_stale -----------------------------------------------------------------

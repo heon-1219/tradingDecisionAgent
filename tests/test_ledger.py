@@ -104,8 +104,9 @@ def test_append_redacts_header_like_string_values_even_under_innocuous_keys():
         },
     )
     payload = json.loads(db.query("SELECT payload FROM ledger")[0]["payload"])
-    assert payload["message"] == "[REDACTED]"
-    assert payload["other"] == "[REDACTED]"
+    # Surgical redaction (fix round 2): the header *name* stays visible, only its value is hidden.
+    assert payload["message"] == "sent header APCA-API-SECRET-KEY: [REDACTED]"
+    assert payload["other"] == "sent header APCA-API-KEY-ID: [REDACTED]"
     assert payload["safe"] == "no secrets here"
 
 
@@ -136,10 +137,11 @@ def test_append_redacts_underscore_and_alpaca_spelled_header_env_values():
         },
     )
     payload = _last_payload(db)
-    assert payload["a"] == "[REDACTED]"
-    assert payload["b"] == "[REDACTED]"
-    assert payload["c"] == "[REDACTED]"
-    assert payload["d"] == "[REDACTED]"
+    # Surgical redaction (fix round 2): the env var name stays visible, only its value is hidden.
+    assert payload["a"] == "env APCA_API_SECRET_KEY=[REDACTED]"
+    assert payload["b"] == "env APCA_API_KEY_ID=[REDACTED]"
+    assert payload["c"] == "env ALPACA_API_SECRET_KEY=[REDACTED]"
+    assert payload["d"] == "env ALPACA_API_KEY_ID=[REDACTED]"
     assert payload["e"] == "no secret here"
 
 
@@ -161,7 +163,9 @@ def test_append_redacts_a_tuple_containing_a_header_like_string():
     ledger, db = make_ledger()
     ledger.append("sess-1", "log", {"log": ("APCA-API-SECRET-KEY: shh",)})
     payload = _last_payload(db)
-    assert payload == {"log": ["[REDACTED]"]}
+    # A single compound "name: value" string is treated as a name (kept), and free-text-scanned
+    # for its own embedded value (redacted) - see test_append_redacts_header_like_string_values...
+    assert payload == {"log": ["APCA-API-SECRET-KEY: [REDACTED]"]}
 
 
 def test_append_a_2_item_pair_without_a_matching_name_is_not_treated_as_kv():
@@ -228,6 +232,141 @@ def test_append_falls_back_to_a_placeholder_when_redaction_itself_fails(monkeypa
     assert isinstance(row_id, int)
     payload = _last_payload(db)
     assert payload == {"_ledger_error": "payload could not be serialized"}
+
+
+# --- fix round 2: header-shaped values (HAR/Postman, flat lists, 3-tuples) --------------------
+
+
+def test_append_redacts_a_har_style_name_value_header_entry():
+    ledger, db = make_ledger()
+    ledger.append(
+        "sess-1", "request",
+        {"headers": [{"name": "APCA-API-SECRET-KEY", "value": "shh"}]},
+    )
+    payload = _last_payload(db)
+    assert payload == {"headers": [{"name": "APCA-API-SECRET-KEY", "value": "[REDACTED]"}]}
+
+
+def test_append_redacts_a_postman_style_key_value_header_entry():
+    """The Postman convention uses "key" (not "name") for the header's name field; it must be
+    kept visible exactly like HAR's "name" field, even though a bare "key" dict key would
+    otherwise match the broader dict-key secret pattern."""
+    ledger, db = make_ledger()
+    ledger.append(
+        "sess-1", "request",
+        {"headers": [{"key": "APCA-API-SECRET-KEY", "value": "shh"}]},
+    )
+    payload = _last_payload(db)
+    assert payload == {"headers": [{"key": "APCA-API-SECRET-KEY", "value": "[REDACTED]"}]}
+
+
+def test_append_does_not_treat_an_ordinary_header_entry_as_secret():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "request", {"headers": [{"name": "Accept", "value": "application/json"}]})
+    payload = _last_payload(db)
+    assert payload == {"headers": [{"name": "Accept", "value": "application/json"}]}
+
+
+def test_append_redacts_a_flat_four_item_header_list():
+    ledger, db = make_ledger()
+    ledger.append(
+        "sess-1", "request",
+        {"h": ["APCA-API-KEY-ID", "id-value", "APCA-API-SECRET-KEY", "secret-value"]},
+    )
+    payload = _last_payload(db)
+    assert payload == {"h": ["APCA-API-KEY-ID", "[REDACTED]", "APCA-API-SECRET-KEY", "[REDACTED]"]}
+
+
+def test_append_redacts_only_the_element_immediately_after_a_header_name_in_a_3_tuple():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "request", {"h": [("APCA-API-SECRET-KEY", "shh", "unaffected")]})
+    payload = _last_payload(db)
+    assert payload == {"h": [["APCA-API-SECRET-KEY", "[REDACTED]", "unaffected"]]}
+
+
+def test_append_redacts_a_header_name_pair_with_spaces():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "request", {"h": [("APCA API SECRET KEY", "shh")]})
+    payload = _last_payload(db)
+    assert payload == {"h": [["APCA API SECRET KEY", "[REDACTED]"]]}
+
+
+def test_append_bytes_dict_key_never_leaks_raw_content_via_repr():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {b"LEAKrawbytes": 1})
+    payload = _last_payload(db)
+    assert "LEAKrawbytes" not in json.dumps(payload)
+    assert list(payload.keys()) == ["<bytes len=12>"]
+
+
+# --- fix round 2: free-text scanning (query params, Authorization/Bearer, name=value) ----------
+
+
+def test_append_redacts_a_query_string_apikey_parameter():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "http", {"url": "https://h/v2/x?apikey=shh"})
+    payload = _last_payload(db)
+    assert payload == {"url": "https://h/v2/x?apikey=[REDACTED]"}
+
+
+def test_append_redacts_a_query_string_key_parameter():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "http", {"error": "401 for url 'https://g/v1?key=shh'"})
+    payload = _last_payload(db)
+    assert payload == {"error": "401 for url 'https://g/v1?key=[REDACTED]'"}
+
+
+def test_append_redacts_authorization_bearer_in_free_text():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "log", {"msg": "Authorization: Bearer shh"})
+    payload = _last_payload(db)
+    assert payload == {"msg": "Authorization: [REDACTED]"}
+
+
+def test_append_redacts_a_bare_bearer_token_in_free_text():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "log", {"msg": "sending with Bearer shh now"})
+    payload = _last_payload(db)
+    assert payload == {"msg": "sending with Bearer [REDACTED] now"}
+
+
+def test_append_redacts_a_generic_token_equals_value_in_free_text():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "log", {"msg": "token=shh"})
+    payload = _last_payload(db)
+    assert payload == {"msg": "token=[REDACTED]"}
+
+
+# --- fix round 2: documented over-/under-redaction ---------------------------------------------
+
+
+def test_append_does_not_treat_a_bare_ticker_key_as_a_pair_name():
+    """A bare "KEY"/"KEYS" is a plausible stock ticker, not a credential-header name; it must not
+    trigger the [name, value] pair heuristic (unlike a dict key literally named "key" - see the
+    documented over-redaction test below, which is a different code path)."""
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"symbols": ["KEY", "AAPL"]})
+    payload = _last_payload(db)
+    assert payload == {"symbols": ["KEY", "AAPL"]}
+
+
+def test_append_does_not_treat_an_unrelated_word_containing_key_as_a_pair_name():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"x": ["monkey", "banana"]})
+    payload = _last_payload(db)
+    assert payload == {"x": ["monkey", "banana"]}
+
+
+def test_append_documented_over_redaction_of_a_dict_keyed_by_the_ticker_key():
+    """Documented, accepted limitation (fix round 2, item (c)): dict-KEY redaction stays broad
+    (any key containing "key", "secret", etc.), so a dict literally keyed by the ticker symbol
+    "KEY" still has its value redacted wholesale. Task 2.4 keeps trading symbols out of dict
+    keys, so this is not expected to occur in practice; this test documents the current, accepted
+    behavior rather than asserting it as desirable."""
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"positions": {"KEY": {"qty": "10"}}})
+    payload = _last_payload(db)
+    assert payload == {"positions": {"KEY": "[REDACTED]"}}
 
 
 # --- export_jsonl ----------------------------------------------------------------------------
