@@ -40,9 +40,25 @@ happens to use today, and works at several levels:
    - `"Authorization: <scheme> <credential>"` and a bare `"Bearer <token>"` both redact just the
      credential/token, keeping `"Authorization:"`/`"Bearer"` visible.
    - A more general `"<name>=<value>"` / `"<name>: <value>"` anywhere in text redacts the value
-     when `<name>` contains one of `secret`, `token`, `password`, `credential`, `access_token`, or
-     `api[-_]?key` (signature too) - narrower than (1)'s dict-key pattern for the same
-     false-positive reason as (2).
+     when `<name>` is *identifier-shaped* (contains `_` or `-`, or is entirely lower-case, or
+     entirely upper-case - so `API_KEY`, `api-key`, `access_token`, `X-Api-Key` and
+     `APCA-API-SECRET-KEY` all qualify, but an ordinary Titlecase word starting a sentence, like
+     `"Secret: Apple's new product..."`, does not) *and* contains one of `secret`, `token`,
+     `password`, `credential`, `access_token`, or `api[-_]?key` (`signature` too) - narrower than
+     (1)'s dict-key pattern for the same false-positive reason as (2), and narrower still than an
+     earlier version of this rule that flagged any Titlecase word merely because it happened to
+     read like an ordinary label (see `_is_secret_like_free_text_name`).
+
+   The candidate-name scan (`_CANDIDATE_KV_RE`) itself is deliberately written with a *bounded*
+   quantifier (`{1,64}`) on the name it captures, checked in plain Python rather than embedding the
+   secret-keyword alternation inside the regex's own unbounded repetition - an earlier version
+   nested "name-charset-star, then an alternation, then name-charset-star again" directly in the
+   regex, which is catastrophically slow (quadratic-or-worse backtracking) on an adversarial
+   string like `"a."` repeated thousands of times, or a long dotted name (a Python traceback's
+   module path, say) with no match at the end - exactly the kind of string a broker error message
+   or exception traceback can produce.
+   Every string leaf is also capped at 100,000 characters (`_MAX_LEAF_LEN`) before any regex runs
+   against it at all, as defense in depth independent of any single pattern's own complexity.
 
 A `pydantic.BaseModel` is coerced via `model_dump(mode="json")` before redaction (so a payload can
 carry, say, an `OrderLeg` directly, and any of its fields still gets the same key-based scan, and a
@@ -97,10 +113,27 @@ _HEADER_NAME_RE = re.compile(
 
 
 def _looks_like_header_name(text: str) -> bool:
-    return bool(_HEADER_NAME_RE.search(text))
+    # `_HEADER_NAME_RE` itself has no unbounded-quantifier-then-alternation shape (see the
+    # free-text patterns section below for why that combination is dangerous), so it's already
+    # linear regardless of input length - `_truncate_leaf` here is defense in depth, consistent
+    # with "no regex in this module runs against an untruncated string leaf."
+    return bool(_HEADER_NAME_RE.search(_truncate_leaf(text)))
 
 
 # --- free-text patterns (see module docstring, level 3) ------------------------------------------
+#
+# Every pattern below uses only *bounded* repetition (a fixed-length literal, an optional single
+# character, or an explicit `{1,64}` cap) - no `X*`/`X+` whose repeated element can itself match a
+# variable-length run that a *later*, alternation-heavy part of the same group might also need to
+# re-try at every offset. That "unbounded-quantifier-followed-by-a-late-alternation" shape is what
+# made the old `_FREE_TEXT_KV_RE` (`[\w.\-]*(?:secret|token|...)[\w.\-]*`) quadratic-or-worse: the
+# engine backtracks the leading `[\w.\-]*` one character at a time, retrying the alternation at
+# every possible split point, for every starting position - O(n^2) or worse on a long run of
+# word/dot/hyphen characters with no match at the end (a repeated "a.", or a long dotted module
+# path in a traceback). The replacement below finds candidate `name<sep>` runs with one linear,
+# *unambiguous* regex (the name is capped at 64 characters, so even its own worst-case backtrack is
+# a small constant, not proportional to the remaining string), then decides in plain Python whether
+# that name is secret-like - no regex ever re-scans the same span looking for multiple alternatives.
 
 _QUERY_PARAM_RE = re.compile(
     r"([?&])(key|apikey|api[-_]key|token|access_token|secret|password|signature|sig)="
@@ -109,22 +142,61 @@ _QUERY_PARAM_RE = re.compile(
 )
 _AUTH_HEADER_RE = re.compile(r"(authorization\s*:\s*)\S.*", re.I)
 _BEARER_RE = re.compile(r"\b(Bearer)\s+\S+", re.I)
-_FREE_TEXT_KV_RE = re.compile(
-    r"\b([\w.\-]*(?:secret|token|password|credential|access[-_]?token|api[-_]?key|signature)"
-    r"[\w.\-]*)(\s*[:=]\s*)([^\s&,;'\"]+)",
-    re.I,
+
+# A candidate "name" immediately followed by ":"/"=" (optionally spaced), then its value up to the
+# next whitespace/`&`/`,`/`;`/quote. The name is capped at 64 characters and anchored so it can't
+# start mid-identifier (`(?<![\w.\-])`) - both bound the worst-case work per starting position to a
+# small constant, making the overall scan linear in the length of `text`.
+_CANDIDATE_KV_RE = re.compile(r"(?<![\w.\-])([\w.\-]{1,64})(\s*[:=]\s*)([^\s&,;'\"]+)")
+
+# Keywords that make a free-text name "secret-like" - checked only against the (<=64-char)
+# candidate name already captured above, never against the whole text, so this alternation's own
+# cost is bounded regardless of `text`'s length.
+_FREE_TEXT_SECRET_WORD_RE = re.compile(
+    r"secret|token|password|credential|access[-_]?token|api[-_]?key|signature", re.I
 )
 
 # HAR/Postman-style header-entry field names (case-insensitive).
 _NAME_FIELD_KEYS = frozenset({"name", "key", "header", "field"})
 _VALUE_FIELD_KEYS = frozenset({"value", "val"})
 
+# Defense in depth, independent of any single pattern's own complexity: no regex in this module
+# ever runs against a string leaf longer than this - see the module docstring.
+_MAX_LEAF_LEN = 100_000
+
+
+def _truncate_leaf(text: str) -> str:
+    if len(text) <= _MAX_LEAF_LEN:
+        return text
+    cut = len(text) - _MAX_LEAF_LEN
+    return f"{text[:_MAX_LEAF_LEN]}…[truncated {cut} chars]"
+
+
+def _is_secret_like_free_text_name(name: str) -> bool:
+    """A free-text `name` (from `_CANDIDATE_KV_RE`, already capped at 64 characters) is treated as
+    secret-like only when it is *identifier-shaped* - contains `_` or `-`, or is entirely
+    lower-case, or entirely upper-case - and separately contains one of the known secret-ish
+    keywords. This is what keeps ordinary Titlecase prose like `"Secret: Apple's new product..."`
+    untouched (a single capitalized word, no underscore/hyphen, is neither all-lower nor
+    all-upper) while still catching `API_KEY`, `api-key`, `password=`, `TOKEN:` and
+    `X-Api-Key:`."""
+    identifier_shaped = "_" in name or "-" in name or name == name.lower() or name == name.upper()
+    return identifier_shaped and bool(_FREE_TEXT_SECRET_WORD_RE.search(name))
+
+
+def _redact_candidate_kv(match: re.Match) -> str:
+    name, sep, value = match.group(1), match.group(2), match.group(3)
+    if _is_secret_like_free_text_name(name):
+        return f"{name}{sep}{_REDACTED}"
+    return match.group(0)
+
 
 def _redact_free_text(text: str) -> str:
+    text = _truncate_leaf(text)
     text = _QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}={_REDACTED}", text)
     text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _REDACTED, text)
     text = _BEARER_RE.sub(lambda m: f"{m.group(1)} {_REDACTED}", text)
-    text = _FREE_TEXT_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", text)
+    text = _CANDIDATE_KV_RE.sub(_redact_candidate_kv, text)
     return text
 
 
