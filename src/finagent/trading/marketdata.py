@@ -19,15 +19,23 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from pydantic import ValidationError
+
 from ..research.evidence import EvidenceStore, ResearchResult, SourceRecord, sanitize_untrusted, wrap_untrusted
 from ..research.http import HttpClient
-from .models import Bar, Quote
+from .models import Bar, Quote, normalize_symbol
 
 DATA_BASE = "https://data.alpaca.markets"
 
 # Alpaca's SIP feed requires data to be at least ~15 minutes old (free/paper accounts don't have
 # a real-time SIP subscription); everything more recent must use the free IEX feed instead.
 _SIP_MIN_DELAY = timedelta(minutes=15)
+
+# Hard cap on /v2/stocks/bars pagination, independent of `limit`: a next_page_token that never
+# stops (a misbehaving/malicious upstream, or a bug) would otherwise loop forever. 20 pages of the
+# API's own max page size comfortably covers any `limit` this method is realistically called
+# with; if it's ever hit, `bars` just returns what it collected instead of looping past it.
+_MAX_BARS_PAGES = 20
 
 _NEWS_MAX_LIMIT = 50
 _NEWS_HEADLINE_MAX_CHARS = 200
@@ -102,6 +110,7 @@ class AlpacaData:
         end: str | None = None,
         limit: int = 500,
     ) -> list[Bar]:
+        symbol = normalize_symbol(symbol)  # also the key Alpaca's response groups bars under
         params: dict[str, Any] = {
             "symbols": symbol,
             "timeframe": timeframe,
@@ -116,7 +125,7 @@ class AlpacaData:
 
         bars: list[Bar] = []
         page_token: str | None = None
-        while True:
+        for _ in range(_MAX_BARS_PAGES):
             request_params = dict(params)
             if page_token:
                 request_params["page_token"] = page_token
@@ -124,14 +133,19 @@ class AlpacaData:
                 f"{DATA_BASE}/v2/stocks/bars", params=request_params, headers=self._headers
             )
             for raw in ((data or {}).get("bars") or {}).get(symbol, []):
-                bars.append(
-                    Bar(t=raw["t"], o=raw["o"], h=raw["h"], l=raw["l"], c=raw["c"], v=raw["v"])
-                )
+                if not isinstance(raw, dict) or "t" not in raw:
+                    continue  # malformed bar (no timestamp) - skip rather than raise
+                try:
+                    bar = Bar(t=raw["t"], o=raw.get("o"), h=raw.get("h"), l=raw.get("l"), c=raw.get("c"), v=raw.get("v"))
+                except ValidationError:
+                    continue  # malformed bar (missing/invalid OHLCV) - skip rather than raise
+                bars.append(bar)
                 if len(bars) >= limit:
                     return bars
             page_token = (data or {}).get("next_page_token")
             if not page_token:
                 return bars
+        return bars
 
     # --- news --------------------------------------------------------------------
 
@@ -190,7 +204,7 @@ class AlpacaData:
                 connector="news",
                 title=clean_headline or "Untitled",
                 url=item.get("url"),
-                publisher=raw_source,
+                publisher=clean_source,
                 tier=2,
                 published_at=clean_created,
                 snippet=snippet,

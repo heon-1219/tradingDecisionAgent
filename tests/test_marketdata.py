@@ -209,6 +209,59 @@ async def test_bars_stops_without_a_second_call_when_no_next_page_token():
     assert len(bars) == 1
 
 
+async def test_bars_normalizes_symbol_case_for_request_and_response_lookup():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["symbols"] == "AAPL"
+        return httpx.Response(
+            200, json={"bars": {"AAPL": [_bar("2026-09-27T14:00:00Z", "150.00")]}}
+        )
+
+    md, calls, _ = _marketdata(handler)
+    bars = await md.bars("aapl")
+    assert calls
+    assert len(bars) == 1
+
+
+async def test_bars_pagination_is_capped_to_prevent_infinite_loop():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={"bars": {"AAPL": []}, "next_page_token": "always-more"})
+
+    md, _, _ = _marketdata(handler)
+    bars = await md.bars("AAPL", limit=1_000_000)
+    assert bars == []
+    assert call_count <= 20
+
+
+async def test_bars_skips_malformed_bar_missing_timestamp():
+    malformed = {"o": "1", "h": "1", "l": "1", "c": "1", "v": 1}  # no "t"
+    good = _bar("2026-09-27T14:00:00Z", "150.00")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"bars": {"AAPL": [malformed, good]}})
+
+    md, _, _ = _marketdata(handler)
+    bars = await md.bars("AAPL")
+    assert len(bars) == 1
+    assert bars[0].t == "2026-09-27T14:00:00Z"
+
+
+async def test_bars_skips_malformed_bar_missing_price_field():
+    malformed = {"t": "2026-09-27T13:00:00Z", "o": "1", "h": "1", "l": "1", "v": 1}  # no "c"
+    good = _bar("2026-09-27T14:00:00Z", "150.00")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"bars": {"AAPL": [malformed, good]}})
+
+    md, _, _ = _marketdata(handler)
+    bars = await md.bars("AAPL")
+    assert len(bars) == 1
+    assert bars[0].t == "2026-09-27T14:00:00Z"
+
+
 # --- news --------------------------------------------------------------------------
 
 
@@ -285,6 +338,26 @@ async def test_news_no_results_is_not_an_error():
     result = await md.news("session-1", evidence)
     assert result.is_error is False
     assert result.sources == []
+
+
+async def test_news_publisher_uses_sanitized_source():
+    payload = {
+        "news": [
+            {
+                "headline": "Headline",
+                "summary": "Summary",
+                "source": "<script>evil()</script>benzinga",
+                "created_at": "2026-09-27T12:00:00Z",
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    md, _, evidence = _marketdata(handler)
+    result = await md.news("session-1", evidence)
+    assert result.sources[0].publisher == "benzinga"
 
 
 # --- movers / most_actives ---------------------------------------------------------

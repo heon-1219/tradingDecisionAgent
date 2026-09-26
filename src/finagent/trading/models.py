@@ -17,10 +17,36 @@ enums - keep additions here tidy so that later diff stays reviewable.
 """
 from __future__ import annotations
 
+import re
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# US-equity ticker: letters/digits/dot/hyphen, 1-15 chars, after upper-casing. Deliberately does
+# not allow "/" (would admit crypto pairs, out of scope for v1, and "/" is exactly what a path-
+# traversal payload like "../etc" or "a/b" needs if the symbol is ever interpolated into a URL
+# path segment - see broker.py's `asset()`).
+_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Upper-case and strictly validate a ticker symbol. Raises `ValueError` for anything that
+    doesn't match `_SYMBOL_RE` - including path-traversal attempts ("../positions", "a/b") and
+    percent-encoded tricks ("%2e%2e") - since callers may use the result to build a URL path
+    segment (`broker.asset`) as well as an order body field."""
+    upper = (symbol or "").upper()
+    if not _SYMBOL_RE.match(upper):
+        raise ValueError(f"invalid symbol: {symbol!r}")
+    return upper
+
+
+def _reject_float(v: Any) -> Any:
+    """Before-validator for money fields: `float` is never accepted (money is `Decimal`), but
+    `Decimal`, `int` and `str` all pass through unchanged for pydantic's own Decimal coercion."""
+    if isinstance(v, float):
+        raise ValueError("float is not allowed for a money field; use Decimal, int, or str.")
+    return v
 
 
 class _AlpacaSnapshot(BaseModel):
@@ -120,7 +146,14 @@ class Bar(BaseModel):
 class OrderLeg(BaseModel):
     """One order to submit via `AlpacaPaper.submit_order`. Exactly one of `qty`/`notional` must be
     given, and it must be positive - this is the shape the broker sends to Alpaca, not a response
-    it parses, so unknown fields are rejected rather than ignored."""
+    it parses, so unknown fields are rejected rather than ignored.
+
+    Money fields never accept a raw `float` (`_reject_float`): only `Decimal`, `int` or `str`, so
+    a caller can't smuggle in binary floating-point imprecision. `limit_price` must be present
+    (and positive) exactly when `type == "limit"`, absent for `type == "market"`; a `notional`
+    (fractional/dollar-based) order can only be a `market` `day` order, matching Alpaca's own
+    rule that notional orders don't support `limit` or `gtc`.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -135,14 +168,31 @@ class OrderLeg(BaseModel):
     @field_validator("symbol")
     @classmethod
     def _upper_symbol(cls, v: str) -> str:
-        return v.upper()
+        return normalize_symbol(v)
+
+    @field_validator("qty", "notional", "limit_price", mode="before")
+    @classmethod
+    def _no_float(cls, v: Any) -> Any:
+        return _reject_float(v)
 
     @model_validator(mode="after")
-    def _exactly_one_positive_quantity(self) -> "OrderLeg":
+    def _validate_quantity_and_price(self) -> "OrderLeg":
         if (self.qty is None) == (self.notional is None):
             raise ValueError("Exactly one of qty or notional must be set.")
         if self.qty is not None and self.qty <= 0:
             raise ValueError("qty must be positive.")
-        if self.notional is not None and self.notional <= 0:
-            raise ValueError("notional must be positive.")
+        if self.notional is not None:
+            if self.notional <= 0:
+                raise ValueError("notional must be positive.")
+            if self.type == "limit":
+                raise ValueError("a notional order cannot be a limit order.")
+            if self.time_in_force == "gtc":
+                raise ValueError("a notional order cannot use time_in_force=gtc.")
+        if self.type == "limit":
+            if self.limit_price is None:
+                raise ValueError("limit_price is required for a limit order.")
+            if self.limit_price <= 0:
+                raise ValueError("limit_price must be positive.")
+        elif self.limit_price is not None:
+            raise ValueError("limit_price is only allowed for a limit order.")
         return self

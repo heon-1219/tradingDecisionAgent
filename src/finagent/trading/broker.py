@@ -1,31 +1,60 @@
 """Alpaca paper-trading broker client.
 
 Hard guard, per the project's paper-only constraint: the trading host is always
-`paper-api.alpaca.markets`. No setting, environment variable or argument can change it - `__init__`
-asserts the host of any injected `httpx.AsyncClient` and refuses (`ValueError`) anything else, so
-even a test or a future caller cannot point this class at a live account by accident.
+`paper-api.alpaca.markets` over plain `https` on the default port. No setting, environment
+variable or argument can change it. This is enforced twice, not once:
+
+- `__init__` checks the *full origin* (scheme, host, port - not just `.host`) of any injected
+  `httpx.AsyncClient`, so `http://paper-api.alpaca.markets` (secret sent over plaintext) or
+  `https://paper-api.alpaca.markets:8080` is refused just as a wrong host would be.
+- `_request` re-checks the origin of every outgoing request, built explicitly via
+  `self._client.build_request(...)` and inspected *before* `send()`. This also catches a client
+  whose `base_url` was mutated after construction (`b._client.base_url = "https://api.alpaca..."`)
+  - a one-time constructor check alone cannot, since `base_url` is a plain mutable attribute.
+  `_request` also always sends with `follow_redirects=False`, overriding whatever the injected
+  client's own default is: an Alpaca (or a compromised transport) 3xx pointing anywhere else must
+  never cause this client to auto-follow and leak the secret headers to a different host - a
+  redirect is surfaced as an ordinary error response (see below) instead.
 
 No retries anywhere here, including reads: unlike `research.http.HttpClient` (which retries GETs
 against research connectors), this client is one attempt per call, errors mapped and raised. That
 keeps every method's behavior uniform and easy to reason about - and it is required for
 `submit_order`, since the project forbids blind order retries (a resubmitted order could double-
-fill). A transport error, timeout, or 5xx on `submit_order` raises `OrderUncertain`: the order may
-have reached Alpaca even though this call didn't get a confirmed response, so callers must
-reconcile via `get_order_by_client_id` rather than resubmit. Every other 4xx/5xx (including 422
-"client_order_id must be unique", which submit_order also uses this same 4xx path for) raises the
-plain `BrokerError`.
+fill).
+
+Response handling never lets an unparseable "success" escape as a raw exception (JSONDecodeError,
+pydantic ValidationError) - every path is mapped to `BrokerError`/`OrderUncertain`, so the
+confirmation flow can always reconcile instead of crashing:
+
+- A timeout/transport error, a 3xx (redirect), or a 5xx on `submit_order` raises `OrderUncertain`:
+  the order may have reached Alpaca even though this call didn't get a confirmed, parseable
+  response, so callers must reconcile via `get_order_by_client_id` rather than resubmit.
+- The same conditions on every other method raise `BrokerError` (nothing was submitted, so there
+  is nothing ambiguous to reconcile).
+- Every 4xx (including 422 "client_order_id must be unique" on `submit_order`) raises
+  `BrokerError`, never `OrderUncertain` - Alpaca rejected the request outright.
+- A 2xx response whose body isn't valid JSON, or is JSON but fails to validate against the
+  expected snapshot model, is treated exactly like a 5xx: `OrderUncertain` from `submit_order`,
+  `BrokerError` everywhere else.
 
 Every request carries `APCA-API-KEY-ID`/`APCA-API-SECRET-KEY` headers built once in `__init__` and
 passed explicitly on each call (never relying on a client's own default headers); logging here
-never includes headers or request/response bodies containing the secret, only method+path.
+never includes headers or request/response bodies containing the secret, only method+path. Every
+value that becomes part of a URL path segment (`order_id`, `symbol`) is validated against a strict
+allowlist pattern *before* any request is attempted, and additionally percent-encoded - defense in
+depth against path injection (e.g. an `order_id` of `"../positions"` resolving, via httpx's own
+dot-segment normalization, to `DELETE /v2/positions` instead of a single order).
 """
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from .models import (
     AccountSnapshot,
@@ -34,16 +63,25 @@ from .models import (
     OrderLeg,
     OrderSnapshot,
     PositionSnapshot,
+    normalize_symbol,
 )
 
 logger = logging.getLogger(__name__)
 
 PAPER_BASE = "https://paper-api.alpaca.markets"
 _PAPER_HOST = "paper-api.alpaca.markets"
+_PAPER_SCHEME = "https"
+_PAPER_PORTS = (None, 443)  # None = default https port (not written out in the URL)
+
+# Alpaca order ids are UUIDs (canonical, dashed, lower/upper hex); client_order_id is our own
+# caller-chosen token. Both are validated before ever building a URL/query with them.
+_ORDER_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class BrokerError(Exception):
-    """Raised for any 4xx/5xx Alpaca response outside `submit_order`'s uncertain-outcome cases."""
+    """Raised for any 4xx/5xx/3xx Alpaca response, transport failure, or unparseable "success"
+    body, outside `submit_order`'s uncertain-outcome cases."""
 
     def __init__(self, status: int, code: int | None, message: str):
         super().__init__(f"Alpaca broker error {status}: {message}")
@@ -53,10 +91,11 @@ class BrokerError(Exception):
 
 
 class OrderUncertain(BrokerError):
-    """Raised only by `submit_order`, only for a timeout/transport error or a 5xx: the order MAY
-    have reached Alpaca despite this call not getting a confirmed response. Callers must reconcile
-    with `get_order_by_client_id`, never resubmit blindly. `status` is 0 for a transport error
-    (no response was ever received to have a status)."""
+    """Raised only by `submit_order`, for anything that isn't a clean, validated 2xx: a timeout/
+    transport error, a 3xx, a 5xx, an unparseable body, or a body that fails snapshot validation.
+    In every one of those cases the order MAY have reached Alpaca despite this call not getting a
+    usable response. Callers must reconcile with `get_order_by_client_id`, never resubmit blindly.
+    `status` is 0 for a transport error (no response was ever received to have a status)."""
 
 
 def _decimal_str(d: Decimal) -> str:
@@ -83,16 +122,31 @@ def _error_details(resp: httpx.Response) -> tuple[int | None, str]:
     return None, _body_excerpt(resp.text)
 
 
+def _validate_order_id(order_id: str) -> str:
+    if not isinstance(order_id, str) or not _ORDER_ID_RE.match(order_id):
+        raise ValueError(f"invalid order_id (must be a UUID): {order_id!r}")
+    return order_id
+
+
+def _validate_client_order_id(client_order_id: str) -> str:
+    if not isinstance(client_order_id, str) or not _CLIENT_ORDER_ID_RE.match(client_order_id):
+        raise ValueError(f"invalid client_order_id: {client_order_id!r}")
+    return client_order_id
+
+
+def _is_paper_origin(url: httpx.URL) -> bool:
+    return url.scheme == _PAPER_SCHEME and url.host == _PAPER_HOST and url.port in _PAPER_PORTS
+
+
 class AlpacaPaper:
     def __init__(self, key_id: str, secret: str, client: httpx.AsyncClient | None = None):
         if not key_id or not secret:
             raise ValueError("Alpaca key_id and secret are both required.")
         if client is not None:
-            host = client.base_url.host
-            if host != _PAPER_HOST:
+            if not _is_paper_origin(client.base_url):
                 raise ValueError(
-                    f"AlpacaPaper only talks to {_PAPER_HOST!r} (paper trading); got a client "
-                    f"whose base_url host is {host!r}."
+                    f"AlpacaPaper only talks to {PAPER_BASE!r} (paper trading, https, default "
+                    f"port); got a client whose base_url is {str(client.base_url)!r}."
                 )
             self._client = client
         else:
@@ -112,36 +166,68 @@ class AlpacaPaper:
         uncertain_on_failure: bool = False,
     ) -> httpx.Response:
         logger.debug("%s %s", method, path)
-        try:
-            resp = await self._client.request(
-                method, path, params=params, json=json, headers=self._headers
+        exc_cls = OrderUncertain if uncertain_on_failure else BrokerError
+
+        request = self._client.build_request(method, path, params=params, json=json, headers=self._headers)
+        if not _is_paper_origin(request.url):
+            # Catches a base_url mutated after construction (or any other way a built request
+            # could end up pointed somewhere else): re-checked on every call, not just at
+            # __init__, since base_url is a plain mutable attribute on the client.
+            raise ValueError(
+                f"Refusing to send a trading request to a non-paper origin: {request.url!r}"
             )
+        try:
+            # follow_redirects=False overrides the client's own default: a 3xx must never be
+            # auto-followed (which could send the secret headers to whatever host Location
+            # points at) - it is surfaced below as an ordinary error response instead.
+            resp = await self._client.send(request, follow_redirects=False)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             message = f"{type(exc).__name__}: {exc}"
-            if uncertain_on_failure:
-                raise OrderUncertain(0, None, message) from None
-            raise BrokerError(0, None, message) from None
+            raise exc_cls(0, None, message) from None
 
-        if resp.status_code >= 500:
+        if resp.status_code >= 500 or 300 <= resp.status_code < 400:
             code, message = _error_details(resp)
-            if uncertain_on_failure:
-                raise OrderUncertain(resp.status_code, code, message)
-            raise BrokerError(resp.status_code, code, message)
+            raise exc_cls(resp.status_code, code, message)
         if resp.status_code >= 400:
+            # Always BrokerError, even from submit_order: Alpaca rejected the request outright
+            # (e.g. 422 duplicate client_order_id, 403 insufficient buying power), so this is not
+            # an ambiguous "may have reached Alpaca" case.
             code, message = _error_details(resp)
             raise BrokerError(resp.status_code, code, message)
         return resp
+
+    def _parse_json(self, resp: httpx.Response, *, uncertain_on_failure: bool) -> Any:
+        try:
+            return resp.json()
+        except ValueError:
+            exc_cls = OrderUncertain if uncertain_on_failure else BrokerError
+            message = f"{_body_excerpt(resp.text)} (invalid JSON)"
+            raise exc_cls(resp.status_code, None, message) from None
+
+    def _validate_model(
+        self, model: type[BaseModel], data: Any, resp: httpx.Response, *, uncertain_on_failure: bool
+    ) -> Any:
+        try:
+            return model.model_validate(data)
+        except ValidationError as exc:
+            exc_cls = OrderUncertain if uncertain_on_failure else BrokerError
+            message = f"{_body_excerpt(str(exc), 300)} (response failed validation)"
+            raise exc_cls(resp.status_code, None, message) from None
 
     # --- reads --------------------------------------------------------------------
 
     async def account(self) -> AccountSnapshot:
         resp = await self._request("GET", "/v2/account")
-        return AccountSnapshot.model_validate(resp.json())
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return self._validate_model(AccountSnapshot, data, resp, uncertain_on_failure=False)
 
     async def positions(self) -> dict[str, PositionSnapshot]:
         resp = await self._request("GET", "/v2/positions")
-        items = resp.json() or []
-        snapshots = [PositionSnapshot.model_validate(item) for item in items]
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        snapshots = [
+            self._validate_model(PositionSnapshot, item, resp, uncertain_on_failure=False)
+            for item in (data or [])
+        ]
         return {s.symbol: s for s in snapshots}
 
     async def orders(
@@ -151,21 +237,31 @@ class AlpacaPaper:
         if symbols:
             params["symbols"] = ",".join(symbols)
         resp = await self._request("GET", "/v2/orders", params=params)
-        return [OrderSnapshot.model_validate(o) for o in (resp.json() or [])]
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return [
+            self._validate_model(OrderSnapshot, o, resp, uncertain_on_failure=False)
+            for o in (data or [])
+        ]
 
     async def asset(self, symbol: str) -> AssetInfo:
-        resp = await self._request("GET", f"/v2/assets/{symbol}")
-        return AssetInfo.model_validate(resp.json())
+        symbol = normalize_symbol(symbol)
+        resp = await self._request("GET", f"/v2/assets/{quote(symbol, safe='')}")
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return self._validate_model(AssetInfo, data, resp, uncertain_on_failure=False)
 
     async def clock(self) -> ClockInfo:
         resp = await self._request("GET", "/v2/clock")
-        return ClockInfo.model_validate(resp.json())
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return self._validate_model(ClockInfo, data, resp, uncertain_on_failure=False)
 
     async def get_order(self, order_id: str) -> OrderSnapshot:
-        resp = await self._request("GET", f"/v2/orders/{order_id}")
-        return OrderSnapshot.model_validate(resp.json())
+        order_id = _validate_order_id(order_id)
+        resp = await self._request("GET", f"/v2/orders/{quote(order_id, safe='')}")
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return self._validate_model(OrderSnapshot, data, resp, uncertain_on_failure=False)
 
     async def get_order_by_client_id(self, client_order_id: str) -> OrderSnapshot | None:
+        client_order_id = _validate_client_order_id(client_order_id)
         try:
             resp = await self._request(
                 "GET",
@@ -176,14 +272,17 @@ class AlpacaPaper:
             if exc.status == 404:
                 return None
             raise
-        return OrderSnapshot.model_validate(resp.json())
+        data = self._parse_json(resp, uncertain_on_failure=False)
+        return self._validate_model(OrderSnapshot, data, resp, uncertain_on_failure=False)
 
     # --- writes -------------------------------------------------------------------
 
     async def submit_order(self, leg: OrderLeg, client_order_id: str) -> OrderSnapshot:
         """Exactly one POST /v2/orders. See the module docstring for the error-mapping contract:
-        a timeout/transport error/5xx raises OrderUncertain, everything else (including 422
-        duplicate client_order_id, 403 insufficient buying power, ...) raises BrokerError."""
+        a timeout/transport error/3xx/5xx/unparseable-or-invalid 2xx body raises OrderUncertain;
+        every 4xx (including 422 duplicate client_order_id, 403 insufficient buying power, ...)
+        raises BrokerError."""
+        client_order_id = _validate_client_order_id(client_order_id)
         body: dict[str, Any] = {
             "symbol": leg.symbol,
             "side": leg.side,
@@ -196,16 +295,16 @@ class AlpacaPaper:
         else:
             assert leg.notional is not None  # OrderLeg guarantees exactly one is set
             body["notional"] = _decimal_str(leg.notional)
-        if leg.type == "limit":
-            if leg.limit_price is None:
-                raise ValueError("limit_price is required for a limit order.")
+        if leg.limit_price is not None:  # OrderLeg guarantees this iff type == "limit"
             body["limit_price"] = _decimal_str(leg.limit_price)
 
         resp = await self._request("POST", "/v2/orders", json=body, uncertain_on_failure=True)
-        return OrderSnapshot.model_validate(resp.json())
+        data = self._parse_json(resp, uncertain_on_failure=True)
+        return self._validate_model(OrderSnapshot, data, resp, uncertain_on_failure=True)
 
     async def cancel_order(self, order_id: str) -> None:
-        await self._request("DELETE", f"/v2/orders/{order_id}")
+        order_id = _validate_order_id(order_id)
+        await self._request("DELETE", f"/v2/orders/{quote(order_id, safe='')}")
 
     async def set_suspend_trade(self, suspended: bool) -> None:
         await self._request(

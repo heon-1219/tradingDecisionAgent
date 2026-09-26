@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from finagent.trading.broker import PAPER_BASE, AlpacaPaper, BrokerError, OrderUncertain
 from finagent.trading.models import OrderLeg
@@ -220,8 +221,10 @@ async def test_clock_parses():
 # --- submit_order ----------------------------------------------------------------
 
 
+ORDER_ID = "5f2c9a1e-2b3c-4d4e-9f5a-6b7c8d9e0f1a"
+
 ORDER_RESPONSE = {
-    "id": "order-abc",
+    "id": ORDER_ID,
     "client_order_id": "coid-abc",
     "symbol": "AAPL",
     "side": "buy",
@@ -265,7 +268,7 @@ async def test_submit_order_sends_client_order_id_and_decimal_strings_no_exponen
     assert "e" not in body["qty"].lower()
     assert "extended_hours" not in body
     assert "order_class" not in body
-    assert order.id == "order-abc"
+    assert order.id == ORDER_ID
 
 
 async def test_submit_order_with_notional_sends_notional_not_qty():
@@ -355,12 +358,12 @@ async def test_submit_order_403_insufficient_buying_power_maps_to_brokererror():
 
 async def test_get_order_by_id():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v2/orders/order-abc"
+        assert request.url.path == f"/v2/orders/{ORDER_ID}"
         return httpx.Response(200, json=ORDER_RESPONSE)
 
     b, _ = _broker(handler)
-    order = await b.get_order("order-abc")
-    assert order.id == "order-abc"
+    order = await b.get_order(ORDER_ID)
+    assert order.id == ORDER_ID
 
 
 async def test_get_order_by_client_id_found():
@@ -387,11 +390,11 @@ async def test_get_order_by_client_id_returns_none_on_404():
 async def test_cancel_order_issues_delete():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
-        assert request.url.path == "/v2/orders/order-abc"
+        assert request.url.path == f"/v2/orders/{ORDER_ID}"
         return httpx.Response(204)
 
     b, calls = _broker(handler)
-    result = await b.cancel_order("order-abc")
+    result = await b.cancel_order(ORDER_ID)
     assert result is None
     assert calls
 
@@ -445,3 +448,229 @@ async def test_secret_never_appears_in_logs_for_reads(caplog):
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert FAKE_SECRET not in log_text
+
+
+# --- CRITICAL 1: path injection via order_id / symbol / client_order_id ----------
+
+
+VALID_ORDER_ID = "904837e3-3b76-47ec-b432-046db621571b"
+
+
+@pytest.mark.parametrize(
+    "bad_order_id", ["../positions", "", "a/b", "%2e%2e", "not-a-uuid", "x" * 300]
+)
+async def test_cancel_order_rejects_invalid_order_id(bad_order_id):
+    b, calls = _broker(lambda r: httpx.Response(204))
+    with pytest.raises(ValueError):
+        await b.cancel_order(bad_order_id)
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad_order_id", ["../positions", "", "a/b", "%2e%2e", "not-a-uuid"])
+async def test_get_order_rejects_invalid_order_id(bad_order_id):
+    b, calls = _broker(lambda r: httpx.Response(200, json=ORDER_RESPONSE))
+    with pytest.raises(ValueError):
+        await b.get_order(bad_order_id)
+    assert calls == []
+
+
+async def test_cancel_order_accepts_valid_uuid_and_percent_encodes_path():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v2/orders/{VALID_ORDER_ID}"
+        return httpx.Response(204)
+
+    b, calls = _broker(handler)
+    await b.cancel_order(VALID_ORDER_ID)
+    assert calls
+
+
+@pytest.mark.parametrize("bad_symbol", ["a/b", "../etc", "%2e%2e", "", "x" * 30])
+async def test_asset_rejects_invalid_symbol(bad_symbol):
+    b, calls = _broker(lambda r: httpx.Response(200, json={}))
+    with pytest.raises(ValueError):
+        await b.asset(bad_symbol)
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad_client_order_id", ["", "x" * 200, "has space", "semi;colon"])
+async def test_get_order_by_client_id_rejects_invalid_client_order_id(bad_client_order_id):
+    b, calls = _broker(lambda r: httpx.Response(200, json=ORDER_RESPONSE))
+    with pytest.raises(ValueError):
+        await b.get_order_by_client_id(bad_client_order_id)
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad_client_order_id", ["", "x" * 200, "has space", "semi;colon"])
+async def test_submit_order_rejects_invalid_client_order_id(bad_client_order_id):
+    b, calls = _broker(lambda r: httpx.Response(200, json=ORDER_RESPONSE))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(ValueError):
+        await b.submit_order(leg, bad_client_order_id)
+    assert calls == []
+
+
+# --- IMPORTANT 2: paper-guard hardening (origin, not just host; every request) ---
+
+
+async def test_constructor_refuses_http_scheme():
+    with pytest.raises(ValueError):
+        AlpacaPaper("k", "s", client=httpx.AsyncClient(base_url="http://paper-api.alpaca.markets"))
+
+
+async def test_constructor_refuses_non_standard_port():
+    with pytest.raises(ValueError):
+        AlpacaPaper(
+            "k", "s", client=httpx.AsyncClient(base_url="https://paper-api.alpaca.markets:8080")
+        )
+
+
+async def test_constructor_accepts_explicit_default_https_port():
+    client = httpx.AsyncClient(base_url="https://paper-api.alpaca.markets:443")
+    b = AlpacaPaper("k", "s", client=client)
+    assert b._client is client
+
+
+async def test_base_url_mutation_after_construction_is_refused_before_any_request():
+    b, calls = _broker(lambda r: httpx.Response(204))
+    b._client.base_url = "https://api.alpaca.markets"
+    with pytest.raises(ValueError):
+        await b.cancel_order(VALID_ORDER_ID)
+    assert calls == []
+
+
+async def test_redirect_is_never_followed_and_secret_never_reaches_other_host():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.host == "paper-api.alpaca.markets":
+            return httpx.Response(302, headers={"Location": "https://evil.example/steal"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(base_url=PAPER_BASE, transport=transport, follow_redirects=True)
+    b = AlpacaPaper("k", FAKE_SECRET, client=client)
+
+    with pytest.raises(BrokerError) as exc_info:
+        await b.clock()
+
+    assert exc_info.value.status == 302
+    assert len(calls) == 1  # the redirect was never followed
+    assert calls[0].url.host == "paper-api.alpaca.markets"
+    assert FAKE_SECRET not in str(exc_info.value)
+
+
+# --- IMPORTANT 3: 3xx / invalid-JSON / validation-failure never escape raw -------
+
+
+async def test_read_3xx_raises_brokererror_not_a_raw_exception():
+    b, _ = _broker(lambda r: httpx.Response(302, headers={"Location": "https://evil.example/"}))
+    with pytest.raises(BrokerError) as exc_info:
+        await b.clock()
+    assert exc_info.value.status == 302
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+async def test_submit_order_3xx_raises_order_uncertain():
+    b, _ = _broker(lambda r: httpx.Response(302, headers={"Location": "https://evil.example/"}))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain) as exc_info:
+        await b.submit_order(leg, client_order_id="coid-302")
+    assert exc_info.value.status == 302
+
+
+async def test_submit_order_200_non_json_raises_order_uncertain():
+    b, _ = _broker(lambda r: httpx.Response(200, text="<html>ok</html>"))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain):
+        await b.submit_order(leg, client_order_id="coid-badjson")
+
+
+async def test_submit_order_200_missing_fields_raises_order_uncertain():
+    b, _ = _broker(lambda r: httpx.Response(200, json={"id": "x"}))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain):
+        await b.submit_order(leg, client_order_id="coid-badshape")
+
+
+async def test_account_200_non_json_raises_brokererror_not_order_uncertain():
+    b, _ = _broker(lambda r: httpx.Response(200, text="<html>ok</html>"))
+    with pytest.raises(BrokerError) as exc_info:
+        await b.account()
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+async def test_account_200_missing_fields_raises_brokererror():
+    b, _ = _broker(lambda r: httpx.Response(200, json={"status": "ACTIVE"}))
+    with pytest.raises(BrokerError) as exc_info:
+        await b.account()
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+async def test_get_order_200_non_json_raises_brokererror():
+    b, _ = _broker(lambda r: httpx.Response(200, text="oops"))
+    with pytest.raises(BrokerError) as exc_info:
+        await b.get_order(VALID_ORDER_ID)
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+# --- Minor 4: OrderLeg validation hardening --------------------------------------
+
+
+def test_orderleg_rejects_float_qty():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL", side="buy", qty=0.1, type="market")
+
+
+def test_orderleg_rejects_float_notional():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL", side="buy", notional=100.0, type="market")
+
+
+def test_orderleg_rejects_float_limit_price():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="limit", limit_price=10.5)
+
+
+def test_orderleg_accepts_int_and_str_quantities():
+    assert OrderLeg(symbol="AAPL", side="buy", qty=1, type="market").qty == Decimal("1")
+    assert OrderLeg(symbol="AAPL", side="buy", qty="1.5", type="market").qty == Decimal("1.5")
+
+
+def test_orderleg_requires_limit_price_for_limit_order():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="limit")
+
+
+def test_orderleg_forbids_limit_price_for_market_order():
+    with pytest.raises(ValidationError):
+        OrderLeg(
+            symbol="AAPL", side="buy", qty=Decimal("1"), type="market", limit_price=Decimal("10")
+        )
+
+
+def test_orderleg_rejects_non_positive_limit_price():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="limit", limit_price=Decimal("0"))
+
+
+def test_orderleg_rejects_notional_with_limit_type():
+    with pytest.raises(ValidationError):
+        OrderLeg(
+            symbol="AAPL",
+            side="buy",
+            notional=Decimal("100"),
+            type="limit",
+            limit_price=Decimal("10"),
+        )
+
+
+def test_orderleg_rejects_notional_with_gtc_time_in_force():
+    with pytest.raises(ValidationError):
+        OrderLeg(
+            symbol="AAPL",
+            side="buy",
+            notional=Decimal("100"),
+            type="market",
+            time_in_force="gtc",
+        )
