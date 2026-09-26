@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
+from finagent.trading.models import OrderLeg
 from finagent.store.appdb import AppDB
 from finagent.trading.ledger import Ledger
 
@@ -13,6 +14,11 @@ D = Decimal
 def make_ledger() -> tuple[Ledger, AppDB]:
     db = AppDB(":memory:")
     return Ledger(db), db
+
+
+def _last_payload(db: AppDB) -> dict:
+    row = db.query("SELECT payload FROM ledger ORDER BY id DESC LIMIT 1")[0]
+    return json.loads(row["payload"])
 
 
 # --- append / redaction --------------------------------------------------------------------
@@ -108,6 +114,120 @@ def test_append_does_not_redact_unrelated_keys():
     ledger.append("sess-1", "note", {"symbol": "AAPL", "qty": D("1"), "side": "buy"})
     payload = json.loads(db.query("SELECT payload FROM ledger")[0]["payload"])
     assert payload == {"symbol": "AAPL", "qty": "1", "side": "buy"}
+
+
+def test_append_redacts_credential_and_cookie_keys():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "auth", {"credentials": "LEAK", "cookie": "LEAK", "Session-Cookie": "LEAK"})
+    payload = _last_payload(db)
+    assert payload == {"credentials": "[REDACTED]", "cookie": "[REDACTED]", "Session-Cookie": "[REDACTED]"}
+
+
+def test_append_redacts_underscore_and_alpaca_spelled_header_env_values():
+    ledger, db = make_ledger()
+    ledger.append(
+        "sess-1", "log",
+        {
+            "a": "env APCA_API_SECRET_KEY=shh",
+            "b": "env APCA_API_KEY_ID=shh",
+            "c": "env ALPACA_API_SECRET_KEY=shh",
+            "d": "env ALPACA_API_KEY_ID=shh",
+            "e": "no secret here",
+        },
+    )
+    payload = _last_payload(db)
+    assert payload["a"] == "[REDACTED]"
+    assert payload["b"] == "[REDACTED]"
+    assert payload["c"] == "[REDACTED]"
+    assert payload["d"] == "[REDACTED]"
+    assert payload["e"] == "no secret here"
+
+
+def test_append_redacts_secret_dicts_nested_inside_a_tuple():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "batch", {"items": ({"secret_key": "LEAK"},)})
+    payload = _last_payload(db)
+    assert payload == {"items": [{"secret_key": "[REDACTED]"}]}
+
+
+def test_append_redacts_a_header_represented_as_a_list_of_kv_pairs():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "request", {"headers": [("APCA-API-SECRET-KEY", "shh"), ("Accept", "json")]})
+    payload = _last_payload(db)
+    assert payload == {"headers": [["APCA-API-SECRET-KEY", "[REDACTED]"], ["Accept", "json"]]}
+
+
+def test_append_redacts_a_tuple_containing_a_header_like_string():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "log", {"log": ("APCA-API-SECRET-KEY: shh",)})
+    payload = _last_payload(db)
+    assert payload == {"log": ["[REDACTED]"]}
+
+
+def test_append_a_2_item_pair_without_a_matching_name_is_not_treated_as_kv():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"pair": ["side", "buy"]})
+    payload = _last_payload(db)
+    assert payload == {"pair": ["side", "buy"]}
+
+
+def test_append_never_raises_on_a_bytes_value():
+    ledger, db = make_ledger()
+    row_id = ledger.append("sess-1", "note", {"x": b"hello"})
+    assert isinstance(row_id, int)
+    payload = _last_payload(db)
+    assert payload == {"x": "<bytes len=5>"}
+
+
+def test_append_never_raises_on_a_non_str_dict_key():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {D("1"): "a"})
+    payload = _last_payload(db)
+    assert payload == {"1": "a"}
+
+
+def test_append_never_raises_on_mixed_key_types():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {1: "a", "b": 2})
+    payload = _last_payload(db)
+    assert payload == {"1": "a", "b": 2}
+
+
+def test_append_never_raises_on_a_set_value():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"x": {1, 2, 3}})
+    payload = _last_payload(db)
+    assert set(payload["x"]) == {1, 2, 3}
+
+
+def test_append_never_raises_on_a_pydantic_model_value_and_still_redacts_it():
+    ledger, db = make_ledger()
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=D("1"), type="market")
+    ledger.append("sess-1", "note", {"leg": leg})
+    payload = _last_payload(db)
+    assert payload["leg"]["symbol"] == "AAPL"
+    assert payload["leg"]["qty"] == "1"
+
+
+def test_append_never_raises_on_a_tuple_containing_a_decimal():
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "note", {"x": (D("1.5"),)})
+    payload = _last_payload(db)
+    assert payload == {"x": ["1.5"]}
+
+
+def test_append_falls_back_to_a_placeholder_when_redaction_itself_fails(monkeypatch):
+    import finagent.trading.ledger as ledger_module
+
+    def _boom(_value):
+        raise RuntimeError("simulated redaction bug")
+
+    monkeypatch.setattr(ledger_module, "_redact", _boom)
+    ledger, db = make_ledger()
+    row_id = ledger.append("sess-1", "note", {"symbol": "AAPL"})
+    assert isinstance(row_id, int)
+    payload = _last_payload(db)
+    assert payload == {"_ledger_error": "payload could not be serialized"}
 
 
 # --- export_jsonl ----------------------------------------------------------------------------
