@@ -47,9 +47,9 @@ _PUBLISHED_MAX_CHARS = 40
 
 # Hard cap on a fetched page's raw text, applied at ingestion - before caching and before any
 # stripping - independent of the caller's max_chars. Without this, strip_hidden_markup's
-# regex-based scan (and _focus_paragraphs' BM25 pass) would run synchronously over an unbounded
-# (multi-MB, or adversarially large) page on every fetch, and again on every focus_query re-slice
-# of the same cached raw_text, which can stall the event loop.
+# parsing pass (linear, but still per character) and _focus_paragraphs' BM25 pass would run
+# synchronously over an unbounded (multi-MB) page on every fetch, and again on every
+# focus_query re-slice of the same cached raw_text, which can stall the event loop.
 RAW_PAGE_MAX_CHARS = 500_000
 _PAGE_TRUNCATED_NOTICE = (
     " (note: the fetched page exceeded the size limit and was truncated before processing)"
@@ -113,9 +113,9 @@ def _hostname(url: str | None) -> str | None:
 
 
 def _bound_raw_page(text: str) -> tuple[str, bool]:
-    """Cap fetched page text at RAW_PAGE_MAX_CHARS. Pure length-based slicing (no regex), so it's
-    cheap even for a huge page, and it runs before strip_hidden_markup ever sees the text -
-    bounding the regex work that follows regardless of what focus_query/max_chars a caller passes.
+    """Cap fetched page text at RAW_PAGE_MAX_CHARS. Pure length-based slicing, so it's cheap
+    even for a huge page, and it runs before strip_hidden_markup ever sees the text - bounding
+    the work that follows regardless of what focus_query/max_chars a caller passes.
     Returns (bounded_text, was_truncated).
     """
     if len(text) <= RAW_PAGE_MAX_CHARS:

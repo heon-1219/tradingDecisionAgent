@@ -357,7 +357,7 @@ async def test_fetch_hidden_block_straddling_max_chars_boundary_does_not_leak():
 
     # Cut lands inside the hidden element's payload - after the opening tag, well before the
     # closing tag. This is the scenario the fix must handle: if truncation happened BEFORE
-    # stripping, the closing tag would already be gone by the time _HIDDEN_BLOCK_RE runs, and the
+    # stripping, the closing tag would already be gone by the time the stripper runs, and the
     # payload text up to the cut would leak as if it were visible.
     max_chars = len(prefix) + len(hidden_open) + 16
     assert max_chars < len(prefix) + len(hidden_open) + len(payload)  # sanity: still mid-payload
