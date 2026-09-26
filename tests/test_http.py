@@ -112,6 +112,18 @@ async def test_get_json_with_200_html_body_raises_http_error_not_json_decode_err
     assert "invalid JSON" in str(exc_info.value)
 
 
+async def test_post_json_with_200_html_body_raises_http_error_not_json_decode_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>Service unavailable, try again later</body></html>")
+
+    client = _client(handler)
+    with pytest.raises(HttpError) as exc_info:
+        await client.post_json("https://example.com/submit", json={"a": 1})
+
+    assert exc_info.value.status == 200
+    assert "invalid JSON" in str(exc_info.value)
+
+
 async def test_secret_header_value_never_logged(caplog):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True})

@@ -169,4 +169,9 @@ class HttpClient:
         resp = await self._client.post(url, json=json, headers=headers, timeout=timeout)
         if resp.status_code >= 400:
             raise HttpError(resp.status_code, resp.text)
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            # Same non-JSON-200 guard as get_json (see its comment): surface it as an HttpError
+            # rather than a raw json.JSONDecodeError so callers only ever guard one exception type.
+            raise HttpError(resp.status_code, f"{_body_excerpt(resp.text)} (invalid JSON)") from None
