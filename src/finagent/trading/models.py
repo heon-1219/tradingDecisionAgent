@@ -23,20 +23,28 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# US-equity ticker: letters/digits/dot/hyphen, 1-15 chars, after upper-casing. Deliberately does
-# not allow "/" (would admit crypto pairs, out of scope for v1, and "/" is exactly what a path-
-# traversal payload like "../etc" or "a/b" needs if the symbol is ever interpolated into a URL
-# path segment - see broker.py's `asset()`).
-_SYMBOL_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+# US-equity ticker: an alphanumeric first character, then up to 14 more of letters/digits/dot/
+# hyphen (1-15 chars total), after upper-casing. Two things keep this safe as a URL path segment
+# (see broker.py's `asset()`), neither alone sufficient:
+#  - no "/" (also keeps crypto pairs like "BTC/USD" out of scope for v1);
+#  - a mandatory leading alphanumeric, which is what actually rules out "." and "..": disallowing
+#    "/" does NOT stop a bare "." or ".." from being path-injected, since those resolve via
+#    ordinary URL dot-segment normalization (`/v2/assets/.` -> `/v2/assets`, `/v2/assets/..` ->
+#    `/v2`) without needing any "/" of their own inside the symbol string.
+# Matched with fullmatch (see normalize_symbol), not match/search: a plain re.match(pattern + "$")
+# would let a trailing "\n" through, since (outside MULTILINE) "$" is satisfied either at the
+# absolute end of the string or just before a trailing newline.
+_SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9.\-]{0,14}")
 
 
 def normalize_symbol(symbol: str) -> str:
     """Upper-case and strictly validate a ticker symbol. Raises `ValueError` for anything that
-    doesn't match `_SYMBOL_RE` - including path-traversal attempts ("../positions", "a/b") and
-    percent-encoded tricks ("%2e%2e") - since callers may use the result to build a URL path
-    segment (`broker.asset`) as well as an order body field."""
+    doesn't fullmatch `_SYMBOL_RE` - including path-traversal attempts ("../positions", "a/b",
+    bare "." / ".."), percent-encoded tricks ("%2e%2e"), and a trailing newline - since callers
+    may use the result to build a URL path segment (`broker.asset`, `marketdata.bars`) as well as
+    an order body field."""
     upper = (symbol or "").upper()
-    if not _SYMBOL_RE.match(upper):
+    if not _SYMBOL_RE.fullmatch(upper):
         raise ValueError(f"invalid symbol: {symbol!r}")
     return upper
 

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from finagent.trading.broker import PAPER_BASE, AlpacaPaper, BrokerError, OrderUncertain
-from finagent.trading.models import OrderLeg
+from finagent.trading.models import OrderLeg, normalize_symbol
 
 FAKE_SECRET = "s3cr3t-DISTINCTIVE-VALUE-do-not-leak-9f8e7d"
 
@@ -282,7 +282,9 @@ async def test_submit_order_with_notional_sends_notional_not_qty():
 
     b, _ = _broker(handler)
     leg = OrderLeg(symbol="AAPL", side="buy", notional=Decimal("500.50"), type="market")
-    await b.submit_order(leg, client_order_id="coid-xyz")
+    # client_order_id must match ORDER_RESPONSE's fixed "coid-abc" - submit_order now verifies
+    # the response echoes back the id that was actually submitted (see O3 in the fix-round report).
+    await b.submit_order(leg, client_order_id="coid-abc")
 
     body = bodies[0]
     # format(d, "f") preserves the Decimal's own precision (no exponent notation), rather than
@@ -674,3 +676,201 @@ def test_orderleg_rejects_notional_with_gtc_time_in_force():
             type="market",
             time_in_force="gtc",
         )
+
+
+def test_orderleg_rejects_symbol_with_trailing_newline():
+    with pytest.raises(ValidationError):
+        OrderLeg(symbol="AAPL\n", side="buy", qty=Decimal("1"), type="market")
+
+
+# --- Fix round 2 -------------------------------------------------------------
+#
+# N1: httpx.DecodingError (a RequestError, not a TransportError/TimeoutException) escaping raw.
+# N2: deeply nested JSON -> RecursionError escaping raw from _parse_json.
+# N3: a non-list JSON 200 body on positions()/orders() escaping a raw TypeError.
+# N4: allowlist regexes used re.match with "$", which accepts a trailing "\n".
+# N5: the symbol allowlist accepted dot/hyphen-only strings ("." / ".."), which resolve via
+#     httpx's own dot-segment URL normalization to the parent path even with no "/" involved.
+# O1: an injected client with custom auth or request/response event hooks can rewrite the
+#     request's URL, or re-send it, after this class's pre-send origin check has already passed.
+# O3: submit_order accepted a 2xx response whose client_order_id didn't match what was sent.
+
+
+# --- N1: httpx.RequestError (DecodingError included) never escapes raw --------------------
+
+
+def _gzip_mislabeled_response() -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
+        stream=httpx.ByteStream(b"this-is-not-gzip"),
+    )
+
+
+async def test_submit_order_decoding_error_raises_order_uncertain():
+    b, _ = _broker(lambda r: _gzip_mislabeled_response())
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain) as exc_info:
+        await b.submit_order(leg, client_order_id="coid-gzip")
+    assert FAKE_SECRET not in str(exc_info.value)
+
+
+async def test_account_decoding_error_raises_brokererror_not_order_uncertain():
+    b, _ = _broker(lambda r: _gzip_mislabeled_response())
+    with pytest.raises(BrokerError) as exc_info:
+        await b.account()
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+# --- N2: RecursionError from deeply nested JSON never escapes raw ---------------------------
+
+
+_DEEPLY_NESTED_JSON = b"[" * 200_000 + b"]" * 200_000
+
+
+async def test_submit_order_deeply_nested_json_raises_order_uncertain():
+    b, _ = _broker(lambda r: httpx.Response(200, content=_DEEPLY_NESTED_JSON))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain):
+        await b.submit_order(leg, client_order_id="coid-deep")
+
+
+async def test_account_deeply_nested_json_raises_brokererror():
+    b, _ = _broker(lambda r: httpx.Response(200, content=_DEEPLY_NESTED_JSON))
+    with pytest.raises(BrokerError) as exc_info:
+        await b.account()
+    assert not isinstance(exc_info.value, OrderUncertain)
+
+
+# --- N3: a non-list JSON body on positions()/orders() never raises a raw TypeError ----------
+
+
+@pytest.mark.parametrize("body", [b"123", b"true", b"1.5", b'{"a":1}', b'"abc"'])
+async def test_positions_non_list_json_raises_brokererror(body):
+    b, _ = _broker(lambda r: httpx.Response(200, content=body))
+    with pytest.raises(BrokerError):
+        await b.positions()
+
+
+@pytest.mark.parametrize("body", [b"123", b"true", b"1.5", b'{"a":1}', b'"abc"'])
+async def test_orders_non_list_json_raises_brokererror(body):
+    b, _ = _broker(lambda r: httpx.Response(200, content=body))
+    with pytest.raises(BrokerError):
+        await b.orders()
+
+
+async def test_positions_null_json_body_is_treated_as_empty():
+    b, _ = _broker(lambda r: httpx.Response(200, content=b"null"))
+    assert await b.positions() == {}
+
+
+async def test_orders_null_json_body_is_treated_as_empty():
+    b, _ = _broker(lambda r: httpx.Response(200, content=b"null"))
+    assert await b.orders() == []
+
+
+# --- N4/N5: fullmatch (no trailing-newline bypass) + symbols must start alphanumeric --------
+
+
+def test_normalize_symbol_rejects_trailing_newline():
+    with pytest.raises(ValueError):
+        normalize_symbol("AAPL\n")
+
+
+@pytest.mark.parametrize("bad_symbol", [".", "..", "...", "-", "--"])
+def test_normalize_symbol_rejects_dot_or_hyphen_only(bad_symbol):
+    with pytest.raises(ValueError):
+        normalize_symbol(bad_symbol)
+
+
+@pytest.mark.parametrize("good_symbol", ["AAPL", "BRK.B", "brk-b"])
+def test_normalize_symbol_still_accepts_valid_symbols(good_symbol):
+    result = normalize_symbol(good_symbol)
+    assert result == good_symbol.upper()
+
+
+@pytest.mark.parametrize("bad_symbol", [".", ".."])
+async def test_asset_rejects_dot_only_symbol(bad_symbol):
+    b, calls = _broker(lambda r: httpx.Response(200, json={}))
+    with pytest.raises(ValueError):
+        await b.asset(bad_symbol)
+    assert calls == []
+
+
+async def test_cancel_order_rejects_order_id_with_trailing_newline():
+    b, calls = _broker(lambda r: httpx.Response(204))
+    with pytest.raises(ValueError):
+        await b.cancel_order(VALID_ORDER_ID + "\n")
+    assert calls == []
+
+
+async def test_submit_order_rejects_client_order_id_with_trailing_newline():
+    b, calls = _broker(lambda r: httpx.Response(200, json=ORDER_RESPONSE))
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(ValueError):
+        await b.submit_order(leg, "coid\n")
+    assert calls == []
+
+
+# --- O1: an injected client with custom auth or event hooks is refused ----------------------
+
+
+def _client_with_transport(handler, **kw) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=PAPER_BASE, transport=httpx.MockTransport(handler), **kw)
+
+
+def test_constructor_refuses_client_with_custom_auth():
+    client = _client_with_transport(lambda r: httpx.Response(200, json={}), auth=("user", "pass"))
+    with pytest.raises(ValueError):
+        AlpacaPaper("k", "s", client=client)
+
+
+def test_constructor_refuses_client_with_request_event_hook():
+    async def hook(request):
+        pass
+
+    client = _client_with_transport(
+        lambda r: httpx.Response(200, json={}), event_hooks={"request": [hook]}
+    )
+    with pytest.raises(ValueError):
+        AlpacaPaper("k", "s", client=client)
+
+
+def test_constructor_refuses_client_with_response_event_hook():
+    async def hook(response):
+        pass
+
+    client = _client_with_transport(
+        lambda r: httpx.Response(200, json={}), event_hooks={"response": [hook]}
+    )
+    with pytest.raises(ValueError):
+        AlpacaPaper("k", "s", client=client)
+
+
+def test_constructor_accepts_client_with_no_auth_and_empty_event_hooks():
+    client = _client_with_transport(lambda r: httpx.Response(200, json={}))
+    b = AlpacaPaper("k", "s", client=client)
+    assert b._client is client
+
+
+# --- O3: submit_order rejects a 2xx response whose client_order_id doesn't match -----------
+
+
+async def test_submit_order_mismatched_client_order_id_raises_order_uncertain():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={**ORDER_RESPONSE, "client_order_id": "someone-elses-id"})
+
+    b, _ = _broker(handler)
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    with pytest.raises(OrderUncertain):
+        await b.submit_order(leg, client_order_id="coid-mine")
+
+
+async def test_submit_order_matching_client_order_id_still_succeeds():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={**ORDER_RESPONSE, "client_order_id": "coid-mine"})
+
+    b, _ = _broker(handler)
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=Decimal("1"), type="market")
+    order = await b.submit_order(leg, client_order_id="coid-mine")
+    assert order.client_order_id == "coid-mine"

@@ -12,9 +12,18 @@ variable or argument can change it. This is enforced twice, not once:
   whose `base_url` was mutated after construction (`b._client.base_url = "https://api.alpaca..."`)
   - a one-time constructor check alone cannot, since `base_url` is a plain mutable attribute.
   `_request` also always sends with `follow_redirects=False`, overriding whatever the injected
-  client's own default is: an Alpaca (or a compromised transport) 3xx pointing anywhere else must
-  never cause this client to auto-follow and leak the secret headers to a different host - a
-  redirect is surfaced as an ordinary error response (see below) instead.
+  client's own default is: an ordinary 3xx is surfaced as an error response (see below) rather
+  than auto-followed.
+- `__init__` additionally refuses an injected client that has a custom `auth` handler or any
+  `request`/`response` event hook configured. Both run *during* `send()`, after the origin check
+  above has already passed on the request as originally built, and either can rewrite the
+  request's URL to a different host before it's transmitted; a custom `auth` can go further and
+  re-send an entirely new request in response to the very redirect this class is trying to treat
+  as an error (httpx's `Auth.auth_flow` is a generator that may `yield` a second request after
+  inspecting the first response - independent of `follow_redirects`). What this class does *not*
+  and cannot defend against is an injected client using a custom low-level `Transport`: the
+  transport is the actual network boundary being trusted to send exactly the request it's given,
+  the same way any HTTP client trusts its transport - callers must not inject an untrusted one.
 
 No retries anywhere here, including reads: unlike `research.http.HttpClient` (which retries GETs
 against research connectors), this client is one attempt per call, errors mapped and raised. That
@@ -22,28 +31,39 @@ keeps every method's behavior uniform and easy to reason about - and it is requi
 `submit_order`, since the project forbids blind order retries (a resubmitted order could double-
 fill).
 
-Response handling never lets an unparseable "success" escape as a raw exception (JSONDecodeError,
-pydantic ValidationError) - every path is mapped to `BrokerError`/`OrderUncertain`, so the
+Response handling never lets an unparseable "success" (or a request that failed in a way that
+isn't a clean HTTP error status) escape as a raw exception (`httpx.RequestError` - which includes
+`TimeoutException`, `TransportError`, `TooManyRedirects` *and* `DecodingError`, e.g. a mislabeled
+`Content-Encoding` - `json.JSONDecodeError`, `RecursionError` on pathologically deep JSON, or a
+pydantic `ValidationError`) - every path is mapped to `BrokerError`/`OrderUncertain`, so the
 confirmation flow can always reconcile instead of crashing:
 
-- A timeout/transport error, a 3xx (redirect), or a 5xx on `submit_order` raises `OrderUncertain`:
-  the order may have reached Alpaca even though this call didn't get a confirmed, parseable
-  response, so callers must reconcile via `get_order_by_client_id` rather than resubmit.
+- A request error (timeout/transport/decoding failure), a 3xx (redirect), or a 5xx on
+  `submit_order` raises `OrderUncertain`: the order may have reached Alpaca even though this call
+  didn't get a confirmed, parseable response, so callers must reconcile via
+  `get_order_by_client_id` rather than resubmit. So does a 2xx whose parsed `client_order_id`
+  doesn't match the one just submitted - Alpaca returning *some* order snapshot that isn't
+  provably the one this call submitted is exactly the "reconcile, don't trust it blindly" case.
 - The same conditions on every other method raise `BrokerError` (nothing was submitted, so there
   is nothing ambiguous to reconcile).
 - Every 4xx (including 422 "client_order_id must be unique" on `submit_order`) raises
   `BrokerError`, never `OrderUncertain` - Alpaca rejected the request outright.
-- A 2xx response whose body isn't valid JSON, or is JSON but fails to validate against the
-  expected snapshot model, is treated exactly like a 5xx: `OrderUncertain` from `submit_order`,
+- A 2xx response whose body isn't valid JSON, is JSON but fails to validate against the expected
+  snapshot model, or (for the list endpoints `positions`/`orders`) is validly-shaped JSON that
+  just isn't a list, is treated exactly like a 5xx: `OrderUncertain` from `submit_order`,
   `BrokerError` everywhere else.
 
 Every request carries `APCA-API-KEY-ID`/`APCA-API-SECRET-KEY` headers built once in `__init__` and
 passed explicitly on each call (never relying on a client's own default headers); logging here
 never includes headers or request/response bodies containing the secret, only method+path. Every
-value that becomes part of a URL path segment (`order_id`, `symbol`) is validated against a strict
-allowlist pattern *before* any request is attempted, and additionally percent-encoded - defense in
-depth against path injection (e.g. an `order_id` of `"../positions"` resolving, via httpx's own
-dot-segment normalization, to `DELETE /v2/positions` instead of a single order).
+value that becomes part of a URL path segment (`order_id`, `symbol`) or a query/body value
+(`client_order_id`) is checked with `re.fullmatch` (not `re.match`, which would let a trailing
+`"\n"` slip through a `$`-anchored pattern) against a strict allowlist *before* any request is
+attempted, and a path segment is additionally percent-encoded - defense in depth against path
+injection. The symbol pattern also requires a leading alphanumeric character: disallowing `"/"` is
+not by itself enough to stop a `"."`/`".."` segment from being path-injected, since those resolve
+via ordinary URL dot-segment normalization (`/v2/assets/.` -> `/v2/assets`, `/v2/assets/..` ->
+`/v2`) with no `/` of their own needed in the *symbol* string.
 """
 from __future__ import annotations
 
@@ -74,9 +94,12 @@ _PAPER_SCHEME = "https"
 _PAPER_PORTS = (None, 443)  # None = default https port (not written out in the URL)
 
 # Alpaca order ids are UUIDs (canonical, dashed, lower/upper hex); client_order_id is our own
-# caller-chosen token. Both are validated before ever building a URL/query with them.
-_ORDER_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-_CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+# caller-chosen token. Both are validated (via re.fullmatch - see _validate_order_id/
+# _validate_client_order_id) before ever building a URL/query with them. NOTE: these patterns are
+# matched with fullmatch, not match/search, so the trailing "$" cannot be satisfied by stopping
+# just before a trailing "\n" the way plain re.match(pattern + "$") would allow.
+_ORDER_ID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_CLIENT_ORDER_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 class BrokerError(Exception):
@@ -123,13 +146,13 @@ def _error_details(resp: httpx.Response) -> tuple[int | None, str]:
 
 
 def _validate_order_id(order_id: str) -> str:
-    if not isinstance(order_id, str) or not _ORDER_ID_RE.match(order_id):
+    if not isinstance(order_id, str) or not _ORDER_ID_RE.fullmatch(order_id):
         raise ValueError(f"invalid order_id (must be a UUID): {order_id!r}")
     return order_id
 
 
 def _validate_client_order_id(client_order_id: str) -> str:
-    if not isinstance(client_order_id, str) or not _CLIENT_ORDER_ID_RE.match(client_order_id):
+    if not isinstance(client_order_id, str) or not _CLIENT_ORDER_ID_RE.fullmatch(client_order_id):
         raise ValueError(f"invalid client_order_id: {client_order_id!r}")
     return client_order_id
 
@@ -147,6 +170,19 @@ class AlpacaPaper:
                 raise ValueError(
                     f"AlpacaPaper only talks to {PAPER_BASE!r} (paper trading, https, default "
                     f"port); got a client whose base_url is {str(client.base_url)!r}."
+                )
+            if client.auth is not None:
+                raise ValueError(
+                    "AlpacaPaper refuses a client with a custom auth handler: it runs during "
+                    "send(), after this class's origin check has already passed, and could "
+                    "rewrite the request's URL or re-send it to a different host."
+                )
+            hooks = client.event_hooks or {}
+            if hooks.get("request") or hooks.get("response"):
+                raise ValueError(
+                    "AlpacaPaper refuses a client with request/response event hooks: they run "
+                    "during send(), after this class's origin check has already passed, and "
+                    "could rewrite the request's URL."
                 )
             self._client = client
         else:
@@ -181,7 +217,11 @@ class AlpacaPaper:
             # auto-followed (which could send the secret headers to whatever host Location
             # points at) - it is surfaced below as an ordinary error response instead.
             resp = await self._client.send(request, follow_redirects=False)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+        except httpx.RequestError as exc:
+            # httpx.RequestError is the common base of TimeoutException, TransportError,
+            # TooManyRedirects AND DecodingError (a mislabeled/corrupt Content-Encoding raises
+            # DecodingError while send() reads the body - it is a RequestError, not a
+            # TransportError, so catching only the latter two would miss it).
             message = f"{type(exc).__name__}: {exc}"
             raise exc_cls(0, None, message) from None
 
@@ -199,7 +239,10 @@ class AlpacaPaper:
     def _parse_json(self, resp: httpx.Response, *, uncertain_on_failure: bool) -> Any:
         try:
             return resp.json()
-        except ValueError:
+        except (ValueError, RecursionError):
+            # ValueError: json.JSONDecodeError (malformed JSON). RecursionError: pathologically
+            # deep nesting can blow the interpreter's recursion limit while decoding - still an
+            # "unusable body", not a crash we want escaping this method.
             exc_cls = OrderUncertain if uncertain_on_failure else BrokerError
             message = f"{_body_excerpt(resp.text)} (invalid JSON)"
             raise exc_cls(resp.status_code, None, message) from None
@@ -214,6 +257,19 @@ class AlpacaPaper:
             message = f"{_body_excerpt(str(exc), 300)} (response failed validation)"
             raise exc_cls(resp.status_code, None, message) from None
 
+    def _expect_list(self, data: Any, resp: httpx.Response, *, uncertain_on_failure: bool) -> list:
+        """positions()/orders() require a JSON array; a `None` body (Alpaca sending literal
+        `null`) is treated as empty, but any other non-list shape (a scalar, a string, or a dict -
+        all of which are silently iterable in Python and would otherwise produce a raw TypeError
+        or iterate over the wrong thing, e.g. a dict's keys) is an error."""
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            exc_cls = OrderUncertain if uncertain_on_failure else BrokerError
+            message = f"expected a JSON array, got {type(data).__name__}"
+            raise exc_cls(resp.status_code, None, message)
+        return data
+
     # --- reads --------------------------------------------------------------------
 
     async def account(self) -> AccountSnapshot:
@@ -224,9 +280,10 @@ class AlpacaPaper:
     async def positions(self) -> dict[str, PositionSnapshot]:
         resp = await self._request("GET", "/v2/positions")
         data = self._parse_json(resp, uncertain_on_failure=False)
+        items = self._expect_list(data, resp, uncertain_on_failure=False)
         snapshots = [
             self._validate_model(PositionSnapshot, item, resp, uncertain_on_failure=False)
-            for item in (data or [])
+            for item in items
         ]
         return {s.symbol: s for s in snapshots}
 
@@ -238,9 +295,10 @@ class AlpacaPaper:
             params["symbols"] = ",".join(symbols)
         resp = await self._request("GET", "/v2/orders", params=params)
         data = self._parse_json(resp, uncertain_on_failure=False)
+        items = self._expect_list(data, resp, uncertain_on_failure=False)
         return [
             self._validate_model(OrderSnapshot, o, resp, uncertain_on_failure=False)
-            for o in (data or [])
+            for o in items
         ]
 
     async def asset(self, symbol: str) -> AssetInfo:
@@ -300,7 +358,18 @@ class AlpacaPaper:
 
         resp = await self._request("POST", "/v2/orders", json=body, uncertain_on_failure=True)
         data = self._parse_json(resp, uncertain_on_failure=True)
-        return self._validate_model(OrderSnapshot, data, resp, uncertain_on_failure=True)
+        order = self._validate_model(OrderSnapshot, data, resp, uncertain_on_failure=True)
+        if order.client_order_id != client_order_id:
+            # A 2xx body that doesn't echo back the client_order_id we just sent isn't provably
+            # the order this call submitted - treat it exactly like any other uncertain outcome
+            # rather than trusting it: reconcile via get_order_by_client_id.
+            raise OrderUncertain(
+                resp.status_code,
+                None,
+                f"Alpaca returned client_order_id {order.client_order_id!r}, expected "
+                f"{client_order_id!r}; reconcile via get_order_by_client_id.",
+            )
+        return order
 
     async def cancel_order(self, order_id: str) -> None:
         order_id = _validate_order_id(order_id)
