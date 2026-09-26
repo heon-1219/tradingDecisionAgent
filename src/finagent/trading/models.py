@@ -18,10 +18,19 @@ enums - keep additions here tidy so that later diff stays reviewable.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 # US-equity ticker: an alphanumeric first character, then up to 14 more of letters/digits/dot/
 # hyphen (1-15 chars total), after upper-casing. Two things keep this safe as a URL path segment
@@ -203,4 +212,205 @@ class OrderLeg(BaseModel):
                 raise ValueError("limit_price must be positive.")
         elif self.limit_price is not None:
             raise ValueError("limit_price is only allowed for a limit order.")
+        return self
+
+
+class Mandate(BaseModel):
+    """The user-approved trading constraints in effect for a session - everything downstream
+    (risk rules, ticket proposals) is bounded by these fields, never by a value the model invents.
+
+    `allow_symbols`/`deny_symbols` are normalized the same way `OrderLeg.symbol` is (upper-cased,
+    validated by `normalize_symbol`, deduplicated while preserving first-seen order), since they
+    gate exactly those symbols. Percent fields are bounded to `(0, 100]`, except `cash_buffer_pct`
+    which may also be `0`. `budget_usd`/`max_order_usd` must be positive when set (`None` means
+    "no cap" and is left alone). `order_types` must be non-empty.
+
+    Decimal fields already serialize as JSON strings by pydantic v2's own default (verified
+    against the installed version) and round-trip back to the exact same `Decimal` via
+    `model_validate_json` - the `field_serializer` below just pins that behavior explicitly rather
+    than relying on it silently, per the project's "money is Decimal, never float" constraint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    direction_text: str = ""
+    budget_usd: Decimal | None = Field(default=None, gt=0)
+    universe: Literal["us_equity"] = "us_equity"
+    allow_symbols: list[str] = []
+    deny_symbols: list[str] = []
+    max_position_pct: Decimal = Field(default=Decimal("20"), gt=0, le=100)
+    max_positions: int = Field(default=8, ge=1)
+    cash_buffer_pct: Decimal = Field(default=Decimal("5"), ge=0, le=100)
+    horizon: str = "weeks to months"
+    order_types: list[Literal["market", "limit"]] = ["limit", "market"]
+    max_orders_per_day: int = Field(default=10, ge=1)
+    max_order_usd: Decimal | None = Field(default=None, gt=0)
+    price_band_pct: Decimal = Field(default=Decimal("3"), gt=0, le=100)
+    allow_fractional: bool = True
+    version: int = Field(default=1, ge=1)
+
+    @field_validator(
+        "budget_usd",
+        "max_position_pct",
+        "cash_buffer_pct",
+        "max_order_usd",
+        "price_band_pct",
+        mode="before",
+    )
+    @classmethod
+    def _no_float(cls, v: Any) -> Any:
+        return _reject_float(v)
+
+    @field_validator("allow_symbols", "deny_symbols", mode="before")
+    @classmethod
+    def _normalize_symbol_list(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        out: list[str] = []
+        for s in v:
+            norm = normalize_symbol(s)
+            if norm not in out:
+                out.append(norm)
+        return out
+
+    @field_validator("order_types")
+    @classmethod
+    def _non_empty_order_types(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("order_types must not be empty.")
+        return v
+
+    @field_serializer(
+        "budget_usd",
+        "max_position_pct",
+        "cash_buffer_pct",
+        "max_order_usd",
+        "price_band_pct",
+        when_used="json",
+    )
+    def _serialize_decimal(self, v: Decimal | None) -> str | None:
+        return None if v is None else str(v)
+
+
+class RiskReason(BaseModel):
+    """One reason attached to a `RiskDecision` - `severity` is purely informational (`"block"`
+    doesn't imply the verdict was `"reject"`; the verdict is decided independently)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    message: str
+    severity: Literal["info", "warn", "block"]
+
+
+class RiskDecision(BaseModel):
+    """The outcome of applying the risk rules to one proposed `OrderLeg`. `original` is the leg as
+    proposed (by the LLM); `leg` is the same leg after risk has had a chance to clamp it (e.g. cut
+    `qty` down to fit `max_position_pct`) - for `verdict in ("accept", "reject")` the two are
+    identical, and `leg != original` is exactly the signal that a clamp happened."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int
+    verdict: Literal["accept", "clamp", "reject"]
+    leg: OrderLeg
+    original: OrderLeg
+    reasons: list[RiskReason] = []
+    est_price: Decimal | None = None
+    est_cost_usd: Decimal | None = None
+
+    @field_validator("est_price", "est_cost_usd", mode="before")
+    @classmethod
+    def _no_float(cls, v: Any) -> Any:
+        return _reject_float(v)
+
+
+class MarketContext(BaseModel):
+    """The market/account snapshot bundle risk rules and the LLM are given for one turn. `symbol`
+    keys of `positions`, `assets` and `quotes` are normalized (`normalize_symbol`) so a lookup by a
+    freshly-normalized `OrderLeg.symbol` always hits, regardless of how the caller happened to key
+    the dict it passed in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account: AccountSnapshot
+    positions: dict[str, PositionSnapshot]
+    open_orders: list[OrderSnapshot]
+    assets: dict[str, AssetInfo]
+    quotes: dict[str, Quote]
+    clock: ClockInfo
+    orders_today: int
+
+    @field_validator("positions", "assets", "quotes", mode="before")
+    @classmethod
+    def _normalize_keys(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        return {normalize_symbol(k): val for k, val in v.items()}
+
+
+class TicketStatus(str, Enum):
+    """Lifecycle states for a `Ticket`, from proposal through terminal outcome."""
+
+    proposed = "proposed"
+    submitting = "submitting"
+    submitted = "submitted"
+    rejected_by_user = "rejected_by_user"
+    expired = "expired"
+    superseded = "superseded"
+    failed = "failed"
+
+
+class Ticket(BaseModel):
+    """A proposed multi-leg order, pending user confirmation via `POST /api/tickets/{id}/confirm`
+    (the only path that reaches `broker.submit_order` - see `global-constraints.md`).
+
+    All three datetimes must be timezone-aware (a naive `datetime` is rejected outright, since
+    comparing it against an aware clock elsewhere would raise or silently misbehave). `hash` is a
+    64-char lowercase hex digest (e.g. sha256) used to detect a resubmission of the same proposal.
+    `client_order_ids` must have exactly one id per leg (it is generated at proposal time, before
+    any broker call, so the count is always known); `broker_order_ids` starts empty (nothing
+    submitted yet) and, once populated, must also have exactly one entry per leg - `None` for a leg
+    whose submission hasn't completed (or reconciled) yet is a valid entry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    session_id: str
+    status: TicketStatus
+    legs: list[OrderLeg]
+    decisions: list[RiskDecision]
+    thesis: str
+    risks: str
+    invalidation: str
+    evidence_ids: list[str]
+    mandate_version: int
+    quote_as_of: datetime
+    created_at: datetime
+    expires_at: datetime
+    hash: str
+    client_order_ids: list[str]
+    broker_order_ids: list[str | None] = []
+
+    @field_validator("quote_as_of", "created_at", "expires_at")
+    @classmethod
+    def _tz_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            raise ValueError("datetime must be timezone-aware.")
+        return v
+
+    @field_validator("hash")
+    @classmethod
+    def _valid_hash(cls, v: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", v):
+            raise ValueError("hash must be a 64-character lowercase hex string.")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_id_lengths(self) -> "Ticket":
+        if len(self.client_order_ids) != len(self.legs):
+            raise ValueError("client_order_ids must have exactly one entry per leg.")
+        if self.broker_order_ids and len(self.broker_order_ids) != len(self.legs):
+            raise ValueError("broker_order_ids, when non-empty, must have exactly one entry per leg.")
         return self
