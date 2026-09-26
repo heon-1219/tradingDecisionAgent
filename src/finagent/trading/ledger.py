@@ -69,6 +69,23 @@ happens to use today, and works at several levels:
    (`_MAX_LEAF_LEN`) before any regex runs against it at all, as defense in depth independent of
    any single pattern's own complexity.
 
+4. **Known secret values** (`Ledger(db, known_secrets=...)`, added in Task 2.4). Levels 1-3 key off
+   *names*, so a secret embedded in a shape none of them recognizes - Basic auth inside JSON text,
+   a camelCase `apiKey=`, URL userinfo (`user:pass@host`), an odd operator (`api_key => v`),
+   fullwidth separators, a value glued to other text - would otherwise be stored verbatim. When the
+   ledger is given the actual secret values (the Alpaca key id and secret, say), every verbatim
+   occurrence of each one is replaced with `[REDACTED]` in every string leaf *and* every dict key,
+   as a pre-pass that runs before levels 1-3 ever see the payload. Each value is stripped of
+   surrounding whitespace first, and anything shorter than `_MIN_KNOWN_SECRET_LEN` characters (or
+   blank, or not a string - an unset setting is `None`) is ignored, so a short word can never be
+   blanked out everywhere. Values are applied longest first, so a secret that contains another is
+   replaced as one unit. This is `str.replace` per secret per leaf: linear in the payload size
+   times the (small) number of secrets. As a final fail-safe, if a known secret still appears in
+   the serialized JSON (which could only happen through JSON escaping itself), the whole payload is
+   replaced with the same placeholder used for a serialization failure. `redact_text()` exposes the
+   same known-secret scrub plus the free-text passes for a single string, so a caller can clean a
+   broker message before showing it to a user.
+
 A `pydantic.BaseModel` is coerced via `model_dump(mode="json")` before redaction (so a payload can
 carry, say, an `OrderLeg` directly, and any of its fields still gets the same key-based scan, and a
 `pydantic.SecretStr` field - already masked by pydantic itself - gets an extra layer via its field
@@ -88,7 +105,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -429,17 +446,80 @@ def _redact(value: Any) -> Any:
     return value
 
 
-class Ledger:
-    """Thin, append-only wrapper around `AppDB`'s `ledger` table."""
+# --- known secret values (see module docstring, level 4) -----------------------------------------
 
-    def __init__(self, db: AppDB):
+# A configured secret shorter than this is ignored: blanking a short common word out of every
+# ledger string would destroy the audit trail while protecting nothing real (Alpaca key ids and
+# secrets are far longer).
+_MIN_KNOWN_SECRET_LEN = 8
+
+_PLACEHOLDER = {"_ledger_error": "payload could not be serialized"}
+
+
+def _normalize_known_secrets(values: Iterable[Any]) -> tuple[str, ...]:
+    """Strip, drop non-strings/blank/short values, deduplicate, and order longest first."""
+    kept = {
+        value.strip()
+        for value in values
+        if isinstance(value, str) and len(value.strip()) >= _MIN_KNOWN_SECRET_LEN
+    }
+    return tuple(sorted(kept, key=lambda s: (-len(s), s)))
+
+
+def _scrub_str(text: str, secrets: tuple[str, ...]) -> str:
+    for secret in secrets:
+        if secret in text:
+            text = text.replace(secret, _REDACTED)
+    return text
+
+
+def _scrub_known(value: Any, secrets: tuple[str, ...]) -> Any:
+    """Replace every verbatim occurrence of a known secret in every string leaf and dict key. Runs
+    before `_redact`, and produces only shapes `_redact` already handles (dicts with string keys,
+    lists, and the original leaves)."""
+    if isinstance(value, BaseModel):
+        return _scrub_known(value.model_dump(mode="json"), secrets)
+    if isinstance(value, str):
+        return _scrub_str(value, secrets)
+    if isinstance(value, Mapping):
+        return {
+            _scrub_str(_stringify_key(key), secrets): _scrub_known(sub_value, secrets)
+            for key, sub_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_scrub_known(item, secrets) for item in value]
+    return value
+
+
+class Ledger:
+    """Thin, append-only wrapper around `AppDB`'s `ledger` table. `known_secrets` are exact secret
+    values (e.g. the Alpaca key id and secret) scrubbed verbatim from every payload - see the module
+    docstring, level 4."""
+
+    def __init__(self, db: AppDB, known_secrets: Iterable[Any] = ()):
         self._db = db
+        self._known_secrets = _normalize_known_secrets(known_secrets)
+
+    def redact_text(self, text: str) -> str:
+        """The same redaction a ledger string leaf gets (known secret values, then the free-text
+        passes), for a single string a caller wants to show elsewhere - e.g. a broker error
+        message in an API response."""
+        return _redact_free_text(_scrub_str(text, self._known_secrets))
+
+    def _serialize(self, payload: Any) -> str:
+        scrubbed = _scrub_known(payload, self._known_secrets) if self._known_secrets else payload
+        serialized = json.dumps(_redact(scrubbed), sort_keys=True)
+        if any(secret in serialized for secret in self._known_secrets):
+            # Only JSON escaping itself could reintroduce a scrubbed value; fail safe.
+            logger.error("ledger payload still contained a known secret after scrubbing")
+            return json.dumps(_PLACEHOLDER)
+        return serialized
 
     def append(self, session_id: str, kind: str, payload: dict) -> int:
         """Redact and store one ledger entry; returns its row id. Never raises for a serialization
         problem - see the module docstring."""
         try:
-            serialized = json.dumps(_redact(payload), sort_keys=True)
+            serialized = self._serialize(payload)
         except Exception:  # noqa: BLE001 - fail safe: never crash a caller that already acted
             logger.exception(
                 "ledger payload for session %s kind %s could not be serialized; storing a "
@@ -447,7 +527,7 @@ class Ledger:
                 session_id,
                 kind,
             )
-            serialized = json.dumps({"_ledger_error": "payload could not be serialized"})
+            serialized = json.dumps(_PLACEHOLDER)
         created_at = datetime.now(timezone.utc).isoformat()
         cur = self._db.execute(
             "INSERT INTO ledger (session_id, kind, payload, created_at) VALUES (?,?,?,?)",

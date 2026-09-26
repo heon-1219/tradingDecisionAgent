@@ -738,3 +738,120 @@ def test_export_jsonl_redacted_payload_round_trips_as_valid_json():
 def test_export_jsonl_empty_session_yields_nothing():
     ledger, _db = make_ledger()
     assert list(ledger.export_jsonl("sess-none")) == []
+
+
+# --- Task 2.4: known-secret exact-value scrubbing ------------------------------------------------
+#
+# The pattern passes above key off *names* ("api_key=", "Authorization:"), so a secret embedded in
+# a shape none of them recognizes used to be stored verbatim. `Ledger(db, known_secrets=...)` also
+# replaces every verbatim occurrence of each configured secret value, in every string leaf and key,
+# before any pattern pass runs.
+
+KNOWN_SECRET = "PKTESTSECRET0123456789abcdefXYZ"
+KNOWN_KEY_ID = "PKKEYID987654321"
+
+
+def make_scrubbing_ledger(*secrets) -> tuple[Ledger, AppDB]:
+    db = AppDB(":memory:")
+    return Ledger(db, known_secrets=secrets or (KNOWN_SECRET, KNOWN_KEY_ID)), db
+
+
+def _stored_text(db: AppDB) -> str:
+    return "\n".join(row["payload"] for row in db.query("SELECT payload FROM ledger"))
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        '{"Authorization": "Basic %s"}',  # Basic auth inside JSON text (quoted Titlecase name)
+        "apiKey=%s",  # camelCase name - not identifier-shaped, missed by the pair scan
+        "clientSecret: %s",
+        "https://user:%s@paper-api.alpaca.markets/v2/orders",  # URL userinfo
+        "api_key => %s",  # an odd operator
+        "'%s '",  # quoted, with a trailing space inside the quotes
+        "api_key＝%s",  # fullwidth equals sign
+        "api_key：%s",  # fullwidth colon
+        "Mypassword=%s",  # mixed-case word fused onto a lower-case keyword
+        "prefix%ssuffix",  # glued to other text with no separator at all
+        "%s",  # the whole value
+    ],
+)
+def test_known_secret_is_scrubbed_from_every_residual_free_text_shape(shape):
+    ledger, db = make_scrubbing_ledger()
+    ledger.append("sess-1", "note", {"message": shape % KNOWN_SECRET})
+    stored = _stored_text(db)
+    assert KNOWN_SECRET not in stored
+    assert "[REDACTED]" in stored
+
+
+def test_known_secret_is_scrubbed_from_dict_keys_nested_lists_tuples_sets_and_models():
+    ledger, db = make_scrubbing_ledger()
+    leg = OrderLeg(symbol="AAPL", side="buy", qty=D("1"), type="market")
+    ledger.append(
+        "sess-1",
+        "note",
+        {
+            KNOWN_SECRET: "value",
+            "nested": {"deeper": [("a", f"x{KNOWN_SECRET}y"), {f"k-{KNOWN_KEY_ID}": 1}]},
+            "a_set": {f"s {KNOWN_SECRET}"},
+            "leg": leg,
+            "bytes_key": {b"raw": KNOWN_KEY_ID},
+        },
+    )
+    stored = _stored_text(db)
+    assert KNOWN_SECRET not in stored
+    assert KNOWN_KEY_ID not in stored
+    payload = _last_payload(db)
+    assert payload["[REDACTED]"] == "value"  # the key itself was the secret
+    assert payload["leg"]["symbol"] == "AAPL"  # an ordinary model still serializes normally
+
+
+def test_known_secrets_are_stripped_and_short_or_empty_values_ignored():
+    # Surrounding whitespace (a stray newline in a .env value) is stripped before matching; values
+    # shorter than 8 characters, blank values and None (an unset setting) are ignored, so they can
+    # never blank out ordinary short words.
+    ledger, db = make_scrubbing_ledger(f"  {KNOWN_SECRET}\n", "short", "   ", None, "")
+    ledger.append("sess-1", "note", {"message": f"{KNOWN_SECRET} short shortcut"})
+    payload = _last_payload(db)
+    assert payload["message"] == "[REDACTED] short shortcut"
+
+
+def test_known_secret_containing_another_secret_is_scrubbed_whole():
+    # Longest first: the longer secret is replaced as one unit, so no fragment of it survives.
+    inner = "ABCDEFGH12"
+    outer = f"zz{inner}zz-longer"
+    ledger, db = make_scrubbing_ledger(inner, outer)
+    ledger.append("sess-1", "note", {"message": f"<{outer}> and <{inner}>"})
+    assert _last_payload(db)["message"] == "<[REDACTED]> and <[REDACTED]>"
+
+
+def test_known_secret_scrubbing_leaves_payloads_without_secrets_unchanged():
+    plain, plain_db = make_ledger()
+    scrubbing, scrubbing_db = make_scrubbing_ledger()
+    payload = {"symbol": "KEY", "qty": D("3"), "note": "api_key=abc", "legs": [{"i": 0}]}
+    plain.append("sess-1", "note", payload)
+    scrubbing.append("sess-1", "note", payload)
+    assert _last_payload(scrubbing_db) == _last_payload(plain_db)
+
+
+def test_known_secret_never_reaches_the_export():
+    ledger, _db = make_scrubbing_ledger()
+    ledger.append("sess-1", "broker_response", {"message": f"echo {KNOWN_SECRET}"})
+    exported = "\n".join(ledger.export_jsonl("sess-1"))
+    assert KNOWN_SECRET not in exported
+
+
+def test_redact_text_applies_known_secrets_and_the_pattern_passes():
+    ledger, _db = make_scrubbing_ledger()
+    assert ledger.redact_text(f"apiKey={KNOWN_SECRET}") == "apiKey=[REDACTED]"
+    assert ledger.redact_text("api_key=abc123") == "api_key=[REDACTED]"
+    assert ledger.redact_text("insufficient buying power") == "insufficient buying power"
+
+
+def test_known_secret_scrubbing_is_fast_on_a_100k_leaf():
+    ledger, db = make_scrubbing_ledger(*(f"SECRETVALUE{i:04d}" for i in range(20)))
+    text = ("x" * 99_000) + "SECRETVALUE0007"
+    start = time.perf_counter()
+    ledger.append("sess-1", "note", {"message": text})
+    assert time.perf_counter() - start < 1.0
+    assert "SECRETVALUE0007" not in _stored_text(db)
