@@ -432,8 +432,10 @@ MARKET_SLIPPAGE_PCT = Decimal("1.0")   # buffer on ask for market-buy cost estim
 def canonical_hash(legs: list[OrderLeg], decisions: list[RiskDecision], ticket_id: str) -> str  # sha256 of sorted-key JSON
 class TicketStore:
     def __init__(self, db: AppDB, clock: Callable[[], datetime] = utcnow): ...
-    def create(self, session_id, legs, decisions, *, thesis, risks, invalidation, evidence_ids,
+    def create(self, session_id, *, decisions, legs=None, thesis, risks, invalidation, evidence_ids,
                mandate_version, quote_as_of, ttl_sec=300) -> Ticket      # supersedes the session's active ticket
+        # ticket.legs = executable legs = [d.leg for d in decisions if d.verdict != "reject"]; a given `legs`
+        # must equal that list; all rejected -> ValueError("no executable legs")
     def get(self, ticket_id: str) -> Ticket | None
     def active(self, session_id: str) -> Ticket | None                 # status proposed and not expired
     def transition(self, ticket_id, expect: set[TicketStatus], to: TicketStatus, **fields) -> Ticket  # atomic compare-and-set
