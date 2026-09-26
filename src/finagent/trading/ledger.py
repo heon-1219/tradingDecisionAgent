@@ -47,18 +47,27 @@ happens to use today, and works at several levels:
      `password`, `credential`, `access_token`, or `api[-_]?key` (`signature` too) - narrower than
      (1)'s dict-key pattern for the same false-positive reason as (2), and narrower still than an
      earlier version of this rule that flagged any Titlecase word merely because it happened to
-     read like an ordinary label (see `_is_secret_like_free_text_name`).
+     read like an ordinary label. `<name>` is the *full* run of name characters (alphanumerics,
+     `_`, `.`, `-`) before the separator, however long, and either the whole run or its last
+     dotted component may qualify (`_is_secret_like_free_text_name`). So a long dotted path like
+     `...AlpacaClient._headers.APCA_API_SECRET_KEY=...` is caught too. A quoted name or value
+     (`{'APCA-API-SECRET-KEY': '...'}`, `{"api_key": "..."}`, `API_KEY="..."`, including
+     backslash-escaped JSON quotes) has just the quoted body redacted, and the quotes stay.
 
-   The candidate-name scan (`_CANDIDATE_KV_RE`) itself is deliberately written with a *bounded*
-   quantifier (`{1,64}`) on the name it captures, checked in plain Python rather than embedding the
-   secret-keyword alternation inside the regex's own unbounded repetition - an earlier version
-   nested "name-charset-star, then an alternation, then name-charset-star again" directly in the
-   regex, which is catastrophically slow (quadratic-or-worse backtracking) on an adversarial
-   string like `"a."` repeated thousands of times, or a long dotted name (a Python traceback's
-   module path, say) with no match at the end - exactly the kind of string a broker error message
-   or exception traceback can produce.
-   Every string leaf is also capped at 100,000 characters (`_MAX_LEAF_LEN`) before any regex runs
-   against it at all, as defense in depth independent of any single pattern's own complexity.
+   This scan (`_pair_value_spans`) is driven by separators and walks backward over the
+   name, with no name-matching regex and no cap on the name's length. Both matter. Round 2's single
+   regex nested a name-charset star, then the keyword alternation, then another star. That shape
+   is catastrophically slow (quadratic-or-worse backtracking) on an adversarial string like `"a."`
+   repeated thousands of times, or a long dotted traceback path with no match at the end, which
+   is exactly what a broker error message or exception traceback can produce. Round 3's
+   replacement capped the name at 64 characters, which made it linear but left a blind spot. A
+   name run longer than 64 characters before the separator was never matched at all, so its value
+   was stored verbatim. The current scan has neither problem - see its docstring for the linear-time
+   argument. All free-text passes (query param, Authorization, Bearer, name/value) compute their
+   spans against the same original string, and the union is replaced once, so no pass can destroy
+   context another pass needs. Every string leaf is also capped at 100,000 characters
+   (`_MAX_LEAF_LEN`) before any regex runs against it at all, as defense in depth independent of
+   any single pattern's own complexity.
 
 A `pydantic.BaseModel` is coerced via `model_dump(mode="json")` before redaction (so a payload can
 carry, say, an `OrderLeg` directly, and any of its fields still gets the same key-based scan, and a
@@ -122,36 +131,51 @@ def _looks_like_header_name(text: str) -> bool:
 
 # --- free-text patterns (see module docstring, level 3) ------------------------------------------
 #
-# Every pattern below uses only *bounded* repetition (a fixed-length literal, an optional single
-# character, or an explicit `{1,64}` cap) - no `X*`/`X+` whose repeated element can itself match a
-# variable-length run that a *later*, alternation-heavy part of the same group might also need to
-# re-try at every offset. That "unbounded-quantifier-followed-by-a-late-alternation" shape is what
-# made the old `_FREE_TEXT_KV_RE` (`[\w.\-]*(?:secret|token|...)[\w.\-]*`) quadratic-or-worse: the
-# engine backtracks the leading `[\w.\-]*` one character at a time, retrying the alternation at
-# every possible split point, for every starting position - O(n^2) or worse on a long run of
-# word/dot/hyphen characters with no match at the end (a repeated "a.", or a long dotted module
-# path in a traceback). The replacement below finds candidate `name<sep>` runs with one linear,
-# *unambiguous* regex (the name is capped at 64 characters, so even its own worst-case backtrack is
-# a small constant, not proportional to the remaining string), then decides in plain Python whether
-# that name is secret-like - no regex ever re-scans the same span looking for multiple alternatives.
+# No pattern below has the "unbounded quantifier followed by a late alternation" shape that made
+# round 2's free-text pattern catastrophically slow (the engine backtracked a leading name-charset
+# star one character at a time, retrying the keyword alternation at every split point, for every
+# starting position - quadratic-or-worse on a long dotted run with no match at the end). The
+# general `<name><sep><value>` scan (`_pair_value_spans`) uses no name-matching regex at all: it
+# finds separators, then walks *backward* from each over the name - see that function for the
+# linear-time argument. Every regex it does use is a single character class, or a repetition whose
+# next character is always unambiguous, and can never backtrack.
+#
+# Every pass reports the spans it wants hidden in the *original* text, and `_redact_free_text`
+# replaces the union once. No pass ever runs on another pass's output. Earlier versions applied
+# the passes in sequence, so one pass's replacement could destroy context the next one needed. For
+# example, the query-param pass turned `?api_key='v'` into `?api_key=[REDACTED]'v'`, so the pair
+# scan never saw the quoted value. And `&secret=APCA_API_SECRET_KEY: "v"` had its nested name and
+# separator swallowed.
 
 _QUERY_PARAM_RE = re.compile(
     r"([?&])(key|apikey|api[-_]key|token|access_token|secret|password|signature|sig)="
-    r"[^&\s'\"]*",
+    r"([^&\s'\"]*)",
     re.I,
 )
 _AUTH_HEADER_RE = re.compile(r"(authorization\s*:\s*)\S.*", re.I)
-_BEARER_RE = re.compile(r"\b(Bearer)\s+\S+", re.I)
+_BEARER_RE = re.compile(r"\b(Bearer)\s+(\S+)", re.I)
 
-# A candidate "name" immediately followed by ":"/"=" (optionally spaced), then its value up to the
-# next whitespace/`&`/`,`/`;`/quote. The name is capped at 64 characters and anchored so it can't
-# start mid-identifier (`(?<![\w.\-])`) - both bound the worst-case work per starting position to a
-# small constant, making the overall scan linear in the length of `text`.
-_CANDIDATE_KV_RE = re.compile(r"(?<![\w.\-])([\w.\-]{1,64})(\s*[:=]\s*)([^\s&,;'\"]+)")
+# Building blocks of `_pair_value_spans`.
+_SEPARATOR_RE = re.compile(r"[:=]")
+_WHITESPACE_RE = re.compile(r"\s*")
+_BACKSLASHES_RE = re.compile(r"\\*")
+# An unquoted value: everything up to the next whitespace, `&`, `,`, `;` or quote.
+_UNQUOTED_VALUE_RE = re.compile(r"[^\s&,;'\"]*")
+# A quoted value's body, up to (not including) its closing quote, skipping backslash escapes. This
+# is the standard "unrolled loop" shape: at every position exactly one branch can consume the next
+# character, so a match never backtracks.
+_QUOTED_BODY_RES = {
+    '"': re.compile(r'[^"\\]*(?:\\.[^"\\]*)*', re.S),
+    "'": re.compile(r"[^'\\]*(?:\\.[^'\\]*)*", re.S),
+}
+_QUOTE_CHARS = "\"'"
+# Besides alphanumerics (`str.isalnum()`, the same set as `\w` minus "_"): the characters a
+# free-text name run may contain - `\w`, `.` and `-`, as before.
+_NAME_PUNCTUATION = "_.-"
 
-# Keywords that make a free-text name "secret-like" - checked only against the (<=64-char)
-# candidate name already captured above, never against the whole text, so this alternation's own
-# cost is bounded regardless of `text`'s length.
+# Keywords that make a free-text name "secret-like" (plus the identifier-shape check in
+# `_is_secret_like_name_part`). A fixed alternation of short literals, run once per name - and
+# names are disjoint slices of the text - so its total cost is linear in the length of the text.
 _FREE_TEXT_SECRET_WORD_RE = re.compile(
     r"secret|token|password|credential|access[-_]?token|api[-_]?key|signature", re.I
 )
@@ -172,32 +196,146 @@ def _truncate_leaf(text: str) -> str:
     return f"{text[:_MAX_LEAF_LEN]}…[truncated {cut} chars]"
 
 
-def _is_secret_like_free_text_name(name: str) -> bool:
-    """A free-text `name` (from `_CANDIDATE_KV_RE`, already capped at 64 characters) is treated as
-    secret-like only when it is *identifier-shaped* - contains `_` or `-`, or is entirely
-    lower-case, or entirely upper-case - and separately contains one of the known secret-ish
-    keywords. This is what keeps ordinary Titlecase prose like `"Secret: Apple's new product..."`
-    untouched (a single capitalized word, no underscore/hyphen, is neither all-lower nor
-    all-upper) while still catching `API_KEY`, `api-key`, `password=`, `TOKEN:` and
-    `X-Api-Key:`."""
+def _is_secret_like_name_part(name: str) -> bool:
+    """`name` is *identifier-shaped* - contains `_` or `-`, or is entirely lower-case, or entirely
+    upper-case - and contains one of the secret-ish keywords. Dots, digits and caseless
+    characters don't affect the lower/upper-case test, so a dotted path is identifier-shaped
+    exactly when it contains `_`/`-` or has no mixed case anywhere. This is what keeps ordinary
+    Titlecase prose like `"Secret: Apple's new product..."` untouched (a single capitalized word,
+    no underscore/hyphen, is neither all-lower nor all-upper) while still catching `API_KEY`,
+    `api-key`, `password=`, `TOKEN:` and `X-Api-Key:`."""
     identifier_shaped = "_" in name or "-" in name or name == name.lower() or name == name.upper()
     return identifier_shaped and bool(_FREE_TEXT_SECRET_WORD_RE.search(name))
 
 
-def _redact_candidate_kv(match: re.Match) -> str:
-    name, sep, value = match.group(1), match.group(2), match.group(3)
-    if _is_secret_like_free_text_name(name):
-        return f"{name}{sep}{_REDACTED}"
-    return match.group(0)
+def _is_secret_like_free_text_name(name: str) -> bool:
+    """A free-text name run (however long) is secret-like when either the whole run or its last
+    dotted component passes `_is_secret_like_name_part`. The whole run catches
+    `...AlpacaClient._headers.APCA_API_SECRET_KEY` (it has underscores and "secret"); the last
+    component also catches a mixed-case path ending in a lower-case field, like
+    `MyApp.Config.password`, whose full run is not identifier-shaped. A Titlecase last component
+    (`note.Secret`) still passes neither check, keeping the Titlecase-prose rule."""
+    if _is_secret_like_name_part(name):
+        return True
+    last = name.rpartition(".")[2]
+    return last != name and _is_secret_like_name_part(last)
+
+
+def _name_before_separator(text: str, sep: int, floor: int) -> str:
+    """The name run that ends at the separator `text[sep]`: walk backward over any whitespace, then
+    at most one closing quote (optionally escaped by backslashes, as in `\\"api_key\\":`), then
+    the whole contiguous run of name characters (alphanumerics, `_`, `.`, `-`) - however long it
+    is. Never walks below `floor`."""
+    i = sep
+    while i > floor and text[i - 1].isspace():
+        i -= 1
+    if i > floor and text[i - 1] in _QUOTE_CHARS:
+        i -= 1
+        while i > floor and text[i - 1] == "\\":
+            i -= 1
+    end = i
+    while i > floor and (text[i - 1].isalnum() or text[i - 1] in _NAME_PUNCTUATION):
+        i -= 1
+    return text[i:end]
+
+
+def _secret_value_span(text: str, sep: int, covered_end: int) -> tuple[int, int] | None:
+    """The `[start, end)` span of the value after the separator `text[sep]` that should be
+    redacted, or `None` if there's nothing new to redact. Scanning never starts before
+    `covered_end` (the end of the last span already redacted).
+
+    - After optional whitespace, a quote opens a quoted value. The span is the body up to the
+      matching unescaped closing quote. If the quote is itself escaped (`\\"...\\"`, JSON inside a
+      string), the span runs to the next backslash-quote. The quotes stay visible. An unclosed
+      quote redacts through the end of the text, since failing safe beats leaking the rest.
+    - Otherwise the value is unquoted, running up to the next whitespace, `&`, `,`, `;` or
+      quote, as before."""
+    n = len(text)
+    value_start = _WHITESPACE_RE.match(text, sep + 1).end()
+    quote_at = _BACKSLASHES_RE.match(text, value_start).end()
+    if quote_at < n and text[quote_at] in _QUOTE_CHARS:
+        quote = text[quote_at]
+        start = max(quote_at + 1, covered_end)
+        if quote_at == value_start:
+            end = _QUOTED_BODY_RES[quote].match(text, start).end()
+            if end >= n or text[end] != quote:
+                end = n
+        else:
+            end = text.find("\\" + quote, start)
+            if end == -1:
+                end = n
+    else:
+        start = max(value_start, covered_end)
+        end = _UNQUOTED_VALUE_RE.match(text, start).end()
+    return (start, end) if end > start else None
+
+
+def _pair_value_spans(text: str) -> list[tuple[int, int]]:
+    """The spans of every `<name><sep><value>` value in `text` (`sep` is `:` or `=`, optionally
+    spaced) whose name is secret-like (`_is_secret_like_free_text_name`). Names and separators are
+    never part of a span, so they stay visible. It is driven by separators, not by a name-matching
+    regex. Each separator is found with a single-character class. The name is then the *full* run
+    walked backward from it, so a name has no length cap and no blind spot: 64, 65 or 5,000
+    characters all behave the same.
+
+    Linear in `len(text)` by construction:
+    - Each backward walk stops at `floor`, just past the previous separator, at the latest. The
+      walked ranges are disjoint, so the walks and the name checks on them total O(N).
+    - The whitespace and backslash skips after a separator cover the run starting right after
+      it. A separator ends any such run, so these runs are disjoint too.
+    - Every value scan starts at or after `covered_end`. When it finds something, it moves
+      `covered_end` to the end of what it scanned. So no character is value-scanned twice,
+      including when a value itself contains more separators (`API_KEY:API_KEY:...`).
+    Each value is decided on its own separator, so a secret pair nested in another value is still
+    caught. Examples are `config=APCA_API_SECRET_KEY=shh` and the YAML-ish
+    `credentials:\\n  api_key: shh`."""
+    spans: list[tuple[int, int]] = []
+    covered_end = 0
+    floor = 0
+    for match in _SEPARATOR_RE.finditer(text):
+        sep = match.start()
+        name = _name_before_separator(text, sep, floor)
+        floor = sep + 1
+        if name and _is_secret_like_free_text_name(name):
+            span = _secret_value_span(text, sep, covered_end)
+            if span is not None:
+                spans.append(span)
+                covered_end = span[1]
+    return spans
+
+
+def _free_text_secret_spans(text: str) -> list[tuple[int, int]]:
+    """Every span any free-text pass wants hidden, all computed against the same `text` - see the
+    free-text patterns section for why no pass runs on another pass's output."""
+    spans = [m.span(3) for m in _QUERY_PARAM_RE.finditer(text)]
+    spans += [(m.end(1), m.end()) for m in _AUTH_HEADER_RE.finditer(text)]
+    spans += [m.span(2) for m in _BEARER_RE.finditer(text)]
+    spans += _pair_value_spans(text)
+    return spans
 
 
 def _redact_free_text(text: str) -> str:
+    """Truncate `text` to `_MAX_LEAF_LEN`, then replace each maximal run of overlapping or
+    adjacent secret spans with a single `[REDACTED]`."""
     text = _truncate_leaf(text)
-    text = _QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}={_REDACTED}", text)
-    text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _REDACTED, text)
-    text = _BEARER_RE.sub(lambda m: f"{m.group(1)} {_REDACTED}", text)
-    text = _CANDIDATE_KV_RE.sub(_redact_candidate_kv, text)
-    return text
+    merged: list[list[int]] = []
+    for start, end in sorted(_free_text_secret_spans(text)):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    if not merged:
+        return text
+    pieces: list[str] = []
+    pos = 0
+    for start, end in merged:
+        pieces.append(text[pos:start])
+        pieces.append(_REDACTED)
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _stringify_key(key: Any) -> str:

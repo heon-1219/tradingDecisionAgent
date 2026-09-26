@@ -5,6 +5,8 @@ import json
 import time
 from decimal import Decimal
 
+import pytest
+
 from finagent.trading.models import OrderLeg
 from finagent.store.appdb import AppDB
 from finagent.trading.ledger import Ledger, _redact_free_text
@@ -487,6 +489,204 @@ def test_append_redacts_hyphenated_titlecase_x_api_key_in_free_text():
     ledger.append("sess-1", "note", {"msg": "X-Api-Key: abc123"})
     payload = _last_payload(db)
     assert payload == {"msg": "X-Api-Key: [REDACTED]"}
+
+
+# --- fix round 4: separator-driven free-text scan, no name-length blind spot -------------------
+#
+# Round 3's candidate regex capped the name at 64 characters and anchored it at the start of the
+# name run, so a run longer than 64 characters before the separator was never matched anywhere and
+# its value was stored verbatim. The scan now walks backward from each separator over the full run.
+
+
+def _append_and_read_back(text: str) -> tuple[str, str]:
+    """Append `{"msg": text}` and return (the stored `msg`, the exported JSONL line)."""
+    ledger, db = make_ledger()
+    ledger.append("sess-1", "log", {"msg": text})
+    return _last_payload(db)["msg"], next(ledger.export_jsonl("sess-1"))
+
+
+def test_append_redacts_a_65_char_secret_name_end_to_end():
+    name = "A" * (65 - len("_SECRET_KEY")) + "_SECRET_KEY"
+    assert len(name) == 65
+    stored, exported = _append_and_read_back(f"{name}=SUPERSECRETVALUE123")
+    assert stored == f"{name}=[REDACTED]"
+    assert "SUPERSECRETVALUE123" not in exported
+
+
+def test_append_redacts_an_80_char_dotted_secret_name_end_to_end():
+    name = "finagent.trading.brokers.alpaca.client.AlpacaClient._headers.APCA_API_SECRET_KEY"
+    assert len(name) == 80
+    stored, exported = _append_and_read_back(f"{name}=abcdEXPOSEDsecret123")
+    assert stored == f"{name}=[REDACTED]"
+    assert "EXPOSED" not in exported
+
+
+@pytest.mark.parametrize("length", [63, 64, 65, 200, 5000])
+def test_append_redacts_secret_names_of_any_length(length):
+    name = "A" * (length - len("_SECRET_KEY")) + "_SECRET_KEY"
+    assert len(name) == length
+    stored, exported = _append_and_read_back(f"prefix {name}=LEAKvalue suffix")
+    assert stored == f"prefix {name}=[REDACTED] suffix"
+    assert "LEAKvalue" not in exported
+
+
+def test_append_redacts_a_secret_keyword_at_the_start_of_a_very_long_name():
+    name = "SECRET_KEY_" + "X" * 100
+    stored, _exported = _append_and_read_back(f"{name}=v")
+    assert stored == f"{name}=[REDACTED]"
+
+
+def test_append_does_not_redact_a_long_non_secret_dotted_name():
+    text = ".".join(["finagent.trading.proposals.TicketStore"] * 10) + ".max_retries=3"
+    assert len(text) > 64
+    stored, _exported = _append_and_read_back(text)
+    assert stored == text
+
+
+def test_append_redacts_a_mixed_case_path_whose_last_component_is_a_lower_case_secret():
+    """The full run `MyApp.Config.password` is mixed-case with no `_`/`-`, so it isn't
+    identifier-shaped - but its last dotted component is."""
+    stored, _exported = _append_and_read_back("MyApp.Config.password=hunter2")
+    assert stored == "MyApp.Config.password=[REDACTED]"
+
+
+def test_append_keeps_the_titlecase_prose_rule_for_dotted_names():
+    text = "see launch.Secret: Apple's new product"
+    stored, _exported = _append_and_read_back(text)
+    assert stored == text
+
+
+def test_append_redacts_a_secret_pair_nested_in_another_pairs_value():
+    stored, _exported = _append_and_read_back("config=APCA_API_SECRET_KEY=shhLEAK")
+    assert stored == "config=APCA_API_SECRET_KEY=[REDACTED]"
+
+
+def test_append_redacts_a_secret_pair_nested_under_a_secret_like_label():
+    stored, _exported = _append_and_read_back("credentials:\n  api_key: LEAKvalue")
+    assert "LEAKvalue" not in stored
+
+
+# --- fix round 4: quoted names and values (dict reprs, JSON, quoted env values) ----------------
+
+
+def test_append_redacts_quoted_values_in_a_python_dict_repr():
+    stored, _exported = _append_and_read_back(
+        "headers {'APCA-API-KEY-ID': 'PKLEAK', 'APCA-API-SECRET-KEY': 'skLEAK', 'Accept': 'json'}"
+    )
+    assert stored == (
+        "headers {'APCA-API-KEY-ID': '[REDACTED]', 'APCA-API-SECRET-KEY': '[REDACTED]', "
+        "'Accept': 'json'}"
+    )
+
+
+def test_append_redacts_quoted_values_in_json_text():
+    stored, _exported = _append_and_read_back('{"api_key": "tvly-LEAK", "symbol": "AAPL"}')
+    assert stored == '{"api_key": "[REDACTED]", "symbol": "AAPL"}'
+
+
+def test_append_redacts_backslash_escaped_json_inside_a_string():
+    text = '{\\"api_key\\": \\"escLEAK\\", \\"symbol\\": \\"AAPL\\"}'
+    stored, _exported = _append_and_read_back(text)
+    assert stored == '{\\"api_key\\": \\"[REDACTED]\\", \\"symbol\\": \\"AAPL\\"}'
+
+
+def test_append_redacts_a_whole_quoted_env_value_including_spaces_and_escaped_quotes():
+    stored, _exported = _append_and_read_back('APCA_API_SECRET_KEY="two LEAK \\" words" next')
+    assert stored == 'APCA_API_SECRET_KEY="[REDACTED]" next'
+
+
+def test_append_redacts_an_unclosed_quoted_value_through_the_end():
+    stored, _exported = _append_and_read_back("password='LEAK and whatever follows")
+    assert stored == "password='[REDACTED]"
+
+
+def test_append_does_not_redact_quoted_titlecase_or_empty_values():
+    for text in ("{'Secret': 'Apple'}", 'api_key=""', "{'symbol': 'AAPL'}"):
+        stored, _exported = _append_and_read_back(text)
+        assert stored == text
+
+
+# --- fix round 4: free-text passes no longer run on each other's output ------------------------
+#
+# Found by fuzzing: when the passes ran in sequence, one pass's replacement could destroy context
+# the next one needed. All passes now report spans against the same original text, and the union
+# is replaced once.
+
+
+def test_append_redacts_a_quoted_value_after_a_query_style_secret_param():
+    # The query-param pass used to insert "[REDACTED]" for the (empty) unquoted value in front of
+    # the quote, hiding the quoted value from the pair scan.
+    stored, _exported = _append_and_read_back("GET https://h/x?api_key='LEAKvalue' failed")
+    assert stored == "GET https://h/x?api_key='[REDACTED]' failed"
+
+
+def test_append_redacts_a_secret_pair_inside_a_query_param_value():
+    # The query-param pass used to swallow the nested name and its separator.
+    stored, _exported = _append_and_read_back('x&secret=APCA_API_SECRET_KEY: "LEAKvalue"')
+    assert stored == 'x&secret=[REDACTED] "[REDACTED]"'
+
+
+def test_append_redacts_an_authorization_header_inside_a_secret_pair_value():
+    stored, _exported = _append_and_read_back("api_key=Authorization: Basic LEAKvalue")
+    assert stored == "api_key=[REDACTED] [REDACTED]"
+
+
+# --- fix round 4: linear-time guarantees for the separator-driven scan -------------------------
+
+_TRACEBACK_UNIT = "finagent.trading.proposals.TicketStore.transition."  # 50 chars
+
+_ADVERSARIAL_100K = {
+    "a. x50000": "a." * 50_000,
+    "a- x50000": "a-" * 50_000,
+    "x= x50000": "x=" * 50_000,
+    "API_KEY: x12000": "API_KEY:" * 12_000,
+    "a x99999 then =v": "a" * 99_999 + "=v",
+    ":= x50000": ":=" * 50_000,
+    "dotted traceback to 100k": _TRACEBACK_UNIT * 2_000,
+    "whitespace run then :": " " * 99_999 + ":",
+    "backslash run then quote-colon": "\\" * 99_998 + '":',
+    "api_key=' x11111": "api_key='" * 11_111,
+    'api_key=\\" x10000': 'api_key=\\"' * 10_000,
+    "quoted value full of backslashes": 'api_key="' + "\\" * 99_990,
+}
+
+
+@pytest.mark.parametrize("label", list(_ADVERSARIAL_100K))
+def test_redact_free_text_handles_100k_adversarial_strings_quickly(label):
+    assert _time_redact_free_text(_ADVERSARIAL_100K[label]) < _REDOS_TIME_BUDGET_SEC
+
+
+def test_redact_free_text_redacts_a_secret_at_the_end_of_a_100k_dotted_traceback_quickly():
+    text = _TRACEBACK_UNIT * 1_999 + "_headers.APCA_API_SECRET_KEY=LEAKvalue"
+    assert len(text) < 100_000
+    start = time.perf_counter()
+    result = _redact_free_text(text)
+    assert time.perf_counter() - start < _REDOS_TIME_BUDGET_SEC
+    assert result.endswith("_headers.APCA_API_SECRET_KEY=[REDACTED]")
+    assert "LEAKvalue" not in result
+
+
+def _best_time(text: str, repeats: int = 3) -> float:
+    return min(_time_redact_free_text(text) for _ in range(repeats))
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda n: "x=" * (n // 2),
+        lambda n: "a" * (n - 2) + "=v",
+        lambda n: "API_KEY:" * (n // 8),
+        lambda n: "api_key='" * (n // 9),
+    ],
+    ids=["many-separators", "one-long-name", "nested-secret-values", "unclosed-quotes"],
+)
+def test_redact_free_text_scales_linearly_across_input_doublings(make):
+    """Three doublings (12.5k -> 100k chars, 8x the input): linear predicts ~8x the time,
+    quadratic ~64x. A 24x bound leaves 3x slack for timing noise while still failing on a
+    quadratic regression."""
+    times = [_best_time(make(n)) for n in (12_500, 25_000, 50_000, 100_000)]
+    assert times[0] > 0
+    assert times[-1] / times[0] < 24
 
 
 # --- export_jsonl ----------------------------------------------------------------------------
