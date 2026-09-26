@@ -229,7 +229,8 @@ _NOTIONAL_GTC = OrderLeg.model_construct(
     symbol="AAPL", side="buy", qty=None, notional=D("100"), type="market", time_in_force="gtc",
     limit_price=None,
 )
-_RICH = dict(buying_power=D("100000"))  # enough buying power that it never binds
+# Enough cash buying power that it never binds (risk uses min(buying_power, non_marginable)).
+_RICH = dict(buying_power=D("100000"), non_marginable_buying_power=D("100000"))
 
 CASES = [
     # account_blocked
@@ -239,6 +240,8 @@ CASES = [
                  "reject", "account_blocked", id="account_blocked-account"),
     pytest.param(buy("VOO", 1, limit="500"), make_ctx(trade_suspended_by_user=True), Mandate(),
                  "reject", "account_blocked", id="account_blocked-suspended"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(status="ACCOUNT_CLOSED"), Mandate(),
+                 "reject", "account_blocked", id="account_blocked-status-not-active"),
     # asset_not_tradable
     pytest.param(buy("VOO", 1, limit="500"),
                  make_ctx(assets={**ASSETS, "VOO": make_asset("VOO", tradable=False)}), Mandate(),
@@ -264,6 +267,11 @@ CASES = [
                  "reject", "notional_needs_market_day", id="notional-limit"),
     pytest.param(_NOTIONAL_GTC, make_ctx(), Mandate(),
                  "reject", "notional_needs_market_day", id="notional-gtc"),
+    # notional_invalid
+    pytest.param(buy("AAPL", notional="0.5"), make_ctx(), Mandate(),
+                 "reject", "notional_invalid", id="notional-below-one-dollar"),
+    pytest.param(buy("AAPL", notional="10.555"), make_ctx(), Mandate(),
+                 "reject", "notional_invalid", id="notional-sub-cent"),
     # fractional_not_allowed
     pytest.param(buy("VOO", "0.5", limit="500"), make_ctx(), Mandate(),
                  "reject", "fractional_not_allowed", id="fractional-asset-not-fractionable"),
@@ -325,6 +333,13 @@ CASES = [
                  "clamp", "buying_power", id="buying-power-clamp"),
     pytest.param(buy("VOO", 1, limit="500"), make_ctx(buying_power=D("100")), Mandate(),
                  "reject", "buying_power", id="buying-power-nothing-fits"),
+    # budget
+    pytest.param(buy("VOO", 2, limit="500"), ctx_with_position(20, "AAPL", "200", **_RICH),
+                 Mandate(budget_usd=D("4500"), max_position_pct=D("100")),
+                 "clamp", "budget", id="budget-clamp"),
+    pytest.param(buy("VOO", 1, limit="500"), ctx_with_position(20, "AAPL", "200", **_RICH),
+                 Mandate(budget_usd=D("4000"), max_position_pct=D("100")),
+                 "reject", "budget", id="budget-exhausted"),
     # orders_per_day
     pytest.param(buy("VOO", 1, limit="500"), make_ctx(orders_today=10), Mandate(),
                  "reject", "orders_per_day", id="orders-per-day"),
@@ -356,12 +371,14 @@ def test_rule_table(leg, context, mandate_, verdict, code):
     assert all(r.message for r in d.reasons)
 
 
-def test_reason_codes_are_the_briefs_table_in_order():
+def test_reason_codes_are_the_plans_table_in_order():
+    # The plan's table, plus notional_invalid (fix round 1) next to the other notional check.
     assert REASON_CODES == (
         "account_blocked", "asset_not_tradable", "denied_symbol", "order_type_not_allowed",
-        "notional_needs_market_day", "fractional_not_allowed", "limit_required", "bad_tick",
-        "price_band", "no_quote", "short_sell", "wash_trade", "max_order_usd", "max_position_pct",
-        "max_positions", "buying_power", "orders_per_day", "market_closed", "large_order",
+        "notional_needs_market_day", "notional_invalid", "fractional_not_allowed",
+        "limit_required", "bad_tick", "price_band", "no_quote", "short_sell", "wash_trade",
+        "max_order_usd", "max_position_pct", "max_positions", "buying_power", "budget",
+        "orders_per_day", "market_closed", "large_order",
     )
 
 
@@ -420,10 +437,22 @@ def test_market_buy_estimate_adds_slippage_to_ask():
     assert d.est_cost_usd == D("505.101")
 
 
-def test_market_buy_without_ask_uses_reference():
+def test_market_buy_without_ask_uses_reference_plus_slippage():
     quotes = {**QUOTES, "VOO": make_quote("VOO", last="500", bid="499.90")}
     [d] = evaluate([buy("VOO", 1)], make_ctx(quotes=quotes), Mandate())
-    assert d.est_price == D("500")
+    assert d.est_price == D("505")
+
+
+def test_market_buy_estimate_uses_reference_when_ask_is_stale_low():
+    # Review probe 4: a stale $1.00 ask must not make 900 VOO (last $500) look like a $909 order.
+    quotes = {**QUOTES, "VOO": make_quote("VOO", last="500", bid="0.50", ask="1.00")}
+    [one] = evaluate([buy("VOO", 1)], make_ctx(quotes=quotes), Mandate())
+    assert one.est_price == D("505")  # max(1.00, 500) x 1.01
+    [d] = evaluate([buy("VOO", 900)], make_ctx(quotes=quotes), Mandate(max_order_usd=D("1000")))
+    assert d.verdict == "clamp" and d.leg.qty == D("1")
+    assert reason(d, "max_order_usd").message == (
+        "Clamped qty 900 → 1: estimated cost $454,500.00 exceeds the mandate's max order $1,000.00"
+    )
 
 
 def test_market_sell_estimate_is_bid_else_reference():
@@ -604,9 +633,29 @@ def test_orders_per_day_counts_earlier_accepted_legs():
     assert boundary.verdict == "accept"
 
 
-def test_buy_earlier_in_ticket_makes_shares_available_to_sell():
-    ds = evaluate([buy("VOO", 1, limit="500"), sell("VOO", 1, limit="500")], make_ctx(), Mandate())
-    assert [d.verdict for d in ds] == ["accept", "accept"]
+def test_buy_earlier_in_ticket_never_makes_shares_sellable():
+    # Review probe 1: no position; an unfilled buy is not a position, so the sell is a short sale.
+    ds = evaluate([buy("VOO", 1, limit="486"), sell("VOO", 1, limit="514")], make_ctx(), Mandate())
+    assert [d.verdict for d in ds] == ["accept", "reject"]
+    assert codes(ds[1]) == ["short_sell"]
+
+
+def test_opposite_side_leg_in_same_ticket_is_a_wash_trade():
+    # With shares to sell, the sell passes short_sell but trades against the earlier buy leg.
+    ds = evaluate([buy("VOO", 1, limit="500"), sell("VOO", 1, limit="500")], ctx_with_position(5),
+                  Mandate())
+    assert [d.verdict for d in ds] == ["accept", "reject"]
+    assert codes(ds[1]) == ["wash_trade"]
+    assert reason(ds[1], "wash_trade").message == (
+        "An earlier buy leg for VOO in this ticket is on the opposite side; this order could "
+        "trade against it (potential wash trade)"
+    )
+
+
+def test_rejected_leg_does_not_count_for_intra_ticket_wash_trade():
+    ds = evaluate([buy("VOO", 1, limit="520"), sell("VOO", 1, limit="500")], ctx_with_position(5),
+                  Mandate())
+    assert [d.verdict for d in ds] == ["reject", "accept"]  # the buy was rejected (price band)
 
 
 def test_sells_consume_available_qty():
@@ -619,10 +668,19 @@ def test_sells_consume_available_qty():
 
 
 def test_sells_do_not_free_buying_power():
-    ds = evaluate([sell("VOO", 5, limit="500"), buy("VOO", 2, limit="500")], ctx_with_position(5),
+    ds = evaluate([sell("VOO", 5, limit="500"), buy("AAPL", 5, limit="200")], ctx_with_position(5),
                   Mandate())
     assert ds[0].verdict == "accept"
-    assert ds[1].verdict == "clamp" and ds[1].leg.qty == D("1")  # still only $950 usable
+    assert ds[1].verdict == "clamp" and ds[1].leg.qty == D("4.75")  # still only $950 usable
+
+
+def test_sells_do_not_free_budget():
+    context = ctx_with_position(20, "AAPL", "200", **_RICH)  # $4,000 invested
+    ds = evaluate([sell("AAPL", 10, limit="200"), buy("VOO", 3, limit="500")], context,
+                  Mandate(budget_usd=D("5000"), max_position_pct=D("100")))
+    assert ds[0].verdict == "accept"
+    assert ds[1].verdict == "clamp" and ds[1].leg.qty == D("2")  # $1,000 of room, not $3,000
+    assert codes(ds[1]) == ["budget"]
 
 
 def test_max_positions_counts_positions_opened_earlier_in_ticket():
@@ -630,7 +688,8 @@ def test_max_positions_counts_positions_opened_earlier_in_ticket():
     ds = evaluate(legs, make_ctx(**_RICH), Mandate(max_positions=1))
     assert [d.verdict for d in ds] == ["accept", "reject", "accept"]
     assert reason(ds[1], "max_positions").message == (
-        "Buying AAPL would open a new position, but 1 position is already open (mandate max 1)"
+        "Buying AAPL would open a new position, but 1 position is already held or on order "
+        "(mandate max 1)"
     )
 
 
@@ -646,12 +705,14 @@ def test_position_pct_accumulates_across_legs():
     )
 
 
-def test_sell_earlier_in_ticket_frees_position_room():
-    context = ctx_with_position(20, "AAPL", "200", **_RICH)  # already at the $4,000 cap
+def test_sell_earlier_in_ticket_does_not_free_position_room():
+    # Review probe 2: at the $4,000 cap, selling first must not make room for a buy-back.
+    context = ctx_with_position(20, "AAPL", "200", **_RICH)
     [alone] = evaluate([buy("AAPL", 5, limit="200")], context, Mandate())
     assert alone.verdict == "reject" and codes(alone) == ["max_position_pct"]
-    ds = evaluate([sell("AAPL", 5, limit="200"), buy("AAPL", 5, limit="200")], context, Mandate())
-    assert [d.verdict for d in ds] == ["accept", "accept"]
+    ds = evaluate([sell("AAPL", 20, limit="206"), buy("AAPL", 20, limit="194")], context, Mandate())
+    assert [d.verdict for d in ds] == ["accept", "reject"]
+    assert codes(ds[1]) == ["wash_trade"]
 
 
 def test_position_pct_base_is_capped_by_budget():
@@ -663,6 +724,175 @@ def test_position_pct_base_is_capped_by_budget():
 def test_sells_never_trip_position_pct():
     [d] = evaluate([sell("AAPL", 10, limit="200")], ctx_with_position(40, "AAPL", "200"), Mandate())
     assert d.verdict == "accept"
+
+
+# --- pending open buy orders ------------------------------------------------------------------
+
+
+def test_pending_open_buy_counts_toward_position_pct():
+    # Review probe 12: 20 AAPL @ $200 already on order fills the $4,000 cap.
+    context = make_ctx(open_orders=[make_order("AAPL", "buy", qty=D("20"), limit_price=D("200"))],
+                       **_RICH)
+    [d] = evaluate([buy("AAPL", 20, limit="200")], context, Mandate())
+    assert d.verdict == "reject" and codes(d) == ["max_position_pct"]
+    assert reason(d, "max_position_pct").message.startswith("AAPL position $4,000.00 + ")
+
+
+def test_pending_open_buy_counts_only_its_unfilled_part():
+    # 10 AAPL held ($2,000) + an order for 15 with 10 filled (5 left, $1,000) = $3,000, so a
+    # $1,000 buy still fits under the $4,000 cap (the filled 10 are not counted twice).
+    order = make_order("AAPL", "buy", qty=D("15"), filled_qty=D("10"), limit_price=D("200"),
+                       status="partially_filled")
+    context = ctx_with_position(10, "AAPL", "200", open_orders=[order], **_RICH)
+    [d] = evaluate([buy("AAPL", 5, limit="200")], context, Mandate())
+    assert d.verdict == "accept"
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        pytest.param(make_order("AAPL", "buy", qty=D("20"), type="market", limit_price=None),
+                     id="market-order-at-reference"),
+        pytest.param(make_order("AAPL", "buy", qty=None, notional=D("4000"), type="market",
+                                limit_price=None), id="notional-order"),
+    ],
+)
+def test_pending_market_and_notional_buys_are_valued(order):
+    [d] = evaluate([buy("AAPL", 1, limit="200")], make_ctx(open_orders=[order], **_RICH), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["max_position_pct"]
+
+
+def test_pending_open_sell_orders_do_not_count_as_value():
+    order = make_order("AAPL", "sell", qty=D("20"), limit_price=D("200"))
+    context = ctx_with_position(20, "AAPL", "200", open_orders=[order], **_RICH)
+    [d] = evaluate([buy("VOO", 1, limit="500")], context, Mandate())
+    assert d.verdict == "accept"
+
+
+def test_pending_open_buy_counts_as_a_held_position():
+    # Review probe 12b: VOO held + AAPL on order = 2 positions; a third symbol is over the limit.
+    context = make_ctx(positions=[make_position("VOO", 1, "500")],
+                       open_orders=[make_order("AAPL", "buy", qty=D("1"), limit_price=D("200"))],
+                       **_RICH)
+    [third] = evaluate([buy("PNY", 10, limit="0.5")], context, Mandate(max_positions=2))
+    assert third.verdict == "reject" and codes(third) == ["max_positions"]
+    [more_aapl] = evaluate([buy("AAPL", 1, limit="200")], context, Mandate(max_positions=2))
+    assert more_aapl.verdict == "accept"
+
+
+# --- cash-only buying power ------------------------------------------------------------------
+
+
+def test_buying_power_is_cash_only_on_a_margin_account():
+    # Reg T margin: buying_power is 2x the cash (non-marginable) figure; only the cash counts.
+    context = make_ctx(buying_power=D("2000"), non_marginable_buying_power=D("1000"))
+    [d] = evaluate([buy("VOO", 5, limit="500")], context, Mandate())
+    assert d.verdict == "clamp" and d.leg.qty == D("1")
+    assert reason(d, "buying_power").message == (
+        "Clamped qty 5 → 1: estimated cost $2,500.00 exceeds usable buying power $950.00"
+    )
+
+
+def test_buying_power_uses_the_lower_of_the_two_figures():
+    context = make_ctx(buying_power=D("1000"), non_marginable_buying_power=D("5000"))
+    [d] = evaluate([buy("VOO", 5, limit="500")], context, Mandate())
+    assert d.leg.qty == D("1")  # min(1000, 5000) x 95% = $950
+
+
+# --- budget -----------------------------------------------------------------------------------
+
+_S_ASSETS = {**ASSETS, **{f"S{i}": make_asset(f"S{i}") for i in range(8)}}
+_S_QUOTES = {**QUOTES, **{f"S{i}": make_quote(f"S{i}", last="100", bid="99.9", ask="100.1")
+                          for i in range(8)}}
+
+
+def test_budget_caps_total_across_legs():
+    # Review probe 19: eight $1,000 buys against a $5,000 budget.
+    legs = [buy(f"S{i}", 10, limit="100") for i in range(8)]
+    ds = evaluate(legs, make_ctx(assets=_S_ASSETS, quotes=_S_QUOTES, **_RICH),
+                  Mandate(budget_usd=D("5000")))
+    assert [d.verdict for d in ds] == ["accept"] * 5 + ["reject"] * 3
+    assert all(codes(d) == ["budget"] for d in ds[5:])
+    assert sum(d.est_cost_usd for d in ds if d.verdict != "reject") <= D("5000")
+
+
+def test_budget_counts_positions_and_pending_open_buys():
+    # $4,000 of AAPL held + $500 of AAPL on order leaves $500 of a $5,000 budget.
+    order = make_order("AAPL", "buy", qty=D("2.5"), limit_price=D("200"))
+    context = ctx_with_position(20, "AAPL", "200", open_orders=[order], **_RICH)
+    [d] = evaluate([buy("VOO", 2, limit="500")], context,
+                   Mandate(budget_usd=D("5000"), max_position_pct=D("100")))
+    assert d.verdict == "clamp" and d.leg.qty == D("1")
+    assert reason(d, "budget").message == (
+        "Clamped qty 2 → 1: invested $4,500.00 (positions, open buy orders and earlier legs) + "
+        "estimated cost $1,000.00 exceeds the mandate's budget $5,000.00"
+    )
+
+
+def test_budget_fails_closed_on_an_unpriceable_pending_buy():
+    order = make_order("NOQ", "buy", qty=D("5"), type="market", limit_price=None)
+    context = make_ctx(open_orders=[order], **_RICH)
+    [d] = evaluate([buy("VOO", 1, limit="500")], context, Mandate(budget_usd=D("5000")))
+    assert d.verdict == "reject" and codes(d) == ["budget"]
+    [no_budget] = evaluate([buy("VOO", 1, limit="500")], context, Mandate())
+    assert no_budget.verdict == "accept"
+
+
+# --- minimum sizes and plain-form output ------------------------------------------------------
+
+
+def test_notional_invalid_messages():
+    small, sub_cent = evaluate([buy("AAPL", notional="0.5"), buy("AAPL", notional="10.555")],
+                               make_ctx(), Mandate())
+    assert reason(small, "notional_invalid").message == "Notional $0.50 is below the $1.00 minimum"
+    assert reason(sub_cent, "notional_invalid").message == (
+        "Notional $10.555 has more than 2 decimal places"
+    )
+
+
+def test_fractional_clamp_below_one_dollar_rejects():
+    # Review probe 11: $0.50 of cash would clamp 10 AAPL to 0.0025 shares ($0.50).
+    [d] = evaluate([buy("AAPL", 10, limit="200")], make_ctx(buying_power=D("0.50")),
+                   Mandate(cash_buffer_pct=D("0")))
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]
+    assert reason(d, "buying_power").message == (
+        "Estimated cost $2,000.00 exceeds usable buying power $0.50, and the clamped fractional "
+        "qty 0.0025 would cost $0.50, below the $1.00 minimum"
+    )
+
+
+def test_fractional_clamp_of_exactly_one_dollar_is_allowed():
+    [d] = evaluate([buy("AAPL", 10, limit="200")], make_ctx(buying_power=D("1.00")),
+                   Mandate(cash_buffer_pct=D("0")))
+    assert d.verdict == "clamp" and d.leg.qty == D("0.005")
+
+
+def test_accepted_legs_come_back_in_plain_form():
+    # Review probe 5: exponent-form Decimals are value-equal but serialize badly.
+    leg = OrderLeg(symbol="VOO", side="buy", qty=D("1E+1"), type="limit", limit_price=D("5E+2"))
+    [d] = evaluate([leg], make_ctx(**_RICH), Mandate(max_position_pct=D("100")))
+    assert d.verdict == "accept" and d.leg == d.original
+    assert d.leg.model_dump(mode="json")["qty"] == "10"
+    assert d.leg.model_dump(mode="json")["limit_price"] == "500.00"
+    [n] = evaluate([buy("AAPL", notional="1E+2")], make_ctx(), Mandate())
+    assert n.verdict == "accept" and n.leg.model_dump(mode="json")["notional"] == "100.00"
+    [sub] = evaluate([buy("PNY", 10, limit="0.5")], make_ctx(), Mandate())
+    assert sub.leg.model_dump(mode="json")["limit_price"] == "0.5000"
+
+
+def test_integer_qty_with_trailing_zeros_is_whole():
+    # Review probe 20: 1.0000000000 (10 zero decimals) is 1 share, not a fractional/precision error.
+    leg = OrderLeg(symbol="VOO", side="buy", qty=D("1.0000000000"), type="limit",
+                   limit_price=D("500"))
+    [d] = evaluate([leg], make_ctx(), Mandate())
+    assert d.verdict == "accept" and d.leg.model_dump(mode="json")["qty"] == "1"
+
+
+def test_whole_share_asset_rejects_any_nonzero_fraction():
+    leg = OrderLeg(symbol="VOO", side="buy", qty=D("1.00000000001"), type="limit",
+                   limit_price=D("500"))
+    [d] = evaluate([leg], make_ctx(), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["fractional_not_allowed"]
 
 
 # --- warnings ---------------------------------------------------------------------------------

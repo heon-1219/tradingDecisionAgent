@@ -9,26 +9,36 @@ Pure and deterministic: no I/O, no clock reads, no randomness, and the inputs ar
 or aliased (every returned leg is a copy). All arithmetic runs in a private decimal context, so the
 caller's ambient `decimal` settings cannot change a result. Money is `Decimal`, never `float`.
 
-Per leg, the rules run in `_RULES` order (the task brief's reason-code table, mirrored by
+Per leg, the rules run in `_RULES` order (the plan's reason-code table, mirrored by
 `REASON_CODES`) and stop at the first blocking reason; warnings and clamps found before that stay
 on the decision. Legs are evaluated in list order, and every accepted or clamped leg carries its
-effects into the legs after it (`_Book`): buys consume usable buying power and add to the working
-position (value, and qty available to sell), sells take shares and value away, each counts
-towards `max_orders_per_day`, and a buy into a symbol not yet held opens a position for
-`max_positions`. Rejected legs have no effect.
+effects into the legs after it (`_Book`), always in the conservative direction:
+- buys consume buying power and budget and add to the symbol's position value, but never make
+  shares sellable (an unfilled buy is not a position);
+- sells use up qty available to sell, but never free buying power, budget or position value;
+- a later leg on the opposite side of a symbol already traded in the ticket is a `wash_trade`;
+- each leg counts towards `max_orders_per_day`, and a buy into a symbol not yet held (or on
+  order) opens a position for `max_positions`.
+Rejected legs have no effect. Pending open BUY orders in `ctx.open_orders` count as position value,
+as invested budget and as held symbols (remaining qty x limit price, else x the reference price;
+or the unfilled notional).
 
 Prices and estimates:
 - reference price: the last trade, else the bid/ask midpoint (both sides needed); a missing or
   non-positive value counts as absent, and no reference at all is `no_quote`.
-- `est_price`: the limit price if set; else, for a buy, ask x (1 + MARKET_SLIPPAGE_PCT/100) and,
-  for a sell, the bid - each falling back to the reference price when that side is missing.
+- `est_price`: the limit price if set; else, for a buy, max(ask, reference) x
+  (1 + MARKET_SLIPPAGE_PCT/100), so a stale low ask can't understate the cost; for a sell, the
+  bid, falling back to the reference price.
 - `est_cost_usd`: est_price x qty, or the notional.
+- Buying power is cash only: min(buying_power, non_marginable_buying_power), never margin.
 - Rejected legs report `leg == original` and the estimates of the original leg.
 
 Clamps: a qty clamp floors to whole shares unless fractional trading is allowed for the leg
 (asset fractionable, `mandate.allow_fractional`, time_in_force "day"), in which case it floors to
-9 decimals; a notional clamp floors to cents and may not fall below $1.00. A clamp that leaves
-nothing rejects the leg with the clamping rule's own code.
+9 decimals and a fractional result must still cost at least $1.00; a notional clamp floors to
+cents and may not fall below $1.00. A clamp that leaves nothing rejects the leg with the clamping
+rule's own code. Accepted and clamped legs come back with plain-form Decimals (qty without
+exponent or trailing zeros, notional in cents, limit price at its tick precision).
 """
 from __future__ import annotations
 
@@ -55,6 +65,7 @@ from finagent.trading.models import (
     Mandate,
     MarketContext,
     OrderLeg,
+    OrderSnapshot,
     Quote,
     RiskDecision,
     RiskReason,
@@ -104,13 +115,10 @@ def _est_price(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decim
         return leg.limit_price
     if leg.side == "buy":
         ask = _positive(quote.ask) if quote is not None else None
-        if ask is not None:
-            return ask * (1 + MARKET_SLIPPAGE_PCT / _HUNDRED)
-    else:
-        bid = _positive(quote.bid) if quote is not None else None
-        if bid is not None:
-            return bid
-    return ref
+        known = [p for p in (ask, ref) if p is not None]
+        return max(known) * (1 + MARKET_SLIPPAGE_PCT / _HUNDRED) if known else None
+    bid = _positive(quote.bid) if quote is not None else None
+    return bid if bid is not None else ref
 
 
 def _est_cost(leg: OrderLeg, price: Decimal | None) -> Decimal | None:
@@ -154,6 +162,40 @@ def _is_fractional(qty: Decimal) -> bool:
     return qty != qty.to_integral_value()
 
 
+def _open_buy_value(order: OrderSnapshot, ctx: MarketContext) -> Decimal | None:
+    """What a pending open buy order still commits: the unfilled notional, or the unfilled qty x
+    its limit price (else the reference price, else the position's current price). None when it
+    can't be priced at all."""
+    filled = order.filled_qty or _ZERO
+    if order.notional is not None:
+        return max(order.notional - filled * (order.filled_avg_price or _ZERO), _ZERO)
+    remaining = max((order.qty or _ZERO) - filled, _ZERO)
+    symbol = order.symbol.upper()
+    position = ctx.positions.get(symbol)
+    for price in (
+        _positive(order.limit_price),
+        _reference(ctx.quotes.get(symbol)),
+        _positive(position.current_price) if position is not None else None,
+    ):
+        if price is not None:
+            return remaining * price
+    return _ZERO if remaining == 0 else None
+
+
+def _normalized(leg: OrderLeg) -> OrderLeg:
+    """The same leg with plain-form Decimals, so a ticket serializes cleanly (5E+2 -> 500.00).
+    Values never change: by now qty has at most 9 decimals, the notional at most 2 (cents) and
+    the limit price sits on its tick."""
+    update: dict[str, Decimal] = {}
+    if leg.qty is not None:
+        update["qty"] = _plain(leg.qty)
+    if leg.notional is not None:
+        update["notional"] = leg.notional.quantize(_CENT)
+    if leg.limit_price is not None:
+        update["limit_price"] = leg.limit_price.quantize(_tick_for(leg.limit_price))
+    return leg.model_copy(update=update)
+
+
 # --- message formatting (Decimal only, never float) ---------------------------------------------
 
 
@@ -183,36 +225,57 @@ def _pct(value: Decimal) -> str:
 
 @dataclass
 class _Book:
-    """What the legs accepted so far in this `evaluate` call have committed."""
+    """The working account state: the snapshot plus pending open buy orders, updated by each leg
+    accepted so far in this `evaluate` call. Every update is in the conservative direction."""
 
-    bp_used: Decimal
-    orders: int
-    held: set[str]  # symbols with an open position, including ones opened earlier in the ticket
-    qty_available: dict[str, Decimal]
-    value: dict[str, Decimal]  # position market value for max_position_pct
+    bought: Decimal  # est. cost of buys accepted earlier in this ticket (buying power and budget)
+    orders: int  # legs accepted earlier in this ticket
+    held: set[str]  # symbols held, on order (pending open buy), or bought earlier in the ticket
+    qty_available: dict[str, Decimal]  # shares available to sell; only sells change it
+    value: dict[str, Decimal]  # position + pending open buys + earlier buys, per symbol
+    invested: Decimal  # all positions' value + all pending open buys (budget), before this ticket
+    unpriced: tuple[str, ...]  # symbols with a pending open buy that can't be valued
+    sides: dict[str, set[str]]  # sides already traded in this ticket, per symbol
 
     @classmethod
     def from_ctx(cls, ctx: MarketContext) -> "_Book":
+        held = {s for s, p in ctx.positions.items() if p.qty != 0}
+        value = {s: abs(p.market_value) for s, p in ctx.positions.items()}
+        invested = sum(value.values(), _ZERO)
+        unpriced: list[str] = []
+        for order in ctx.open_orders:
+            if order.side.lower() != "buy":
+                continue
+            symbol = order.symbol.upper()
+            held.add(symbol)
+            pending = _open_buy_value(order, ctx)
+            if pending is None:
+                unpriced.append(symbol)
+                continue
+            value[symbol] = value.get(symbol, _ZERO) + pending
+            invested += pending
         return cls(
-            bp_used=_ZERO,
+            bought=_ZERO,
             orders=0,
-            held={s for s, p in ctx.positions.items() if p.qty != 0},
+            held=held,
             qty_available={s: p.qty_available for s, p in ctx.positions.items()},
-            value={s: abs(p.market_value) for s, p in ctx.positions.items()},
+            value=value,
+            invested=invested,
+            unpriced=tuple(unpriced),
+            sides={},
         )
 
     def commit(self, leg: OrderLeg, price: Decimal, cost: Decimal) -> None:
         symbol = leg.symbol
-        shares = leg.qty if leg.qty is not None else leg.notional / price
         self.orders += 1
+        self.sides.setdefault(symbol, set()).add(leg.side)
         if leg.side == "buy":
-            self.bp_used += cost
+            self.bought += cost
             self.held.add(symbol)
-            self.qty_available[symbol] = self.qty_available.get(symbol, _ZERO) + shares
             self.value[symbol] = self.value.get(symbol, _ZERO) + cost
         else:
+            shares = leg.qty if leg.qty is not None else leg.notional / price
             self.qty_available[symbol] = self.qty_available.get(symbol, _ZERO) - shares
-            self.value[symbol] = max(_ZERO, self.value.get(symbol, _ZERO) - cost)
 
 
 @dataclass
@@ -271,11 +334,15 @@ def _shrink(c: _Check, code: str, budget: Decimal, why: str) -> None:
         c.leg = leg.model_copy(update={"notional": new_notional})
         c.warn(code, f"Clamped notional {_usd(leg.notional)} → {_usd(new_notional)}: {why}")
         return
-    whole = c.whole_shares
-    new_qty = min(_fit_qty(budget, c.est_price, whole), leg.qty)
+    whole, price = c.whole_shares, c.est_price
+    new_qty = min(_fit_qty(budget, price, whole), leg.qty)
     if new_qty <= 0:
         kind = "whole-share quantity" if whole else "quantity"
         c.block(code, f"{because}, and no {kind} fits")
+        return
+    if _is_fractional(new_qty) and new_qty * price < MIN_NOTIONAL_USD:
+        c.block(code, f"{because}, and the clamped fractional qty {_qty(new_qty)} would cost "
+                      f"{_usd(new_qty * price)}, below the {_usd(MIN_NOTIONAL_USD)} minimum")
         return
     c.leg = leg.model_copy(update={"qty": new_qty})
     c.warn(code, f"Clamped qty {_qty(leg.qty)} → {_qty(new_qty)}: {why}")
@@ -291,6 +358,8 @@ def _account_blocked(c: _Check) -> None:
         for name in ("trading_blocked", "account_blocked", "trade_suspended_by_user")
         if getattr(account, name)
     ]
+    if account.status.upper() != "ACTIVE":
+        flags.insert(0, f"status {account.status}")
     if flags:
         c.block("account_blocked", f"The account cannot trade right now ({', '.join(flags)})")
 
@@ -342,6 +411,19 @@ def _notional_needs_market_day(c: _Check) -> None:
             f"A notional (dollar) order must be a market day order, not {leg.type} "
             f"{leg.time_in_force}",
         )
+
+
+def _notional_invalid(c: _Check) -> None:
+    notional = c.leg.notional
+    if notional is None:
+        return
+    if notional < MIN_NOTIONAL_USD:
+        c.block(
+            "notional_invalid",
+            f"Notional {_price(notional)} is below the {_usd(MIN_NOTIONAL_USD)} minimum",
+        )
+    elif notional.normalize().as_tuple().exponent < -2:
+        c.block("notional_invalid", f"Notional {_price(notional)} has more than 2 decimal places")
 
 
 def _fractional_not_allowed(c: _Check) -> None:
@@ -459,6 +541,12 @@ def _wash_trade(c: _Check) -> None:
                 "side; this order could trade against it (potential wash trade)",
             )
             return
+    if opposite in c.book.sides.get(leg.symbol, ()):
+        c.block(
+            "wash_trade",
+            f"An earlier {opposite} leg for {leg.symbol} in this ticket is on the opposite side; "
+            "this order could trade against it (potential wash trade)",
+        )
 
 
 def _max_order_usd(c: _Check) -> None:
@@ -497,25 +585,52 @@ def _max_positions(c: _Check) -> None:
         return
     count, cap = len(c.book.held), c.mandate.max_positions
     if count >= cap:
-        open_ = "1 position is" if count == 1 else f"{count} positions are"
+        held = "1 position is" if count == 1 else f"{count} positions are"
         c.block(
             "max_positions",
-            f"Buying {leg.symbol} would open a new position, but {open_} already open "
-            f"(mandate max {cap})",
+            f"Buying {leg.symbol} would open a new position, but {held} already held or on "
+            f"order (mandate max {cap})",
         )
 
 
 def _buying_power(c: _Check) -> None:
     if c.leg.side != "buy":
         return
-    buying_power = c.ctx.account.buying_power
-    used = c.book.bp_used
-    usable = buying_power * (_HUNDRED - c.mandate.cash_buffer_pct) / _HUNDRED - used
+    account = c.ctx.account
+    cash = account.buying_power
+    if account.non_marginable_buying_power is not None:  # cash only: never trade on margin
+        cash = min(cash, account.non_marginable_buying_power)
+    used = c.book.bought
+    usable = cash * (_HUNDRED - c.mandate.cash_buffer_pct) / _HUNDRED - used
     cost = c.est_cost
     if cost > usable:
         after = f" (after {_usd(used)} committed by earlier legs)" if used > 0 else ""
         _shrink(c, "buying_power", usable,
                 f"estimated cost {_usd(cost)} exceeds usable buying power {_usd(usable)}{after}")
+
+
+def _budget(c: _Check) -> None:
+    budget = c.mandate.budget_usd
+    if budget is None or c.leg.side != "buy":
+        return
+    if c.book.unpriced:
+        symbols = ", ".join(c.book.unpriced)
+        c.block(
+            "budget",
+            f"Cannot check the {_usd(budget)} budget: a pending open buy order for {symbols} has "
+            "no price and no quote",
+        )
+        return
+    invested = c.book.invested + c.book.bought
+    cost = c.est_cost
+    if invested + cost > budget:
+        _shrink(
+            c,
+            "budget",
+            budget - invested,
+            f"invested {_usd(invested)} (positions, open buy orders and earlier legs) + estimated "
+            f"cost {_usd(cost)} exceeds the mandate's budget {_usd(budget)}",
+        )
 
 
 def _orders_per_day(c: _Check) -> None:
@@ -548,13 +663,15 @@ def _large_order(c: _Check) -> None:
         )
 
 
-# Evaluation order = the brief's reason-code table. Each rule is named after the one code it emits.
+# Evaluation order = the plan's reason-code table (plus `notional_invalid`, placed with the other
+# notional-shape check). Each rule is named after the one code it emits.
 _RULES: tuple[Callable[[_Check], None], ...] = (
     _account_blocked,
     _asset_not_tradable,
     _denied_symbol,
     _order_type_not_allowed,
     _notional_needs_market_day,
+    _notional_invalid,
     _fractional_not_allowed,
     _limit_required,
     _bad_tick,
@@ -566,6 +683,7 @@ _RULES: tuple[Callable[[_Check], None], ...] = (
     _max_position_pct,
     _max_positions,
     _buying_power,
+    _budget,
     _orders_per_day,
     _market_closed,
     _large_order,
@@ -607,8 +725,8 @@ def evaluate(legs: list[OrderLeg], ctx: MarketContext, mandate: Mandate) -> list
             if check.blocked:
                 verdict, final = "reject", original.model_copy()
             else:
-                verdict = "clamp" if check.leg != original else "accept"
-                final = check.leg
+                final = _normalized(check.leg)
+                verdict = "clamp" if final != original else "accept"  # compares values
             price = _est_price(final, quote, ref)
             cost = _est_cost(final, price)
             if verdict != "reject":
@@ -626,16 +744,22 @@ def _decision(
     price: Decimal | None,
     cost: Decimal | None,
 ) -> RiskDecision:
+    """Build the decision, failing closed on a leg that bypassed `OrderLeg` validation.
+
+    `OrderLeg`'s model validator re-runs on an instance embedded in a `RiskDecision`, so a leg
+    built with `model_construct` (or mutated after validation) into a shape OrderLeg forbids - a
+    limit order without a price, a notional limit/gtc order, a non-positive qty - cannot sit in a
+    validated decision. The `model_construct` fallback below is taken only for such a leg that a
+    rule has already REJECTED: the caller still gets the reject verdict and its reason, and the
+    leg can never reach a ticket as tradable. An accepted or clamped invalid leg is never papered
+    over this way - its ValidationError propagates, so `evaluate` fails closed."""
     fields = dict(index=index, verdict=verdict, leg=leg, original=original, reasons=reasons,
                   est_price=price, est_cost_usd=cost)
     try:
         return RiskDecision(**fields)
     except ValidationError:
         if verdict != "reject":
-            raise  # never hand back an accepted/clamped leg that fails OrderLeg's own validation
-        # OrderLeg's after-validator re-runs on an embedded instance, so a leg that bypassed it
-        # (model_construct) cannot sit in a validated RiskDecision. It is rejected anyway; build the
-        # decision unvalidated so the caller still gets the verdict and reason.
+            raise
         return RiskDecision.model_construct(**fields)
 
 
