@@ -272,6 +272,10 @@ CASES = [
                  "reject", "notional_invalid", id="notional-below-one-dollar"),
     pytest.param(buy("AAPL", notional="10.555"), make_ctx(), Mandate(),
                  "reject", "notional_invalid", id="notional-sub-cent"),
+    pytest.param(buy("AAPL", "0.000000001", limit="200"), make_ctx(), Mandate(),
+                 "reject", "notional_invalid", id="tiny-fractional-qty-cost-below-one-dollar"),
+    pytest.param(buy("PNY", 1), make_ctx(), Mandate(),
+                 "reject", "notional_invalid", id="whole-share-market-cost-below-one-dollar"),
     # fractional_not_allowed
     pytest.param(buy("VOO", "0.5", limit="500"), make_ctx(), Mandate(),
                  "reject", "fractional_not_allowed", id="fractional-asset-not-fractionable"),
@@ -283,7 +287,7 @@ CASES = [
                  "reject", "fractional_not_allowed", id="fractional-notional-not-fractionable"),
     pytest.param(buy("AAPL", notional="100"), make_ctx(), Mandate(allow_fractional=False),
                  "reject", "fractional_not_allowed", id="fractional-notional-mandate-disallows"),
-    pytest.param(buy("AAPL", "0.0000000001", limit="200"), make_ctx(), Mandate(),
+    pytest.param(buy("AAPL", "0.0100000001", limit="200"), make_ctx(), Mandate(),
                  "reject", "fractional_not_allowed", id="fractional-more-than-9-decimals"),
     # limit_required (OrderLeg itself forbids this; the rule is defense in depth)
     pytest.param(_LIMIT_WITHOUT_PRICE, make_ctx(), Mandate(),
@@ -291,8 +295,10 @@ CASES = [
     # bad_tick
     pytest.param(buy("VOO", 1, limit="500.005"), make_ctx(), Mandate(),
                  "clamp", "bad_tick", id="bad-tick-rounded"),
-    pytest.param(buy("PNY", 1, limit="0.00004"), make_ctx(), Mandate(),
+    pytest.param(buy("PNY", 100000, limit="0.00004"), make_ctx(), Mandate(),
                  "reject", "bad_tick", id="bad-tick-rounds-to-zero"),
+    pytest.param(buy("PNY", 3, limit="0.33334"), make_ctx(), Mandate(),
+                 "reject", "bad_tick", id="bad-tick-rounds-cost-below-one-dollar"),
     # price_band
     pytest.param(buy("VOO", 1, limit="520"), make_ctx(), Mandate(),
                  "reject", "price_band", id="price-band-buy-above"),
@@ -420,9 +426,9 @@ def test_rejected_leg_still_gets_estimates_when_priceable():
 
 def test_invalid_leg_that_is_accepted_would_raise_rather_than_pass():
     # A leg that bypassed OrderLeg validation is never returned as accepted: a rule rejects it, or
-    # building the decision fails closed.
-    bad = OrderLeg.model_construct(symbol="VOO", side="buy", qty=D("-1"), notional=None,
-                                   type="limit", time_in_force="day", limit_price=D("500"))
+    # building the decision fails closed. (A market order carrying a limit price passes every rule.)
+    bad = OrderLeg.model_construct(symbol="VOO", side="buy", qty=D("1"), notional=None,
+                                   type="market", time_in_force="day", limit_price=D("500"))
     with pytest.raises(ValueError):
         evaluate([bad], make_ctx(), Mandate())
 
@@ -496,8 +502,9 @@ def test_price_band_boundary_is_inclusive():
         pytest.param(buy("VOO", 1, limit="500.009"), make_ctx(), D("500.00"), id="buy>=1-floors"),
         pytest.param(sell("VOO", 1, limit="500.001"), ctx_with_position(5), D("500.01"),
                      id="sell>=1-ceils"),
-        pytest.param(buy("PNY", 1, limit="0.49995"), make_ctx(), D("0.4999"), id="buy<1-floors"),
-        pytest.param(sell("PNY", 1, limit="0.49915"), ctx_with_position(100, "PNY", "0.5"),
+        pytest.param(buy("PNY", 100, limit="0.49995"), make_ctx(), D("0.4999"),
+                     id="buy<1-floors"),
+        pytest.param(sell("PNY", 100, limit="0.49915"), ctx_with_position(100, "PNY", "0.5"),
                      D("0.4992"), id="sell<1-ceils"),
     ],
 )
@@ -519,13 +526,13 @@ def test_tick_rounding_message():
 
 def test_sub_dollar_sell_rounding_up_to_a_dollar_uses_cent_ticks():
     quotes = {**QUOTES, "PNY": make_quote("PNY", last="1.00", bid="0.9999", ask="1.0001")}
-    [d] = evaluate([sell("PNY", 1, limit="0.99995")], ctx_with_position(10, "PNY", "1", quotes=quotes),
-                   Mandate())
+    [d] = evaluate([sell("PNY", 10, limit="0.99995")],
+                   ctx_with_position(10, "PNY", "1", quotes=quotes), Mandate())
     assert d.leg.limit_price == D("1.00")
     assert d.leg.limit_price.as_tuple().exponent == -2
 
 
-@pytest.mark.parametrize("leg", [buy("VOO", 1, limit="500.000"), buy("PNY", 1, limit="0.4999")])
+@pytest.mark.parametrize("leg", [buy("VOO", 1, limit="500.000"), buy("PNY", 100, limit="0.4999")])
 def test_on_tick_price_is_untouched(leg):
     [d] = evaluate([leg], make_ctx(), Mandate())
     assert d.verdict == "accept" and d.reasons == []
@@ -612,6 +619,29 @@ def test_notional_sell_is_checked_against_available_shares():
     )
     assert too_much[0].verdict == "reject" and codes(too_much[0]) == ["short_sell"]  # 300/199.90 > 1
     assert fine[0].verdict == "accept"
+
+
+_STALE_HIGH_BID = {**QUOTES, "AAPL": make_quote("AAPL", last="200", bid="400", ask="401")}
+
+
+def test_notional_sell_uses_the_lower_of_bid_and_reference():
+    # Fix round 1 open item B: at a stale $400 bid, $300 looks like 0.75 shares; at the $200
+    # reference it is 1.5 shares - more than the 1 held.
+    context = ctx_with_position(1, "AAPL", "200", quotes=_STALE_HIGH_BID)
+    [d] = evaluate([sell("AAPL", notional="300")], context, Mandate())
+    assert d.verdict == "reject" and codes(d) == ["short_sell"]
+    assert reason(d, "short_sell").message == (
+        "Selling $300.00 of AAPL (about 1.5 shares) exceeds the 1 AAPL available to sell; short "
+        "selling is not allowed"
+    )
+
+
+def test_notional_sells_use_the_conservative_share_count_across_legs():
+    # 2 held: $300 at the $200 reference uses 1.5, so $150 (0.75 more) no longer fits.
+    context = ctx_with_position(2, "AAPL", "200", quotes=_STALE_HIGH_BID)
+    ds = evaluate([sell("AAPL", notional="300"), sell("AAPL", notional="150")], context, Mandate())
+    assert [d.verdict for d in ds] == ["accept", "reject"]
+    assert codes(ds[1]) == ["short_sell"]
 
 
 # --- sequential effects across legs ----------------------------------------------------------
@@ -856,9 +886,57 @@ def test_fractional_clamp_below_one_dollar_rejects():
                    Mandate(cash_buffer_pct=D("0")))
     assert d.verdict == "reject" and codes(d) == ["buying_power"]
     assert reason(d, "buying_power").message == (
-        "Estimated cost $2,000.00 exceeds usable buying power $0.50, and the clamped fractional "
-        "qty 0.0025 would cost $0.50, below the $1.00 minimum"
+        "Estimated cost $2,000.00 exceeds usable buying power $0.50, and the clamped qty 0.0025 "
+        "would cost $0.50, below the $1.00 minimum"
     )
+
+
+def test_whole_share_clamp_below_one_dollar_rejects_with_the_clamping_code():
+    # $0.90 cap on a $0.50 stock fits exactly 1 share = $0.50: under the $1.00 floor.
+    [d] = evaluate([buy("PNY", 100, limit="0.5")], make_ctx(), Mandate(max_order_usd=D("0.90")))
+    assert d.verdict == "reject" and codes(d) == ["max_order_usd"]
+
+
+def test_tiny_original_qty_is_rejected_as_below_minimum_size():
+    # Fix round 1 open item A: 1e-9 AAPL at $200 is $0.0000002.
+    [d] = evaluate([buy("AAPL", "0.000000001", limit="200")], make_ctx(), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["notional_invalid"]
+    assert reason(d, "notional_invalid").message == (
+        "Estimated cost $0.0000002 of 0.000000001 AAPL is below the $1.00 minimum order size"
+    )
+
+
+def test_tick_rounding_that_pushes_cost_below_one_dollar_rejects():
+    # 3 x $0.33334 = $1.00002 as proposed, but the buy tick floors it to 3 x $0.3333 = $0.9999.
+    [d] = evaluate([buy("PNY", 3, limit="0.33334")], make_ctx(), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["bad_tick"]
+    assert reason(d, "bad_tick").message == (
+        "Rounding the limit price $0.33334 down to $0.3333 would make the estimated cost "
+        "$0.9999, below the $1.00 minimum order size"
+    )
+
+
+def test_no_accepted_or_clamped_leg_costs_less_than_one_dollar():
+    # Sweep sizes, prices and caps around the $1.00 floor; whatever survives must be >= $1.00.
+    context = ctx_with_position(1000, "PNY", "0.5")
+    legs = [
+        make(symbol, qty, limit=limit)
+        for make in (buy, sell)
+        for symbol, limits in (("PNY", (None, "0.4999", "0.50005", "0.33334")),
+                               ("AAPL", (None, "199", "200.001")))
+        for qty in ("0.001", "0.004", "0.005", "0.006", "1", "2", "3", "7")
+        for limit in limits
+        if not (make is sell and symbol == "AAPL")  # no AAPL position to sell
+    ]
+    survivors = 0
+    for mandate_ in (Mandate(), Mandate(max_order_usd=D("1.20")), Mandate(max_order_usd=D("0.90"))):
+        for context_ in (context, ctx_with_position(1000, "PNY", "0.5", buying_power=D("1.10"))):
+            for leg in legs:
+                [d] = evaluate([leg], context_, mandate_)
+                if d.verdict != "reject":
+                    survivors += 1
+                    assert d.est_cost_usd >= D("1.00"), (leg, mandate_, d)
+    assert survivors > 50  # the sweep really exercised accepted and clamped legs
 
 
 def test_fractional_clamp_of_exactly_one_dollar_is_allowed():

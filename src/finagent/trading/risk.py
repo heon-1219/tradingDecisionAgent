@@ -29,15 +29,15 @@ Prices and estimates:
 - `est_price`: the limit price if set; else, for a buy, max(ask, reference) x
   (1 + MARKET_SLIPPAGE_PCT/100), so a stale low ask can't understate the cost; for a sell, the
   bid, falling back to the reference price.
-- `est_cost_usd`: est_price x qty, or the notional.
+- `est_cost_usd`: est_price x qty, or the notional. Every leg must come to at least $1.00.
+- A notional sell counts as notional / min(bid, reference) shares, never fewer.
 - Buying power is cash only: min(buying_power, non_marginable_buying_power), never margin.
 - Rejected legs report `leg == original` and the estimates of the original leg.
 
 Clamps: a qty clamp floors to whole shares unless fractional trading is allowed for the leg
 (asset fractionable, `mandate.allow_fractional`, time_in_force "day"), in which case it floors to
-9 decimals and a fractional result must still cost at least $1.00; a notional clamp floors to
-cents and may not fall below $1.00. A clamp that leaves nothing rejects the leg with the clamping
-rule's own code. Accepted and clamped legs come back with plain-form Decimals (qty without
+9 decimals; a notional clamp floors to cents. A clamp (or tick rounding) that leaves nothing, or
+less than $1.00, rejects the leg with that rule's own code. Accepted and clamped legs come back with plain-form Decimals (qty without
 exponent or trailing zeros, notional in cents, limit price at its tick precision).
 """
 from __future__ import annotations
@@ -119,6 +119,15 @@ def _est_price(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decim
         return max(known) * (1 + MARKET_SLIPPAGE_PCT / _HUNDRED) if known else None
     bid = _positive(quote.bid) if quote is not None else None
     return bid if bid is not None else ref
+
+
+def _shares_sold(leg: OrderLeg, quote: Quote | None, ref: Decimal | None) -> Decimal:
+    """Shares a sell leg takes out of the position. A notional sell converts at the LOWER of the
+    bid and the reference price (whichever exists), so a stale high bid can't understate it."""
+    if leg.qty is not None:
+        return leg.qty
+    bid = _positive(quote.bid) if quote is not None else None
+    return leg.notional / min(p for p in (bid, ref) if p is not None)
 
 
 def _est_cost(leg: OrderLeg, price: Decimal | None) -> Decimal | None:
@@ -265,7 +274,8 @@ class _Book:
             sides={},
         )
 
-    def commit(self, leg: OrderLeg, price: Decimal, cost: Decimal) -> None:
+    def commit(self, leg: OrderLeg, cost: Decimal, sold: Decimal | None) -> None:
+        """Carry an accepted leg forward; `sold` is `_shares_sold` for a sell, None for a buy."""
         symbol = leg.symbol
         self.orders += 1
         self.sides.setdefault(symbol, set()).add(leg.side)
@@ -274,8 +284,7 @@ class _Book:
             self.held.add(symbol)
             self.value[symbol] = self.value.get(symbol, _ZERO) + cost
         else:
-            shares = leg.qty if leg.qty is not None else leg.notional / price
-            self.qty_available[symbol] = self.qty_available.get(symbol, _ZERO) - shares
+            self.qty_available[symbol] = self.qty_available.get(symbol, _ZERO) - sold
 
 
 @dataclass
@@ -340,9 +349,9 @@ def _shrink(c: _Check, code: str, budget: Decimal, why: str) -> None:
         kind = "whole-share quantity" if whole else "quantity"
         c.block(code, f"{because}, and no {kind} fits")
         return
-    if _is_fractional(new_qty) and new_qty * price < MIN_NOTIONAL_USD:
-        c.block(code, f"{because}, and the clamped fractional qty {_qty(new_qty)} would cost "
-                      f"{_usd(new_qty * price)}, below the {_usd(MIN_NOTIONAL_USD)} minimum")
+    if new_qty * price < MIN_NOTIONAL_USD:
+        c.block(code, f"{because}, and the clamped qty {_qty(new_qty)} would cost "
+                      f"{_price(new_qty * price)}, below the {_usd(MIN_NOTIONAL_USD)} minimum")
         return
     c.leg = leg.model_copy(update={"qty": new_qty})
     c.warn(code, f"Clamped qty {_qty(leg.qty)} → {_qty(new_qty)}: {why}")
@@ -414,16 +423,30 @@ def _notional_needs_market_day(c: _Check) -> None:
 
 
 def _notional_invalid(c: _Check) -> None:
-    notional = c.leg.notional
-    if notional is None:
+    """Order size: a notional must be at least $1.00 in whole cents, and so must any leg's
+    estimated cost (Alpaca rejects sub-$1 orders). A qty leg with no estimate yet has no quote,
+    which `_no_quote` blocks. Later price/qty changes keep the $1.00 floor themselves: `_bad_tick`
+    and `_shrink` reject under their own codes."""
+    leg = c.leg
+    notional = leg.notional
+    if notional is not None:
+        if notional < MIN_NOTIONAL_USD:
+            c.block(
+                "notional_invalid",
+                f"Notional {_price(notional)} is below the {_usd(MIN_NOTIONAL_USD)} minimum",
+            )
+        elif notional.normalize().as_tuple().exponent < -2:
+            c.block(
+                "notional_invalid", f"Notional {_price(notional)} has more than 2 decimal places"
+            )
         return
-    if notional < MIN_NOTIONAL_USD:
+    cost = c.est_cost
+    if cost is not None and cost < MIN_NOTIONAL_USD:
         c.block(
             "notional_invalid",
-            f"Notional {_price(notional)} is below the {_usd(MIN_NOTIONAL_USD)} minimum",
+            f"Estimated cost {_price(cost)} of {_qty(leg.qty)} {leg.symbol} is below the "
+            f"{_usd(MIN_NOTIONAL_USD)} minimum order size",
         )
-    elif notional.normalize().as_tuple().exponent < -2:
-        c.block("notional_invalid", f"Notional {_price(notional)} has more than 2 decimal places")
 
 
 def _fractional_not_allowed(c: _Check) -> None:
@@ -472,6 +495,14 @@ def _bad_tick(c: _Check) -> None:
         return
     if rounded != price:
         direction = "down" if leg.side == "buy" else "up"
+        if leg.qty is not None and rounded * leg.qty < MIN_NOTIONAL_USD:
+            c.block(
+                "bad_tick",
+                f"Rounding the limit price {_price(price)} {direction} to {_price(rounded)} "
+                f"would make the estimated cost {_price(rounded * leg.qty)}, below the "
+                f"{_usd(MIN_NOTIONAL_USD)} minimum order size",
+            )
+            return
         c.leg = leg.model_copy(update={"limit_price": rounded})
         c.warn(
             "bad_tick",
@@ -510,7 +541,7 @@ def _short_sell(c: _Check) -> None:
         return
     symbol = leg.symbol
     have = c.book.qty_available.get(symbol, _ZERO)
-    want = leg.qty if leg.qty is not None else leg.notional / c.est_price
+    want = _shares_sold(leg, c.quote, c.ref)  # `_no_quote` has passed, so a price exists
     if want <= have:
         return
     selling = f"{_qty(want)} {symbol}" if leg.qty is not None else (
@@ -730,7 +761,8 @@ def evaluate(legs: list[OrderLeg], ctx: MarketContext, mandate: Mandate) -> list
             price = _est_price(final, quote, ref)
             cost = _est_cost(final, price)
             if verdict != "reject":
-                book.commit(final, price, cost)
+                sold = _shares_sold(final, quote, ref) if final.side == "sell" else None
+                book.commit(final, cost, sold)
             decisions.append(_decision(index, verdict, final, original, check.reasons, price, cost))
         return decisions
 
