@@ -1,0 +1,758 @@
+"""Tests for `finagent.trading.risk` - the deterministic pre-trade risk rules.
+
+Fixture world (see the factories below): an account with $20,000 equity and $1,000 buying power,
+the default `Mandate()` (20% max position, 5% cash buffer -> $950 usable, 3% price band, 10 orders
+a day), the market open, and four symbols:
+
+- VOO  last $500, bid $499.90, ask $500.10 - a *whole-share* asset in this fixture
+       (`fractionable=False`), so a clamp lands on an integer the way the brief's cases expect;
+- AAPL last $200, bid $199.90, ask $200.10 - fractionable;
+- PNY  last $0.50, bid $0.4990, ask $0.5010 - a sub-dollar, whole-share asset (sub-penny ticks);
+- NOQ  a tradable asset with no quote at all.
+"""
+from __future__ import annotations
+
+from decimal import ROUND_UP, Decimal, localcontext
+
+import pytest
+
+from finagent.trading.models import (
+    AccountSnapshot,
+    AssetInfo,
+    ClockInfo,
+    Mandate,
+    MarketContext,
+    OrderLeg,
+    OrderSnapshot,
+    PositionSnapshot,
+    Quote,
+    RiskDecision,
+    RiskReason,
+)
+from finagent.trading.risk import MARKET_SLIPPAGE_PCT, REASON_CODES, evaluate, overall
+
+D = Decimal
+
+# --- factories -----------------------------------------------------------------------------
+
+
+def make_account(**over) -> AccountSnapshot:
+    fields = dict(
+        status="ACTIVE",
+        equity=D("20000"),
+        cash=D("1000"),
+        buying_power=D("1000"),
+        non_marginable_buying_power=D("1000"),
+        last_equity=D("20000"),
+        trading_blocked=False,
+        account_blocked=False,
+        trade_suspended_by_user=False,
+        shorting_enabled=False,
+    )
+    fields.update(over)
+    return AccountSnapshot(**fields)
+
+
+def make_asset(symbol: str, *, fractionable: bool = True, **over) -> AssetInfo:
+    fields = dict(
+        symbol=symbol,
+        cls="us_equity",
+        status="active",
+        tradable=True,
+        fractionable=fractionable,
+        shortable=False,
+        marginable=True,
+    )
+    fields.update(over)
+    return AssetInfo(**fields)
+
+
+def make_quote(symbol: str, *, last=None, bid=None, ask=None) -> Quote:
+    return Quote(symbol=symbol, last=last, bid=bid, ask=ask, as_of="2026-09-25T15:59:00Z", feed="iex")
+
+
+def make_position(symbol: str, qty, price, qty_available=None) -> PositionSnapshot:
+    qty, price = D(str(qty)), D(str(price))
+    return PositionSnapshot(
+        symbol=symbol,
+        qty=qty,
+        qty_available=qty if qty_available is None else D(str(qty_available)),
+        avg_entry_price=price,
+        current_price=price,
+        market_value=qty * price,
+        unrealized_pl=D("0"),
+        unrealized_plpc=D("0"),
+        side="long",
+    )
+
+
+def make_order(symbol: str, side: str, **over) -> OrderSnapshot:
+    fields = dict(
+        id="open-order-1",
+        client_order_id="cid-1",
+        symbol=symbol,
+        side=side,
+        qty=D("1"),
+        type="limit",
+        time_in_force="day",
+        limit_price=D("500"),
+        status="new",
+    )
+    fields.update(over)
+    return OrderSnapshot(**fields)
+
+
+def make_clock(is_open: bool = True) -> ClockInfo:
+    return ClockInfo(
+        is_open=is_open,
+        next_open="2026-09-28T09:30:00-04:00",
+        next_close="2026-09-25T16:00:00-04:00",
+        timestamp="2026-09-25T12:00:00-04:00",
+    )
+
+
+ASSETS = {
+    "VOO": make_asset("VOO", fractionable=False),
+    "AAPL": make_asset("AAPL"),
+    "PNY": make_asset("PNY", fractionable=False),
+    "NOQ": make_asset("NOQ"),
+}
+QUOTES = {
+    "VOO": make_quote("VOO", last="500", bid="499.90", ask="500.10"),
+    "AAPL": make_quote("AAPL", last="200", bid="199.90", ask="200.10"),
+    "PNY": make_quote("PNY", last="0.5000", bid="0.4990", ask="0.5010"),
+}
+
+
+def make_ctx(
+    *,
+    positions=(),
+    open_orders=(),
+    assets=None,
+    quotes=None,
+    is_open: bool = True,
+    orders_today: int = 0,
+    **account,
+) -> MarketContext:
+    """The fixture context; keyword arguments not named here override account fields."""
+    return MarketContext(
+        account=make_account(**account),
+        positions={p.symbol: p for p in positions},
+        open_orders=list(open_orders),
+        assets=dict(ASSETS if assets is None else assets),
+        quotes=dict(QUOTES if quotes is None else quotes),
+        clock=make_clock(is_open),
+        orders_today=orders_today,
+    )
+
+
+def ctx_with_position(qty, symbol: str = "VOO", price="500", **ctx_over) -> MarketContext:
+    return make_ctx(positions=[make_position(symbol, qty, price)], **ctx_over)
+
+
+def _leg(side, symbol, qty, limit, notional, tif) -> OrderLeg:
+    return OrderLeg(
+        symbol=symbol,
+        side=side,
+        qty=None if qty is None else D(str(qty)),
+        notional=None if notional is None else D(str(notional)),
+        type="market" if limit is None else "limit",
+        time_in_force=tif,
+        limit_price=None if limit is None else D(str(limit)),
+    )
+
+
+def buy(symbol="VOO", qty=None, *, limit=None, notional=None, tif="day") -> OrderLeg:
+    return _leg("buy", symbol, qty, limit, notional, tif)
+
+
+def sell(symbol="VOO", qty=None, *, limit=None, notional=None, tif="day") -> OrderLeg:
+    return _leg("sell", symbol, qty, limit, notional, tif)
+
+
+def codes(decision: RiskDecision) -> list[str]:
+    return [r.code for r in decision.reasons]
+
+
+def reason(decision: RiskDecision, code: str) -> RiskReason:
+    return next(r for r in decision.reasons if r.code == code)
+
+
+@pytest.fixture
+def ctx() -> MarketContext:
+    return make_ctx()
+
+
+@pytest.fixture
+def mandate() -> Mandate:
+    return Mandate()
+
+
+# --- the brief's exact cases ---------------------------------------------------------------
+
+
+def test_buy_clamped_to_buying_power(ctx, mandate):   # buying_power 1000, cash buffer 5% -> 950 usable
+    d = evaluate([OrderLeg(symbol="VOO", side="buy", qty=Decimal("5"), type="limit", limit_price=Decimal("500"))], ctx, mandate)[0]
+    assert d.verdict == "clamp" and d.leg.qty == Decimal("1") and "buying_power" in {r.code for r in d.reasons}
+
+
+def test_sell_more_than_held_is_short(ctx, mandate):
+    d = evaluate([OrderLeg(symbol="VOO", side="sell", qty=Decimal("3"), type="market")], ctx_with_position(qty=2), mandate)[0]
+    assert d.verdict == "reject" and d.reasons[0].code == "short_sell"
+
+
+def test_two_legs_share_buying_power(ctx, mandate):
+    # Leg 0 uses $500 of the $950 usable; leg 1 ($1,000 of fractionable AAPL) gets the $450 left.
+    first, second = evaluate([buy("VOO", 1, limit="500"), buy("AAPL", 5, limit="200")], ctx, mandate)
+    assert first.verdict == "accept" and first.reasons == []
+    assert second.verdict == "clamp"
+    assert second.leg.qty == D("2.25")
+    assert second.est_cost_usd == D("450")
+    assert codes(second) == ["buying_power"]
+    assert reason(second, "buying_power").message == (
+        "Clamped qty 5 → 2.25: estimated cost $1,000.00 exceeds usable buying power $450.00 "
+        "(after $500.00 committed by earlier legs)"
+    )
+
+
+# --- one case (or more) per reason code ------------------------------------------------------
+
+_LIMIT_WITHOUT_PRICE = OrderLeg.model_construct(
+    symbol="VOO", side="buy", qty=D("1"), notional=None, type="limit", time_in_force="day",
+    limit_price=None,
+)
+_NOTIONAL_LIMIT = OrderLeg.model_construct(
+    symbol="AAPL", side="buy", qty=None, notional=D("100"), type="limit", time_in_force="day",
+    limit_price=D("200"),
+)
+_NOTIONAL_GTC = OrderLeg.model_construct(
+    symbol="AAPL", side="buy", qty=None, notional=D("100"), type="market", time_in_force="gtc",
+    limit_price=None,
+)
+_RICH = dict(buying_power=D("100000"))  # enough buying power that it never binds
+
+CASES = [
+    # account_blocked
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(trading_blocked=True), Mandate(),
+                 "reject", "account_blocked", id="account_blocked-trading"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(account_blocked=True), Mandate(),
+                 "reject", "account_blocked", id="account_blocked-account"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(trade_suspended_by_user=True), Mandate(),
+                 "reject", "account_blocked", id="account_blocked-suspended"),
+    # asset_not_tradable
+    pytest.param(buy("VOO", 1, limit="500"),
+                 make_ctx(assets={**ASSETS, "VOO": make_asset("VOO", tradable=False)}), Mandate(),
+                 "reject", "asset_not_tradable", id="asset-not-tradable"),
+    pytest.param(buy("VOO", 1, limit="500"),
+                 make_ctx(assets={**ASSETS, "VOO": make_asset("VOO", status="inactive")}), Mandate(),
+                 "reject", "asset_not_tradable", id="asset-inactive"),
+    pytest.param(buy("VOO", 1, limit="500"),
+                 make_ctx(assets={**ASSETS, "VOO": make_asset("VOO", cls="crypto")}), Mandate(),
+                 "reject", "asset_not_tradable", id="asset-not-us-equity"),
+    pytest.param(buy("ZZZ", 1, limit="10"), make_ctx(), Mandate(),
+                 "reject", "asset_not_tradable", id="asset-unknown"),
+    # denied_symbol
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(), Mandate(deny_symbols=["voo"]),
+                 "reject", "denied_symbol", id="denied-deny-list"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(), Mandate(allow_symbols=["AAPL"]),
+                 "reject", "denied_symbol", id="denied-not-in-allow-list"),
+    # order_type_not_allowed
+    pytest.param(buy("VOO", 1), make_ctx(), Mandate(order_types=["limit"]),
+                 "reject", "order_type_not_allowed", id="order-type-market-not-allowed"),
+    # notional_needs_market_day (OrderLeg itself forbids these; the rule is defense in depth)
+    pytest.param(_NOTIONAL_LIMIT, make_ctx(), Mandate(),
+                 "reject", "notional_needs_market_day", id="notional-limit"),
+    pytest.param(_NOTIONAL_GTC, make_ctx(), Mandate(),
+                 "reject", "notional_needs_market_day", id="notional-gtc"),
+    # fractional_not_allowed
+    pytest.param(buy("VOO", "0.5", limit="500"), make_ctx(), Mandate(),
+                 "reject", "fractional_not_allowed", id="fractional-asset-not-fractionable"),
+    pytest.param(buy("AAPL", "0.5", limit="200"), make_ctx(), Mandate(allow_fractional=False),
+                 "reject", "fractional_not_allowed", id="fractional-mandate-disallows"),
+    pytest.param(buy("AAPL", "0.5", limit="200", tif="gtc"), make_ctx(), Mandate(),
+                 "reject", "fractional_not_allowed", id="fractional-gtc"),
+    pytest.param(buy("VOO", notional="100"), make_ctx(), Mandate(),
+                 "reject", "fractional_not_allowed", id="fractional-notional-not-fractionable"),
+    pytest.param(buy("AAPL", notional="100"), make_ctx(), Mandate(allow_fractional=False),
+                 "reject", "fractional_not_allowed", id="fractional-notional-mandate-disallows"),
+    pytest.param(buy("AAPL", "0.0000000001", limit="200"), make_ctx(), Mandate(),
+                 "reject", "fractional_not_allowed", id="fractional-more-than-9-decimals"),
+    # limit_required (OrderLeg itself forbids this; the rule is defense in depth)
+    pytest.param(_LIMIT_WITHOUT_PRICE, make_ctx(), Mandate(),
+                 "reject", "limit_required", id="limit-without-price"),
+    # bad_tick
+    pytest.param(buy("VOO", 1, limit="500.005"), make_ctx(), Mandate(),
+                 "clamp", "bad_tick", id="bad-tick-rounded"),
+    pytest.param(buy("PNY", 1, limit="0.00004"), make_ctx(), Mandate(),
+                 "reject", "bad_tick", id="bad-tick-rounds-to-zero"),
+    # price_band
+    pytest.param(buy("VOO", 1, limit="520"), make_ctx(), Mandate(),
+                 "reject", "price_band", id="price-band-buy-above"),
+    pytest.param(sell("VOO", 1, limit="480"), ctx_with_position(5), Mandate(),
+                 "reject", "price_band", id="price-band-sell-below"),
+    # no_quote
+    pytest.param(buy("NOQ", 1), make_ctx(), Mandate(),
+                 "reject", "no_quote", id="no-quote-market"),
+    pytest.param(buy("NOQ", 1, limit="10"), make_ctx(), Mandate(),
+                 "reject", "no_quote", id="no-quote-limit"),
+    pytest.param(buy("VOO", 1),
+                 make_ctx(quotes={**QUOTES, "VOO": make_quote("VOO", bid="0", ask="0")}), Mandate(),
+                 "reject", "no_quote", id="no-quote-zero-bid-ask"),
+    # short_sell
+    pytest.param(sell("VOO", 1), make_ctx(), Mandate(),
+                 "reject", "short_sell", id="short-sell-no-position"),
+    # wash_trade
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(open_orders=[make_order("VOO", "sell")]),
+                 Mandate(), "reject", "wash_trade", id="wash-buy-vs-open-sell"),
+    pytest.param(sell("VOO", 1, limit="500"),
+                 ctx_with_position(5, open_orders=[make_order("VOO", "buy")]), Mandate(),
+                 "reject", "wash_trade", id="wash-sell-vs-open-buy"),
+    # max_order_usd
+    pytest.param(buy("VOO", 5, limit="500"), make_ctx(**_RICH), Mandate(max_order_usd=D("1000")),
+                 "clamp", "max_order_usd", id="max-order-clamp"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(**_RICH), Mandate(max_order_usd=D("100")),
+                 "reject", "max_order_usd", id="max-order-nothing-fits"),
+    # max_position_pct
+    pytest.param(buy("AAPL", 25, limit="200"), make_ctx(**_RICH), Mandate(),
+                 "clamp", "max_position_pct", id="max-position-clamp"),
+    pytest.param(buy("AAPL", 1, limit="200"), ctx_with_position(20, "AAPL", "200", **_RICH),
+                 Mandate(), "reject", "max_position_pct", id="max-position-already-full"),
+    # max_positions
+    pytest.param(buy("VOO", 1, limit="500"), ctx_with_position(1, "AAPL", "200"),
+                 Mandate(max_positions=1), "reject", "max_positions", id="max-positions"),
+    # buying_power
+    pytest.param(buy("VOO", 5, limit="500"), make_ctx(), Mandate(),
+                 "clamp", "buying_power", id="buying-power-clamp"),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(buying_power=D("100")), Mandate(),
+                 "reject", "buying_power", id="buying-power-nothing-fits"),
+    # orders_per_day
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(orders_today=10), Mandate(),
+                 "reject", "orders_per_day", id="orders-per-day"),
+    # market_closed
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(is_open=False), Mandate(),
+                 "accept", "market_closed", id="market-closed"),
+    # large_order
+    pytest.param(buy("VOO", 5, limit="500"), make_ctx(**_RICH), Mandate(),
+                 "accept", "large_order", id="large-order"),
+]
+
+
+@pytest.mark.parametrize("leg, context, mandate_, verdict, code", CASES)
+def test_rule_table(leg, context, mandate_, verdict, code):
+    [d] = evaluate([leg], context, mandate_)
+    assert d.index == 0
+    assert d.verdict == verdict
+    assert code in codes(d)
+    blocks = [r for r in d.reasons if r.severity == "block"]
+    if verdict == "reject":
+        # Evaluation stops at the first blocking reason, so it is always the last one.
+        assert [r.code for r in blocks] == [code]
+        assert d.reasons[-1].code == code
+        assert d.leg == d.original == leg
+    else:
+        assert blocks == []
+        assert reason(d, code).severity == "warn"
+        assert (d.leg != d.original) == (verdict == "clamp")
+    assert all(r.message for r in d.reasons)
+
+
+def test_reason_codes_are_the_briefs_table_in_order():
+    assert REASON_CODES == (
+        "account_blocked", "asset_not_tradable", "denied_symbol", "order_type_not_allowed",
+        "notional_needs_market_day", "fractional_not_allowed", "limit_required", "bad_tick",
+        "price_band", "no_quote", "short_sell", "wash_trade", "max_order_usd", "max_position_pct",
+        "max_positions", "buying_power", "orders_per_day", "market_closed", "large_order",
+    )
+
+
+def test_rule_table_covers_every_reason_code():
+    assert {p.values[4] for p in CASES} == set(REASON_CODES)
+
+
+def test_market_slippage_constant():
+    assert MARKET_SLIPPAGE_PCT == Decimal("1.0")
+
+
+# --- evaluation order ------------------------------------------------------------------------
+
+
+def test_stops_at_first_block_in_table_order():
+    [d] = evaluate([buy("VOO", "0.5", limit="520")], make_ctx(trading_blocked=True),
+                   Mandate(deny_symbols=["VOO"], order_types=["market"]))
+    assert codes(d) == ["account_blocked"]
+
+
+def test_clamped_then_rejected_leg_keeps_original_and_both_reasons():
+    [d] = evaluate([buy("VOO", 5, limit="500")], make_ctx(orders_today=10, **_RICH),
+                   Mandate(max_order_usd=D("1000")))
+    assert d.verdict == "reject"
+    assert codes(d) == ["max_order_usd", "orders_per_day"]
+    assert [r.severity for r in d.reasons] == ["warn", "block"]
+    assert d.leg == d.original and d.leg.qty == D("5")
+    assert d.est_price == D("500") and d.est_cost_usd == D("2500")
+
+
+def test_rejected_leg_still_gets_estimates_when_priceable():
+    band, no_quote_market, no_quote_limit = evaluate(
+        [buy("VOO", 2, limit="520"), buy("NOQ", 1), buy("NOQ", 3, limit="10")], make_ctx(), Mandate()
+    )
+    assert band.verdict == "reject" and band.est_price == D("520") and band.est_cost_usd == D("1040")
+    assert no_quote_market.est_price is None and no_quote_market.est_cost_usd is None
+    assert no_quote_limit.est_price == D("10") and no_quote_limit.est_cost_usd == D("30")
+
+
+def test_invalid_leg_that_is_accepted_would_raise_rather_than_pass():
+    # A leg that bypassed OrderLeg validation is never returned as accepted: a rule rejects it, or
+    # building the decision fails closed.
+    bad = OrderLeg.model_construct(symbol="VOO", side="buy", qty=D("-1"), notional=None,
+                                   type="limit", time_in_force="day", limit_price=D("500"))
+    with pytest.raises(ValueError):
+        evaluate([bad], make_ctx(), Mandate())
+
+
+# --- reference price and estimates -----------------------------------------------------------
+
+
+def test_market_buy_estimate_adds_slippage_to_ask():
+    [d] = evaluate([buy("VOO", 1)], make_ctx(), Mandate())
+    assert d.verdict == "accept"
+    assert d.est_price == D("500.10") * (1 + MARKET_SLIPPAGE_PCT / 100) == D("505.101")
+    assert d.est_cost_usd == D("505.101")
+
+
+def test_market_buy_without_ask_uses_reference():
+    quotes = {**QUOTES, "VOO": make_quote("VOO", last="500", bid="499.90")}
+    [d] = evaluate([buy("VOO", 1)], make_ctx(quotes=quotes), Mandate())
+    assert d.est_price == D("500")
+
+
+def test_market_sell_estimate_is_bid_else_reference():
+    [with_bid] = evaluate([sell("VOO", 1)], ctx_with_position(2), Mandate())
+    assert with_bid.est_price == D("499.90")
+    quotes = {**QUOTES, "VOO": make_quote("VOO", last="500", ask="500.10")}
+    [no_bid] = evaluate([sell("VOO", 1)], ctx_with_position(2, quotes=quotes), Mandate())
+    assert no_bid.est_price == D("500")
+
+
+def test_reference_falls_back_to_mid_for_price_band():
+    quotes = {**QUOTES, "VOO": make_quote("VOO", bid="499", ask="501")}  # no last -> mid 500
+    inside, outside = evaluate(
+        [buy("VOO", 1, limit="514"), buy("VOO", 1, limit="516")], make_ctx(quotes=quotes, **_RICH),
+        Mandate(),
+    )
+    assert inside.verdict == "accept"
+    assert outside.verdict == "reject" and codes(outside) == ["price_band"]
+    assert reason(outside, "price_band").message == (
+        "Limit $516.00 is 3.20% from the reference price $500.00 (band 3%)"
+    )
+
+
+def test_lone_bid_is_not_a_reference():
+    quotes = {**QUOTES, "VOO": make_quote("VOO", bid="499.90")}
+    [d] = evaluate([sell("VOO", 1)], ctx_with_position(2, quotes=quotes), Mandate())
+    assert codes(d) == ["no_quote"]
+
+
+def test_price_band_boundary_is_inclusive():
+    [d] = evaluate([buy("VOO", 1, limit="515")], make_ctx(), Mandate())
+    assert d.verdict == "accept" and d.reasons == []
+
+
+# --- tick rounding ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "leg, context, expected",
+    [
+        pytest.param(buy("VOO", 1, limit="500.009"), make_ctx(), D("500.00"), id="buy>=1-floors"),
+        pytest.param(sell("VOO", 1, limit="500.001"), ctx_with_position(5), D("500.01"),
+                     id="sell>=1-ceils"),
+        pytest.param(buy("PNY", 1, limit="0.49995"), make_ctx(), D("0.4999"), id="buy<1-floors"),
+        pytest.param(sell("PNY", 1, limit="0.49915"), ctx_with_position(100, "PNY", "0.5"),
+                     D("0.4992"), id="sell<1-ceils"),
+    ],
+)
+def test_tick_rounding(leg, context, expected):
+    [d] = evaluate([leg], context, Mandate())
+    assert d.verdict == "clamp"
+    assert d.leg.limit_price == expected
+    assert d.original.limit_price == leg.limit_price
+    assert codes(d) == ["bad_tick"]
+    assert reason(d, "bad_tick").severity == "warn"
+
+
+def test_tick_rounding_message():
+    [d] = evaluate([buy("VOO", 1, limit="500.009")], make_ctx(), Mandate())
+    assert reason(d, "bad_tick").message == (
+        "Rounded limit price $500.009 → $500.00 (buy: down to the $0.01 tick)"
+    )
+
+
+def test_sub_dollar_sell_rounding_up_to_a_dollar_uses_cent_ticks():
+    quotes = {**QUOTES, "PNY": make_quote("PNY", last="1.00", bid="0.9999", ask="1.0001")}
+    [d] = evaluate([sell("PNY", 1, limit="0.99995")], ctx_with_position(10, "PNY", "1", quotes=quotes),
+                   Mandate())
+    assert d.leg.limit_price == D("1.00")
+    assert d.leg.limit_price.as_tuple().exponent == -2
+
+
+@pytest.mark.parametrize("leg", [buy("VOO", 1, limit="500.000"), buy("PNY", 1, limit="0.4999")])
+def test_on_tick_price_is_untouched(leg):
+    [d] = evaluate([leg], make_ctx(), Mandate())
+    assert d.verdict == "accept" and d.reasons == []
+    assert d.leg == leg
+
+
+# --- fractional vs whole-share clamping ------------------------------------------------------
+
+
+def test_fractional_clamp_floors_to_nine_decimals(ctx):
+    [d] = evaluate([buy("AAPL", 10, limit="201")], ctx, Mandate())
+    assert d.verdict == "clamp"
+    assert d.leg.qty == D("4.726368159")  # 950 / 201 = 4.72636815920... floored
+    assert d.est_cost_usd == D("949.999999959") <= D("950")
+
+
+@pytest.mark.parametrize(
+    "leg, mandate_",
+    [
+        pytest.param(buy("AAPL", 10, limit="201"), Mandate(allow_fractional=False),
+                     id="mandate-disallows-fractional"),
+        pytest.param(buy("AAPL", 10, limit="201", tif="gtc"), Mandate(), id="gtc"),
+    ],
+)
+def test_whole_share_clamp_floors_to_integer(leg, mandate_):
+    [d] = evaluate([leg], make_ctx(), mandate_)
+    assert d.verdict == "clamp" and d.leg.qty == D("4")  # floor(950 / 201)
+
+
+def test_non_fractionable_asset_clamps_to_integer():
+    assets = {**ASSETS, "AAPL": make_asset("AAPL", fractionable=False)}
+    [d] = evaluate([buy("AAPL", 10, limit="201")], make_ctx(assets=assets), Mandate())
+    assert d.verdict == "clamp" and d.leg.qty == D("4")
+    assert reason(d, "buying_power").message == (
+        "Clamped qty 10 → 4: estimated cost $2,010.00 exceeds usable buying power $950.00"
+    )
+
+
+def test_whole_share_clamp_that_reaches_zero_rejects_with_the_rules_code():
+    [d] = evaluate([buy("VOO", 1, limit="500")], make_ctx(buying_power=D("100")), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]
+    assert reason(d, "buying_power").message == (
+        "Estimated cost $500.00 exceeds usable buying power $95.00, and no whole-share quantity fits"
+    )
+
+
+# --- notional clamps and the $1.00 floor -----------------------------------------------------
+
+
+def test_notional_clamped_to_usable_buying_power(ctx):
+    [d] = evaluate([buy("AAPL", notional="2000")], ctx, Mandate())
+    assert d.verdict == "clamp" and d.leg.notional == D("950.00") and d.leg.qty is None
+    assert d.est_cost_usd == D("950.00")
+    assert d.est_price == D("200.10") * D("1.01")
+    assert reason(d, "buying_power").message == (
+        "Clamped notional $2,000.00 → $950.00: estimated cost $2,000.00 exceeds usable buying power "
+        "$950.00"
+    )
+
+
+def test_notional_clamp_floors_to_cents(ctx):
+    [d] = evaluate([buy("AAPL", notional="50")], ctx, Mandate(max_order_usd=D("10.555")))
+    assert d.verdict == "clamp" and d.leg.notional == D("10.55")
+    assert codes(d) == ["max_order_usd"]
+
+
+def test_notional_clamp_below_one_dollar_rejects():
+    [d] = evaluate([buy("AAPL", notional="5")], make_ctx(buying_power=D("1.05")), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]  # usable $0.9975 -> $0.99 < $1.00
+    [d] = evaluate([buy("AAPL", notional="5")], make_ctx(), Mandate(max_order_usd=D("0.50")))
+    assert d.verdict == "reject" and codes(d) == ["max_order_usd"]
+
+
+def test_notional_clamp_to_exactly_one_dollar_is_allowed():
+    [d] = evaluate([buy("AAPL", notional="5")], make_ctx(buying_power=D("1.00")),
+                   Mandate(cash_buffer_pct=D("0")))
+    assert d.verdict == "clamp" and d.leg.notional == D("1.00")
+
+
+def test_notional_sell_is_checked_against_available_shares():
+    context = ctx_with_position(1, "AAPL", "200")
+    too_much, fine = evaluate([sell("AAPL", notional="300")], context, Mandate()), evaluate(
+        [sell("AAPL", notional="150")], context, Mandate()
+    )
+    assert too_much[0].verdict == "reject" and codes(too_much[0]) == ["short_sell"]  # 300/199.90 > 1
+    assert fine[0].verdict == "accept"
+
+
+# --- sequential effects across legs ----------------------------------------------------------
+
+
+def test_rejected_leg_has_no_effect_on_later_legs():
+    rejected, accepted = evaluate([buy("VOO", 1, limit="520"), buy("VOO", 1, limit="500")],
+                                  make_ctx(), Mandate(max_orders_per_day=1))
+    assert rejected.verdict == "reject"
+    assert accepted.verdict == "accept"  # neither buying power nor the order count was consumed
+
+
+def test_orders_per_day_counts_earlier_accepted_legs():
+    legs = [buy("AAPL", 1, limit="200"), buy("AAPL", 1, limit="200"), buy("AAPL", 1, limit="200")]
+    ds = evaluate(legs, make_ctx(orders_today=8, **_RICH), Mandate())
+    assert [d.verdict for d in ds] == ["accept", "accept", "reject"]
+    assert codes(ds[2]) == ["orders_per_day"]
+    [boundary] = evaluate([buy("AAPL", 1, limit="200")], make_ctx(orders_today=9), Mandate())
+    assert boundary.verdict == "accept"
+
+
+def test_buy_earlier_in_ticket_makes_shares_available_to_sell():
+    ds = evaluate([buy("VOO", 1, limit="500"), sell("VOO", 1, limit="500")], make_ctx(), Mandate())
+    assert [d.verdict for d in ds] == ["accept", "accept"]
+
+
+def test_sells_consume_available_qty():
+    ds = evaluate([sell("VOO", 2), sell("VOO", 1)], ctx_with_position(2), Mandate())
+    assert [d.verdict for d in ds] == ["accept", "reject"]
+    assert codes(ds[1]) == ["short_sell"]
+    assert reason(ds[1], "short_sell").message == (
+        "Selling 1 VOO exceeds the 0 VOO available to sell; short selling is not allowed"
+    )
+
+
+def test_sells_do_not_free_buying_power():
+    ds = evaluate([sell("VOO", 5, limit="500"), buy("VOO", 2, limit="500")], ctx_with_position(5),
+                  Mandate())
+    assert ds[0].verdict == "accept"
+    assert ds[1].verdict == "clamp" and ds[1].leg.qty == D("1")  # still only $950 usable
+
+
+def test_max_positions_counts_positions_opened_earlier_in_ticket():
+    legs = [buy("VOO", 1, limit="500"), buy("AAPL", 1, limit="200"), buy("VOO", 1, limit="500")]
+    ds = evaluate(legs, make_ctx(**_RICH), Mandate(max_positions=1))
+    assert [d.verdict for d in ds] == ["accept", "reject", "accept"]
+    assert reason(ds[1], "max_positions").message == (
+        "Buying AAPL would open a new position, but 1 position is already open (mandate max 1)"
+    )
+
+
+def test_position_pct_accumulates_across_legs():
+    # 20% of $20,000 = $4,000 per position: $3,000 first, so only $1,000 (5 shares) fits after.
+    first, second = evaluate([buy("AAPL", 15, limit="200"), buy("AAPL", 10, limit="200")],
+                             make_ctx(**_RICH), Mandate())
+    assert first.verdict == "accept"
+    assert second.verdict == "clamp" and second.leg.qty == D("5")
+    assert reason(second, "max_position_pct").message == (
+        "Clamped qty 10 → 5: AAPL position $3,000.00 + estimated cost $2,000.00 exceeds 20% of "
+        "equity $20,000.00 ($4,000.00)"
+    )
+
+
+def test_sell_earlier_in_ticket_frees_position_room():
+    context = ctx_with_position(20, "AAPL", "200", **_RICH)  # already at the $4,000 cap
+    [alone] = evaluate([buy("AAPL", 5, limit="200")], context, Mandate())
+    assert alone.verdict == "reject" and codes(alone) == ["max_position_pct"]
+    ds = evaluate([sell("AAPL", 5, limit="200"), buy("AAPL", 5, limit="200")], context, Mandate())
+    assert [d.verdict for d in ds] == ["accept", "accept"]
+
+
+def test_position_pct_base_is_capped_by_budget():
+    [d] = evaluate([buy("AAPL", 10, limit="200")], make_ctx(**_RICH), Mandate(budget_usd=D("5000")))
+    assert d.verdict == "clamp" and d.leg.qty == D("5")  # 20% of min($20,000, $5,000) = $1,000
+    assert "20% of budget $5,000.00 ($1,000.00)" in reason(d, "max_position_pct").message
+
+
+def test_sells_never_trip_position_pct():
+    [d] = evaluate([sell("AAPL", 10, limit="200")], ctx_with_position(40, "AAPL", "200"), Mandate())
+    assert d.verdict == "accept"
+
+
+# --- warnings ---------------------------------------------------------------------------------
+
+
+def test_market_closed_message():
+    [d] = evaluate([buy("VOO", 1, limit="500")], make_ctx(is_open=False), Mandate())
+    assert reason(d, "market_closed").message == (
+        "The market is closed; this order queues until the next open (2026-09-28T09:30:00-04:00)"
+    )
+
+
+def test_large_order_is_strictly_above_ten_percent_of_equity():
+    [at] = evaluate([buy("VOO", 4, limit="500")], make_ctx(**_RICH), Mandate())
+    assert at.verdict == "accept" and at.reasons == []  # $2,000 is exactly 10%
+    [above] = evaluate([buy("VOO", 5, limit="500")], make_ctx(**_RICH), Mandate())
+    assert above.verdict == "accept" and codes(above) == ["large_order"]
+    assert reason(above, "large_order").message == (
+        "Large order: estimated cost $2,500.00 is more than 10% of equity $20,000.00"
+    )
+
+
+# --- overall ---------------------------------------------------------------------------------
+
+
+def _decision(verdict: str, *reasons: RiskReason) -> RiskDecision:
+    leg = buy("VOO", 1, limit="500")
+    return RiskDecision(index=0, verdict=verdict, leg=leg, original=leg, reasons=list(reasons))
+
+
+def test_overall_outcomes():
+    warn = RiskReason(code="market_closed", message="closed", severity="warn")
+    info = RiskReason(code="note", message="fyi", severity="info")
+    block = RiskReason(code="short_sell", message="short", severity="block")
+    assert overall([]) == "blocked"
+    assert overall([_decision("reject", block), _decision("reject", block)]) == "blocked"
+    assert overall([_decision("accept"), _decision("reject", block)]) == "warnings"
+    assert overall([_decision("clamp", warn)]) == "warnings"
+    assert overall([_decision("accept", warn)]) == "warnings"
+    assert overall([_decision("accept", info)]) == "ok"
+    assert overall([_decision("accept"), _decision("accept")]) == "ok"
+
+
+def test_overall_on_real_decisions(ctx, mandate):
+    assert overall(evaluate([buy("VOO", 1, limit="500")], ctx, mandate)) == "ok"
+    assert overall(evaluate([buy("VOO", 5, limit="500")], ctx, mandate)) == "warnings"
+    assert overall(evaluate([sell("VOO", 1)], ctx, mandate)) == "blocked"
+
+
+# --- purity -----------------------------------------------------------------------------------
+
+
+def _scenario():
+    legs = [
+        buy("PNY", 100, limit="0.49995"),   # sub-penny tick clamp
+        buy("AAPL", 10, limit="201"),       # fractional clamp to the $400 max order
+        sell("VOO", 3),                     # short sell: only 2 held
+        buy("AAPL", notional="600"),        # notional clamp to the $400 max order
+        buy("NOQ", 1),                      # no quote
+    ]
+    return legs, ctx_with_position(2, "VOO", "500", is_open=False), Mandate(max_order_usd=D("400"))
+
+
+def test_evaluate_is_deterministic():
+    legs, context, mandate_ = _scenario()
+    first = [d.model_dump(mode="json") for d in evaluate(legs, context, mandate_)]
+    second = [d.model_dump(mode="json") for d in evaluate(legs, context, mandate_)]
+    with localcontext() as lc:  # an odd ambient decimal context must not change anything
+        lc.prec = 3
+        lc.rounding = ROUND_UP
+        third = [d.model_dump(mode="json") for d in evaluate(legs, context, mandate_)]
+    assert first == second == third
+    assert [d["verdict"] for d in first] == ["clamp", "clamp", "reject", "clamp", "reject"]
+
+
+def test_evaluate_never_mutates_or_aliases_its_inputs():
+    legs, context, mandate_ = _scenario()
+    before = (context.model_dump(mode="json"), mandate_.model_dump(mode="json"),
+              [leg.model_dump(mode="json") for leg in legs])
+    decisions = evaluate(legs, context, mandate_)
+    after = (context.model_dump(mode="json"), mandate_.model_dump(mode="json"),
+             [leg.model_dump(mode="json") for leg in legs])
+    assert before == after
+    for d, leg in zip(decisions, legs):
+        assert d.original == leg
+        assert d.original is not leg and d.leg is not leg
+
+
+def test_money_outputs_are_decimal():
+    legs, context, mandate_ = _scenario()
+    for d in evaluate(legs, context, mandate_):
+        for value in (d.est_price, d.est_cost_usd, d.leg.qty, d.leg.notional, d.leg.limit_price):
+            assert value is None or isinstance(value, Decimal)
