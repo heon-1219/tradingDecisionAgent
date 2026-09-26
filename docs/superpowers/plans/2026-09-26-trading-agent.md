@@ -391,6 +391,7 @@ MARKET_SLIPPAGE_PCT = Decimal("1.0")   # buffer on ask for market-buy cost estim
 | `asset_not_tradable` | reject | not tradable, not active, or class not us_equity |
 | `denied_symbol` | reject | in `deny_symbols`, or `allow_symbols` is set and the symbol is absent |
 | `order_type_not_allowed` | reject | type not in `mandate.order_types` |
+| `precision` | reject | a qty, notional or limit price needing more than 20 digits written out in full (values are never rounded silently) |
 | `notional_needs_market_day` | reject | notional with limit, or with gtc |
 | `notional_invalid` | reject | original notional < 1.00 or with more than 2 decimals, or any leg whose estimated cost is under $1.00 (also after tick rounding or a clamp) |
 | `fractional_not_allowed` | reject | fractional qty and the asset is not fractionable, not day, or `mandate.allow_fractional` is False |
