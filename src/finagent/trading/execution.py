@@ -23,19 +23,30 @@ hard-coded constant.
    against the session's *current* mandate. `ticket.legs[i]` pairs with the i-th non-rejected
    decision stored on the ticket. If any leg's new verdict is not `accept`, its leg changed, or its
    estimated price moved more than `REQUOTE_DRIFT_PCT` percent, the ticket is superseded and a new
-   one is created from the new decisions (`requote`). If every leg is now rejected, no new ticket
-   can exist and the result is `rejected` with the reasons. The requote path never submits. If the
-   re-check itself fails (the broker or market data is unreachable), the claimed ticket is marked
-   `failed` and nothing is submitted: a claimed ticket can't go back to `proposed`.
+   one is created from the new decisions (`requote`). For a *limit* leg the estimated price is the
+   limit price itself, so the drift check can never trigger for it - the limit is what protects
+   it (and a quote that moves far from it trips the risk engine's price band instead, which is a
+   verdict change). A new *warn*-level reason at confirm time (say, the market has closed since the
+   proposal) is not a verdict change, so it does not requote and is not surfaced. If every leg is
+   now rejected, no new ticket can exist and the result is `rejected` with the reasons. The requote
+   path never submits. If the re-check itself fails (the broker or market data is unreachable), the
+   claimed ticket is marked `failed` and nothing is submitted: a claimed ticket can't go back to
+   `proposed`.
 8. **Submit** each leg once, sequentially, with its pre-assigned `client_order_id` (a leg reached
-   after the kill switch was thrown mid-confirm is not submitted). There are no blind retries. An `OrderUncertain` (timeout, 5xx, 3xx, unparseable 2xx), a 422 duplicate
-   `client_order_id` (code 40010001), an HTTP-level failure, or any other unexpected exception may
-   mean the order reached Alpaca, so it is reconciled with ONE `get_order_by_client_id` call:
-   found -> the leg is placed; not found -> the leg failed ("not placed"); the lookup itself failed
-   -> the leg is `uncertain` and is never resubmitted. A clean 4xx `BrokerError` or a `ValueError`
-   (raised before any request) is a plain leg error. Every placed or reconciled order is written to
-   the local `orders` table; so is an uncertain leg (with no broker id), so it still counts towards
-   the daily order limit.
+   after the kill switch was thrown mid-confirm is not submitted). There are no blind retries. An
+   `OrderUncertain` (timeout, 5xx, 3xx, unparseable 2xx), a 422 duplicate `client_order_id` (code
+   40010001), an HTTP-level failure, a `ValueError` *subclass* (a `JSONDecodeError`, a pydantic
+   `ValidationError` or a `UnicodeDecodeError` can all surface while reading a response, i.e. after
+   the order may have been placed), or any other unexpected exception may mean the order reached
+   Alpaca, so it is reconciled with ONE `get_order_by_client_id` call:
+   - an order whose `client_order_id`, symbol and side match the leg -> the leg is placed;
+   - no order -> the leg failed ("not placed");
+   - an order that does *not* match the leg, or a lookup that itself failed -> the leg is
+     `uncertain`: never adopted, never resubmitted.
+   A clean 4xx `BrokerError`, or a plain `ValueError` (exactly that type: the broker raises it for
+   an invalid id or symbol before any request is sent), is a plain leg error. Every placed or
+   reconciled order is written to the local `orders` table; so is an uncertain leg (with no broker
+   id), so it still counts towards the daily order limit.
 9. **Persist before polling.** `broker_order_ids` (aligned with the legs, `None` where no order is
    known) and the new status are written in one CAS: `submitted` if at least one leg is placed or
    uncertain, else `failed`.
@@ -44,13 +55,30 @@ hard-coded constant.
     (`accepted`, `new`, `partially_filled`). A polling failure is recorded, never raised. The
     local `orders` row is updated on every poll.
 11. The result carries the latest ticket, the latest snapshot of every placed order, and a short
-    English summary with each leg's outcome. Status: `submitted` when the ticket was marked
-    submitted, `error` when every leg failed.
+    English summary with each leg's outcome. Status: `submitted` only when the outcome CAS actually
+    wrote `submitted`; `error` when every leg failed, or when the outcome could not be written
+    (then the message says orders may have been placed - success is never claimed for a ticket
+    whose state wasn't saved).
 
-If anything unexpected escapes after the claim, including cancellation of the calling task, the
-ticket is still persisted (`submitted` if any leg was placed, uncertain or mid-flight, else
-`failed`), so it is never stranded in `submitting`. Cancellation is then re-raised; any other
-exception becomes an `error` result.
+**Interruptions.** If anything escapes after the claim - a bug, or cancellation of the calling task
+mid-call - every leg whose submit had started but has no recorded outcome is treated as
+`uncertain`: it gets an `orders` row (no broker id) and appears as uncertain in the ledger. Then
+the outcome is persisted (`submitted` if any leg was placed or uncertain, else `failed`), so the
+ticket is never stranded in `submitting`. `run.persisted` is set only once that CAS has succeeded
+(or raised `TicketStateError`, meaning the ticket is no longer ours to move); any other failure (a
+locked database, say) is retried once by the handler. Cancellation is then re-raised; any other
+exception becomes an `error` result (or the normal submission result, if everything was saved).
+
+**refresh(ticket_id, session_id)** re-evaluates a still-`proposed` ticket at current prices. Like
+confirm, it acts on the old ticket only through a CAS: after the re-evaluation it first checks
+there is something executable (if not: `rejected`, and the old ticket is left untouched), then
+moves the old ticket `proposed -> superseded` - if a confirm, reject or expiry got there first,
+that CAS fails and refresh returns `rejected` without creating anything - and only then creates the
+new ticket. So a refresh racing a confirm can never leave a second live copy of the same trade.
+
+**One active ticket per session.** `TicketStore.create` supersedes every other `proposed` ticket in
+the session, so a requote (from confirm or refresh) also supersedes any unrelated proposal made in
+the same session meanwhile. This is the store's one-active-ticket rule, kept deliberately.
 
 **Ledger.** Kinds: `confirm_request`, `claim`, `requote`, `submit`, `broker_response`,
 `reconcile`, `order_status`, `result` (confirm); `reject`; `refresh`; `kill_switch` (under the
@@ -91,7 +119,7 @@ from finagent.trading.models import (
     TicketStatus,
     normalize_symbol,
 )
-from finagent.trading.proposals import TicketStateError, TicketStore, utcnow
+from finagent.trading.proposals import TicketStateError, TicketStore
 from finagent.trading.risk import evaluate
 
 logger = logging.getLogger(__name__)
@@ -151,7 +179,6 @@ class _Run:
     attempted: int = 0  # legs whose submit_order call has started
     outcomes: list[_LegOutcome] = field(default_factory=list)
     persisted: bool = False
-    maybe_placed: bool = False  # >= 1 leg placed or uncertain (decided by `_persist`)
     final_ticket: Ticket | None = None
 
 
@@ -218,6 +245,18 @@ def _drift_pct(old: Decimal | None, new: Decimal | None) -> Decimal | None:
     return abs(new - old) / old * _HUNDRED
 
 
+def _reconcile_mismatch(found: OrderSnapshot, leg: OrderLeg, client_order_id: str) -> str:
+    """Why a reconciled order can't be adopted as this leg's order; empty when it matches."""
+    problems = []
+    if found.client_order_id != client_order_id:
+        problems.append("client_order_id")
+    if (found.symbol or "").upper() != leg.symbol:
+        problems.append("symbol")
+    if (found.side or "").lower() != leg.side:
+        problems.append("side")
+    return f"{', '.join(problems)} differ" if problems else ""
+
+
 def _block_reasons(decisions: list[RiskDecision]) -> str:
     parts = []
     for decision in decisions:
@@ -243,7 +282,12 @@ def _ensure_orders_created_at(db: AppDB) -> None:
 
 
 class Executor:
-    """Confirm / reject / refresh tickets, and the kill switch. See the module docstring."""
+    """Confirm / reject / refresh tickets, and the kill switch. See the module docstring.
+
+    `mandate_for(session_id)` must return the session's *current* mandate; it is a required
+    keyword argument (no silent default), since re-checking against the wrong mandate would let a
+    confirm through that the user's latest limits forbid. `db` and `now` default to the
+    `TicketStore`'s own DB and clock."""
 
     def __init__(
         self,
@@ -253,7 +297,7 @@ class Executor:
         ledger: Ledger,
         settings,
         *,
-        mandate_for: Callable[[str], Mandate] | None = None,
+        mandate_for: Callable[[str], Mandate],
         db: AppDB | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         now: Callable[[], datetime] | None = None,
@@ -263,10 +307,10 @@ class Executor:
         self._tickets = tickets
         self._ledger = ledger
         self._settings = settings
-        self._mandate_for = mandate_for or (lambda _session_id: Mandate())
-        self._db = db if db is not None else tickets._db  # noqa: SLF001 - same DB by default
+        self._mandate_for = mandate_for
+        self._db = db if db is not None else tickets.db
         self._sleep = sleep
-        self._now = now or getattr(tickets, "_clock", None) or utcnow
+        self._now = now or tickets.clock
         _ensure_orders_created_at(self._db)
 
     # --- market context -------------------------------------------------------------------------
@@ -368,10 +412,10 @@ class Executor:
             result = await self._run_claimed(run)
         except Exception:  # noqa: BLE001 - never strand a claimed ticket in `submitting`
             logger.exception("confirm of ticket %s failed after it was claimed", claimed.id)
-            self._persist(run)
+            self._settle_interrupted(run)
             result = self._crash_result(run)
-        except BaseException:  # cancellation: persist what we know, then let it propagate
-            self._persist(run)
+        except BaseException:  # cancellation: record and persist what we know, then propagate
+            self._settle_interrupted(run)
             self._log(session_id, "result", {
                 "ticket_id": claimed.id,
                 "status": "interrupted",
@@ -379,6 +423,29 @@ class Executor:
             })
             raise
         return self._finish(session_id, ticket_id, result, run)
+
+    def _settle_interrupted(self, run: _Run) -> None:
+        """After something escaped `_run_claimed`: every leg whose submit started but has no
+        outcome may have reached the broker, so it becomes `uncertain` (with an `orders` row, so it
+        counts towards the daily limit); then the outcome is persisted - this is the one retry if
+        the normal path's persist failed. Synchronous only (it may run during cancellation) and
+        never raises."""
+        recorded = {o.index for o in run.outcomes}
+        for index in range(min(run.attempted, len(run.ticket.legs))):
+            if index in recorded:
+                continue
+            client_order_id = run.ticket.client_order_ids[index]
+            self._record_uncertain(run.ticket.id, client_order_id)
+            run.outcomes.append(_LegOutcome(
+                index, run.ticket.legs[index], client_order_id, "uncertain",
+                error="interrupted before the broker's answer was known; check open orders "
+                      "before trying again",
+            ))
+        run.outcomes.sort(key=lambda o: o.index)
+        try:
+            self._persist(run)
+        except Exception:  # noqa: BLE001 - logged; the result will not claim success
+            logger.exception("could not persist the outcome of ticket %s", run.ticket.id)
 
     async def _run_claimed(self, run: _Run) -> ConfirmResult:
         ticket = run.ticket
@@ -520,8 +587,12 @@ class Executor:
             if ambiguous:
                 return await self._reconcile(run, index, leg, client_order_id, exc)
             return self._leg_error(run, index, leg, client_order_id, exc)
-        except ValueError as exc:  # raised before any request was sent
-            return self._leg_error(run, index, leg, client_order_id, exc)
+        except ValueError as exc:
+            if type(exc) is ValueError:  # the broker's own check, before any request was sent
+                return self._leg_error(run, index, leg, client_order_id, exc)
+            # A subclass (JSONDecodeError, pydantic ValidationError, UnicodeDecodeError, ...) can
+            # come from reading a response - i.e. after the order may have been placed.
+            return await self._reconcile(run, index, leg, client_order_id, exc)
         except Exception as exc:  # noqa: BLE001 - HTTP-level or unknown: the order may exist
             return await self._reconcile(run, index, leg, client_order_id, exc)
 
@@ -581,6 +652,19 @@ class Executor:
                 index, leg, client_order_id, "error",
                 error=f"not placed (the broker has no order with this id; {base['cause']})",
             )
+        mismatch = _reconcile_mismatch(found, leg, client_order_id)
+        if mismatch:
+            # Never adopt an order that isn't provably this leg's; ours may still exist.
+            self._log(run.session_id, "reconcile", {
+                **base, "outcome": "mismatch", "found_broker_order_id": found.id,
+                "message": mismatch,
+            })
+            self._record_uncertain(run.ticket.id, client_order_id)
+            return _LegOutcome(
+                index, leg, client_order_id, "uncertain",
+                error=f"the follow-up lookup returned an order that does not match this leg "
+                      f"({mismatch}); check open orders before trying again",
+            )
         self._log(run.session_id, "reconcile", {
             **base, "outcome": "found", "broker_order_id": found.id, "status": found.status,
         })
@@ -588,11 +672,16 @@ class Executor:
         return _LegOutcome(index, leg, client_order_id, "placed", order=found, reconciled=True)
 
     def _persist(self, run: _Run) -> None:
-        """Write `broker_order_ids` and the outcome status in one CAS (once). A leg whose submit
-        started but has no outcome (interrupted mid-call) counts as uncertain."""
+        """Write `broker_order_ids` and the outcome status in one CAS. A leg whose submit started
+        but has no outcome (interrupted mid-call) counts as uncertain.
+
+        `run.persisted` is set only once this is settled: the CAS succeeded, or it raised
+        `TicketStateError` (the ticket is no longer ours to move, so retrying can't help;
+        `final_ticket` stays None and the result will not claim success). Any other exception - a
+        locked database, say - propagates with `run.persisted` still False, so the caller can
+        retry."""
         if run.persisted:
             return
-        run.persisted = True
         ticket = run.ticket
         by_index = {o.index: o for o in run.outcomes}
         broker_order_ids: list[str | None] = []
@@ -606,14 +695,14 @@ class Executor:
                 broker_order_ids.append(None)
                 if index < run.attempted and (outcome is None or outcome.state == "uncertain"):
                     maybe_placed = True
-        run.maybe_placed = maybe_placed
         to = TicketStatus.submitted if maybe_placed else TicketStatus.failed
         try:
             run.final_ticket = self._tickets.transition(
                 ticket.id, {TicketStatus.submitting}, to, broker_order_ids=broker_order_ids
             )
-        except (TicketStateError, ValueError) as exc:
+        except TicketStateError as exc:
             logger.error("could not persist ticket %s as %s: %s", ticket.id, to.value, exc)
+        run.persisted = True
 
     async def _poll(self, run: _Run) -> None:
         pending = [
@@ -658,6 +747,7 @@ class Executor:
 
     def _submission_result(self, run: _Run) -> ConfirmResult:
         final = run.final_ticket
+        saved = final is not None and final.status == TicketStatus.submitted
         placed = [o for o in run.outcomes if o.state == "placed"]
         uncertain = [o for o in run.outcomes if o.state == "uncertain"]
         failed = [o for o in run.outcomes if o.state == "error"]
@@ -671,6 +761,9 @@ class Executor:
         if not placed and not uncertain:
             head += " No order was placed."
         lines = [head]
+        if final is None:
+            lines.insert(0, "The ticket's outcome could not be saved; orders may have been placed "
+                            "- check open orders before trying again.")
         for outcome in run.outcomes:
             label = _leg_label(outcome.index, outcome.leg)
             if outcome.state == "placed":
@@ -680,20 +773,20 @@ class Executor:
                 lines.append(f"{label}: uncertain - {outcome.error}; do not resubmit.")
             else:
                 lines.append(f"{label}: error - {outcome.error}.")
-        # Same decision `_persist` wrote (from the outcomes, not a re-read), so even if that CAS
-        # somehow failed, placed orders are still reported as submitted.
+        # `submitted` only when our own outcome CAS wrote it - never claim success for a ticket
+        # whose state wasn't saved.
         return ConfirmResult(
-            "submitted" if run.maybe_placed else "error",
+            "submitted" if saved else "error",
             self._latest(run.ticket.id, final),
             [o.order for o in placed],
             " ".join(lines),
         )
 
     def _crash_result(self, run: _Run) -> ConfirmResult:
-        if run.outcomes and run.persisted:
+        if run.outcomes:  # `_settle_interrupted` has turned every in-flight leg into an outcome
             return self._submission_result(run)
         nothing = "nothing was submitted" if run.attempted == 0 else (
-            "some orders may have been submitted; check open orders before trying again"
+            "orders may have been placed; check open orders before trying again"
         )
         return ConfirmResult(
             "error", self._latest(run.ticket.id, run.final_ticket), [],
@@ -776,15 +869,35 @@ class Executor:
             return ConfirmResult(
                 "error", loaded, [], f"Could not refresh the quote ({self._short(exc)})."
             )
-        try:
-            new_ticket = self._new_ticket(loaded, decisions, mandate)
-        except ValueError:
+        if all(d.verdict == "reject" for d in decisions):
+            # Nothing executable: leave the old ticket exactly as it is.
             reasons = _block_reasons(decisions) or "every leg was rejected"
             return ConfirmResult(
                 "rejected", loaded, [], f"No leg can be placed at current prices: {reasons}"
             )
+        # Supersede the old ticket FIRST, through a CAS: if a confirm, reject or expiry moved it
+        # while we were re-evaluating, we lose here and create nothing - so there is never a
+        # second live copy of a trade that is already being (or has been) submitted.
+        try:
+            superseded = self._tickets.transition(
+                loaded.id, {TicketStatus.proposed}, TicketStatus.superseded
+            )
+        except TicketStateError:
+            current = self._latest(loaded.id, loaded)
+            return ConfirmResult(
+                "rejected", current, [],
+                f"ticket is {current.status.value}; nothing was re-quoted",
+            )
+        try:
+            new_ticket = self._new_ticket(loaded, decisions, mandate)
+        except ValueError as exc:
+            logger.error("refresh of ticket %s could not create the new ticket: %s", loaded.id, exc)
+            return ConfirmResult(
+                "error", superseded, [],
+                "Could not create the re-quoted ticket; ask for a fresh proposal.",
+            )
         return ConfirmResult(
-            "requote", self._latest(loaded.id, loaded), [],
+            "requote", superseded, [],
             "Re-quoted at current prices; review the new ticket.", new_ticket=new_ticket,
         )
 

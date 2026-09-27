@@ -879,3 +879,16 @@ def test_expire_stale_returns_count_across_multiple_sessions():
     clock.now = FIXED_NOW + timedelta(seconds=301)
 
     assert store.expire_stale() == 2
+
+
+# --- Task 2.4: read-only accessors used by the executor ------------------------------------------
+
+
+def test_db_and_clock_are_exposed_read_only():
+    store, db, clock = make_store()
+    assert store.db is db
+    assert store.clock is clock
+    with pytest.raises(AttributeError):
+        store.db = AppDB(":memory:")
+    with pytest.raises(AttributeError):
+        store.clock = Clock()

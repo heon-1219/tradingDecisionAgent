@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from fakes_trading import (
     FakeBroker,
@@ -24,6 +26,7 @@ from fakes_trading import (
     make_account,
     make_asset,
     make_open_order,
+    make_order,
     make_position,
 )
 from finagent.store.appdb import AppDB
@@ -35,7 +38,7 @@ from finagent.trading.execution import (
 )
 from finagent.trading.ledger import Ledger
 from finagent.trading.models import Mandate, OrderLeg, OrderSnapshot, Ticket, TicketStatus
-from finagent.trading.proposals import TicketStore
+from finagent.trading.proposals import TicketStateError, TicketStore
 from finagent.trading.risk import evaluate
 
 D = Decimal
@@ -795,7 +798,8 @@ def test_executor_adds_created_at_to_a_legacy_orders_table():
     tickets = TicketStore(db, clock=Clock())
     settings = SimpleNamespace(trading_enabled=True, ticket_ttl_sec=300)
     for _ in range(2):  # idempotent
-        Executor(FakeBroker(), FakeData(), tickets, Ledger(db), settings)
+        Executor(FakeBroker(), FakeData(), tickets, Ledger(db), settings,
+                 mandate_for=lambda _session_id: Mandate())
     columns = {row["name"] for row in db.query("PRAGMA table_info(orders)")}
     assert "created_at" in columns
 
@@ -900,3 +904,309 @@ async def test_the_ledger_and_results_never_contain_the_fake_credentials(world):
         assert FAKE_SECRET not in result.message
         assert FAKE_KEY_ID not in result.message
     assert '"symbol": "KEY"' in exported  # symbols are values, never redacted dict keys
+
+
+# --- fix round 1: refresh races -------------------------------------------------------------------
+
+
+def _yield_during_account(world: World) -> None:
+    """Make `build_context` yield to the event loop, so a concurrent coroutine can act on the ticket
+    between another one's read and its write."""
+    original = world.broker.account
+
+    async def yielding_account():
+        await asyncio.sleep(0)
+        return await original()
+
+    world.broker.account = yielding_account
+
+
+async def test_refresh_racing_confirm_never_leaves_a_live_copy(world):
+    ticket = await world.propose([key_market()])
+    _yield_during_account(world)
+
+    refreshed, confirmed = await asyncio.gather(
+        world.executor.refresh(ticket.id, SESSION),
+        world.executor.confirm(ticket.id, SESSION, ticket.hash),
+    )
+
+    assert confirmed.status == "submitted"
+    assert refreshed.status == "rejected"
+    assert refreshed.new_ticket is None
+    assert "ticket is submitting" in refreshed.message
+    assert world.tickets.active(SESSION) is None  # nothing left to confirm a second time
+    assert world.broker.submits == 1
+
+
+async def test_refresh_racing_reject_never_leaves_a_live_copy(world):
+    ticket = await world.propose([key_market()])
+    _yield_during_account(world)
+
+    refreshed, rejected = await asyncio.gather(
+        world.executor.refresh(ticket.id, SESSION),
+        world.executor.reject(ticket.id, SESSION),
+    )
+
+    assert rejected.message == "Rejected by user"
+    assert refreshed.status == "rejected"
+    assert refreshed.new_ticket is None
+    assert world.tickets.get(ticket.id).status == TicketStatus.rejected_by_user
+    assert world.tickets.active(SESSION) is None
+
+
+async def test_refresh_supersedes_the_old_ticket_before_creating_the_new_one(world):
+    ticket = await world.propose([key_market()])
+    original_create = world.tickets.create
+    seen: list[TicketStatus] = []
+
+    def create_after_checking(*args, **kwargs):
+        seen.append(world.tickets.get(ticket.id).status)
+        return original_create(*args, **kwargs)
+
+    world.tickets.create = create_after_checking
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert result.status == "requote"
+    assert seen == [TicketStatus.superseded]
+
+
+def test_confirm_refresh_and_reject_racing_on_threads_leave_at_most_one_live_outcome():
+    for _ in range(5):
+        world = World()
+        ticket = asyncio.run(world.propose([key_market()]))
+        barrier = threading.Barrier(3, timeout=10)
+        original_get = world.tickets.get
+        local = threading.local()
+
+        def get_then_wait(ticket_id, _get=original_get, _barrier=barrier, _local=local):
+            found = _get(ticket_id)
+            if not getattr(_local, "waited", False):
+                _local.waited = True
+                _barrier.wait()
+            return found
+
+        world.tickets.get = get_then_wait
+        results: dict[str, ConfirmResult] = {}
+        calls = {
+            "confirm": lambda w=world, t=ticket: w.executor.confirm(t.id, SESSION, t.hash),
+            "refresh": lambda w=world, t=ticket: w.executor.refresh(t.id, SESSION),
+            "reject": lambda w=world, t=ticket: w.executor.reject(t.id, SESSION),
+        }
+
+        def run(name, results=results, calls=calls):
+            results[name] = asyncio.run(calls[name]())
+
+        threads = [threading.Thread(target=run, args=(name,)) for name in calls]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        world.tickets.get = original_get
+
+        winners = [
+            results["confirm"].status == "submitted",
+            results["refresh"].status == "requote",
+            results["reject"].message == "Rejected by user",
+        ]
+        assert sum(winners) == 1, {k: (v.status, v.message) for k, v in results.items()}
+        active = world.tickets.active(SESSION)
+        if results["refresh"].status == "requote":
+            assert active is not None and world.broker.submits == 0
+        else:
+            assert active is None
+        assert world.broker.submits in (0, 1)
+
+
+# --- fix round 1: legs interrupted mid-call are recorded ------------------------------------------
+
+
+async def test_cancellation_after_the_broker_placed_the_order_records_it_as_uncertain(world):
+    ticket = await world.propose([aapl()])
+
+    def place_then_cancel(broker, leg, cid):
+        broker.place(leg, cid)
+        raise asyncio.CancelledError()
+
+    world.broker.submit_actions = [place_then_cancel]
+    with pytest.raises(asyncio.CancelledError):
+        await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    rows = world.order_rows()
+    assert [r["client_order_id"] for r in rows] == ticket.client_order_ids
+    assert rows[0]["broker_order_id"] is None
+    assert world.tickets.get(ticket.id).status == TicketStatus.submitted
+    assert (await world.executor.build_context(["AAPL"])).orders_today == 1
+    interrupted = [e for e in world.ledger_entries() if e["kind"] == "result"][-1]["payload"]
+    assert interrupted["status"] == "interrupted"
+    assert [(leg["leg"], leg["outcome"]) for leg in interrupted["legs"]] == [(0, "uncertain")]
+
+
+async def test_cancellation_during_reconcile_records_the_leg_as_uncertain(world):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = ["placed_then_timeout"]
+
+    async def cancelled_lookup(client_order_id):
+        raise asyncio.CancelledError()
+
+    world.broker.get_order_by_client_id = cancelled_lookup
+    with pytest.raises(asyncio.CancelledError):
+        await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    rows = world.order_rows()
+    assert [r["client_order_id"] for r in rows] == ticket.client_order_ids
+    assert rows[0]["broker_order_id"] is None
+    assert (await world.executor.build_context(["AAPL"])).orders_today == 1
+    assert world.broker.submits == 1
+
+
+async def test_a_non_cancellation_base_exception_mid_leg_still_records_the_leg(world):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = ["placed_then_timeout"]
+
+    async def interrupted_lookup(client_order_id):
+        raise KeyboardInterrupt
+
+    world.broker.get_order_by_client_id = interrupted_lookup
+    with pytest.raises(KeyboardInterrupt):
+        await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert [r["client_order_id"] for r in world.order_rows()] == ticket.client_order_ids
+    assert world.tickets.get(ticket.id).status == TicketStatus.submitted
+
+
+# --- fix round 1: persisting the outcome ----------------------------------------------------------
+
+
+def _flaky_outcome_transition(world: World, failures: int) -> None:
+    """Make the outcome CAS (submitting -> submitted/failed) raise a DB error `failures` times."""
+    real = world.tickets.transition
+    state = {"left": failures}
+
+    def flaky(ticket_id, expect, to, **fields):
+        if to in (TicketStatus.submitted, TicketStatus.failed) and state["left"] > 0:
+            state["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real(ticket_id, expect, to, **fields)
+
+    world.tickets.transition = flaky
+
+
+async def test_a_transient_db_error_on_the_outcome_cas_is_retried(world):
+    ticket = await world.propose([aapl()])
+    _flaky_outcome_transition(world, failures=1)
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    stored = world.tickets.get(ticket.id)
+    assert stored.status == TicketStatus.submitted
+    assert result.status == "submitted"
+    assert stored.broker_order_ids == [result.orders[0].id]
+    assert world.broker.submits == 1
+
+
+async def test_a_persistent_db_error_on_the_outcome_cas_never_claims_success(world):
+    ticket = await world.propose([aapl()])
+    _flaky_outcome_transition(world, failures=10)
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert result.status == "error"
+    assert "may have been placed" in result.message
+    assert "AAPL" in result.message
+    assert world.broker.submits == 1
+    assert [r["client_order_id"] for r in world.order_rows()] == ticket.client_order_ids
+
+
+async def test_a_ticket_state_error_on_the_outcome_cas_never_claims_success(world):
+    ticket = await world.propose([aapl()])
+    real = world.tickets.transition
+
+    def refuse_outcome(ticket_id, expect, to, **fields):
+        if to in (TicketStatus.submitted, TicketStatus.failed):
+            raise TicketStateError("changed underneath us")
+        return real(ticket_id, expect, to, **fields)
+
+    world.tickets.transition = refuse_outcome
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert result.status == "error"
+    assert "may have been placed" in result.message
+    assert world.broker.submits == 1
+
+
+# --- fix round 1: reconcile must match the leg ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        {"client_order_id": "manual-xyz"},
+        {"symbol": "MSFT"},
+        {"side": "sell"},
+    ],
+)
+async def test_reconcile_never_adopts_an_order_that_does_not_match_the_leg(world, mismatch):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = ["timeout"]
+    cid = ticket.client_order_ids[0]
+    foreign = make_order(ticket.legs[0], cid).model_copy(update=mismatch)
+
+    async def wrong_lookup(client_order_id):
+        world.broker.reconcile_calls.append(client_order_id)
+        return foreign
+
+    world.broker.get_order_by_client_id = wrong_lookup
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    stored = world.tickets.get(ticket.id)
+    assert stored.broker_order_ids == [None]
+    assert stored.status == TicketStatus.submitted  # uncertain: ours may still exist
+    assert result.orders == []
+    assert "uncertain" in result.message
+    assert world.broker.reconcile_calls == [cid]
+    assert world.broker.submits == 1
+    assert [(r["client_order_id"], r["broker_order_id"]) for r in world.order_rows()] == [(cid, None)]
+
+
+# --- fix round 1: ValueError subclasses may come after placement ----------------------------------
+
+
+def _pydantic_validation_error() -> ValidationError:
+    try:
+        OrderSnapshot.model_validate({})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        lambda: json.JSONDecodeError("Expecting value", "", 0),
+        _pydantic_validation_error,
+        lambda: UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+    ids=["json", "pydantic", "unicode"],
+)
+async def test_a_value_error_subclass_after_placement_is_reconciled(world, make_error):
+    ticket = await world.propose([aapl()])
+
+    def place_then_fail(broker, leg, cid):
+        broker.place(leg, cid)
+        raise make_error()
+
+    world.broker.submit_actions = [place_then_fail]
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert result.status == "submitted"
+    assert world.broker.reconcile_calls == [ticket.client_order_ids[0]]
+    assert world.broker.submits == 1
+    assert world.tickets.get(ticket.id).broker_order_ids == [result.orders[0].id]
+
+
+# --- fix round 1: construction --------------------------------------------------------------------
+
+
+def test_mandate_for_is_a_required_keyword_argument(world):
+    with pytest.raises(TypeError):
+        Executor(world.broker, world.data, world.tickets, world.ledger, world.settings)

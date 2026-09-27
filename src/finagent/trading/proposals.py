@@ -195,6 +195,17 @@ class TicketStore:
         self._clock = clock
         self._lock = threading.RLock()  # shared by create()/transition()/expire_stale()
 
+    @property
+    def db(self) -> AppDB:
+        """The `AppDB` this store writes to (read-only), so a collaborator such as the executor
+        can share it without reaching into private state."""
+        return self._db
+
+    @property
+    def clock(self) -> Callable[[], datetime]:
+        """The clock this store stamps and expires tickets with (read-only)."""
+        return self._clock
+
     def create(
         self,
         session_id: str,
