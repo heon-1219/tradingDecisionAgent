@@ -33,6 +33,14 @@ def test_create_accepts_custom_title_and_lang():
     assert session["lang"] == "ko"
 
 
+def test_create_normalizes_title_like_rename():
+    store = _store()
+    assert store.create(title="  padded title  ")["title"] == "padded title"
+    assert store.create(title="x" * 200)["title"] == "x" * 80
+    assert store.create(title="   ")["title"] == "New chat"
+    assert store.create(title="")["title"] == "New chat"
+
+
 @pytest.mark.parametrize("bad_lang", ["fr", "EN", "", "english"])
 def test_create_rejects_unsupported_lang(bad_lang):
     with pytest.raises(ValueError):
@@ -166,6 +174,22 @@ def test_get_mandate_returns_none_when_absent():
     assert store.get_mandate(session["id"]) is None
 
 
+def test_get_mandate_unknown_session_returns_none():
+    """A pure read, like history()/messages() - never-having-existed and
+    exists-but-has-no-mandate-yet look the same from here."""
+    assert _store().get_mandate("Sdoesnotexist") is None
+
+
+def test_save_mandate_unknown_session_raises_keyerror():
+    """Unlike get_mandate (a read), save_mandate is a write and must not attach an orphan mandate
+    row to a session that was never created - same contract as append()/rename()."""
+    store = _store()
+    with pytest.raises(KeyError):
+        store.save_mandate("Sdoesnotexist", Mandate())
+    rows = store._db.query("SELECT COUNT(*) AS n FROM mandates WHERE session_id=?", ("Sdoesnotexist",))
+    assert rows[0]["n"] == 0
+
+
 def test_save_mandate_starts_at_version_one_regardless_of_incoming_version():
     store = _store()
     session = store.create()
@@ -216,6 +240,24 @@ async def test_save_mandate_concurrent_saves_land_on_distinct_sequential_version
     versions = await asyncio.gather(*(save() for _ in range(20)))
     assert sorted(versions) == list(range(1, 21))
     assert store.get_mandate(session["id"]).version == 20
+
+
+async def test_save_mandate_concurrent_saves_across_two_instances_share_one_lock():
+    """The version-bump lock is keyed by the underlying AppDB, not the SessionStore instance, so two
+    independent SessionStore objects over the *same* AppDB must still serialize correctly - a
+    per-instance lock would let them race and both write the same version."""
+    db = AppDB(":memory:")
+    store_a = SessionStore(db)
+    store_b = SessionStore(db)
+    session = store_a.create()
+
+    async def save(store: SessionStore) -> int:
+        return (await asyncio.to_thread(store.save_mandate, session["id"], Mandate())).version
+
+    calls = [store_a if i % 2 == 0 else store_b for i in range(20)]
+    versions = await asyncio.gather(*(save(store) for store in calls))
+    assert sorted(versions) == list(range(1, 21))
+    assert store_a.get_mandate(session["id"]).version == 20
 
 
 # --------------------------------------------------------------------------- list
