@@ -40,6 +40,7 @@ class Conversation(Protocol):
     async def step(self) -> Turn: ...
     def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None: ...
     def add_user(self, text: str) -> None: ...
+    def add_assistant(self, text: str) -> None: ...
     def transcript(self) -> list[dict]: ...
 
 
@@ -65,6 +66,11 @@ class StubConversation:
 
     def add_user(self, text: str):
         self._messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed."""
+        self._messages.append({"role": "assistant", "content": text})
 
     def transcript(self):
         return self._messages
@@ -151,6 +157,11 @@ class AnthropicConversation:
 
     def add_user(self, text: str):
         self.messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed."""
+        self.messages.append({"role": "assistant", "content": text})
 
     def transcript(self):
         return self.messages
@@ -373,6 +384,13 @@ class OpenAIConversation:
 
     def add_user(self, text: str):
         self.messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed.
+        Inherited by `GeminiConversation` unchanged: a rebuilt-history message never carries a
+        thought signature (there is no tool call to attach one to)."""
+        self.messages.append({"role": "assistant", "content": text})
 
     def transcript(self):
         return self.messages

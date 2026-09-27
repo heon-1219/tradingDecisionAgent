@@ -4,7 +4,7 @@ import httpx
 import openai
 import pytest
 
-from finagent.agent.llm import StubLLM, ToolCall, ToolSpec, Turn, make_llm
+from finagent.agent.llm import AnthropicConversation, StubLLM, ToolCall, ToolSpec, Turn, make_llm
 from finagent.config import Settings
 
 GEMINI_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_EFFORT")
@@ -28,6 +28,21 @@ async def test_stub_conversation_replays_script():
     assert conv.transcript()[-1]["role"] == "assistant"
     t3 = await conv.step()  # script exhausted -> empty end_turn
     assert t3.stop_reason == "end_turn"
+
+
+def test_stub_add_assistant_appends_a_plain_assistant_message():
+    """Used only when rebuilding a conversation from stored text history: no tool calls, so no
+    thought signatures are needed."""
+    llm = StubLLM([Turn("done", [], "end_turn")])
+    conv = llm.start("sys", [], "q")
+    conv.add_assistant("earlier reply")
+    assert conv.transcript()[-1] == {"role": "assistant", "content": "earlier reply"}
+
+
+def test_anthropic_add_assistant_appends_a_plain_assistant_message():
+    conv = AnthropicConversation(None, "model", "low", 100, False, "sys", [], "q")
+    conv.add_assistant("earlier reply")
+    assert conv.transcript()[-1] == {"role": "assistant", "content": "earlier reply"}
 
 
 def test_make_llm_by_provider():
@@ -107,6 +122,23 @@ async def test_gemini_echoes_thought_signatures_back():
     assert echoed["role"] == "assistant"
     assert echoed["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig-1"}}
     assert fake.bodies[1]["messages"][3] == {"role": "tool", "tool_call_id": "call_1", "content": "cnt=3"}
+
+
+async def test_add_assistant_message_shape_is_sent_in_order_over_the_openai_protocol():
+    """GeminiConversation subclasses OpenAIConversation and doesn't override add_assistant, so this
+    one MockTransport check covers the OpenAI-compatible message shape used by both OpenAI and Gemini:
+    a plain {"role": "assistant", "content": text} message, with no tool_calls key, sent in the
+    position it was added (after the existing system/user messages, before the request is issued)."""
+    fake = FakeGemini((200, _completion({"content": "ok"})))
+    conv = _gemini_with(fake).start("sys", TOOLS, "q")
+    conv.add_assistant("previously said this")
+    await conv.step()
+    sent = fake.bodies[0]["messages"]
+    assert sent == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "previously said this"},
+    ]
 
 
 @pytest.mark.parametrize("effort,sent", [("low", "low"), ("medium", "medium"), ("high", "high"),
