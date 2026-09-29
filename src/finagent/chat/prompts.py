@@ -57,7 +57,8 @@ def _workflow(tools: frozenset[str]) -> str:
         check,
         "Research with the tools available to you, preferring primary sources (SEC filings, company data, market "
         "data) and recent news over commentary.",
-        "Explain the strategy: the thesis, the key risks, what would invalidate it, and the sizing rationale.",
+        "When a strategy or trade is in play, explain the strategy: the thesis, the key risks, what would "
+        "invalidate it, and the sizing rationale. A plain price or fact lookup gets a direct answer instead.",
     ]
     if trading:
         steps += [
@@ -102,6 +103,7 @@ def _numbers() -> str:
         "- Quote figures as the tools print them; rounding to fewer decimals is fine, adding precision is not. "
         "Use values a tool computed (returns, volatility, drawdown, averages) rather than calculating them "
         "yourself.\n"
+        "- Write dates as YYYY-MM-DD or 'Sep 25, 2026'; they must match a date in a tool output.\n"
         "- If a tool fails or returns no data, say what is missing instead of filling the gap."
     )
 

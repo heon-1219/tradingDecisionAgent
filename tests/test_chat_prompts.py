@@ -57,7 +57,8 @@ def test_prompt_does_not_depend_on_tool_order_or_duplicates():
 
 def test_prompt_has_no_date_or_time_of_day():
     for tools in (ALL_TOOLS, [], ["draft_mandate"]):
-        text = prompt(tools)
+        # the Numbers section shows one fixed example of the date format it asks for; nothing else may look like a date
+        text = prompt(tools).replace("'Sep 25, 2026'", "")
         assert not re.search(r"\d{4}-\d{2}-\d{2}", text)
         assert not re.search(r"\b\d{1,2}:\d{2}\b", text)
         assert not re.search(r"\b(19|20)\d{2}\b", text)
@@ -119,6 +120,20 @@ def test_numbers_come_from_tools_or_the_user(tools):
     assert "tool output or the user" in text
     assert "from memory" in text
     assert "say so" in text
+
+
+@pytest.mark.parametrize("tools", [ALL_TOOLS, []])
+def test_dates_are_written_in_a_form_the_grounding_check_can_match(tools):
+    text = flat(prompt(tools))
+    assert "write dates as yyyy-mm-dd or 'sep 25, 2026'" in text
+    assert "must match a date in a tool output" in text
+
+
+@pytest.mark.parametrize("tools", [ALL_TOOLS, [], [t for t in ALL_TOOLS if t != "propose_trades"]])
+def test_a_strategy_explanation_is_only_for_strategies_and_trades(tools):
+    text = flat(prompt(tools))
+    assert "when a strategy or trade is in play, explain the strategy" in text
+    assert "a plain price or fact lookup gets a direct answer" in text
 
 
 @pytest.mark.parametrize("tools", [ALL_TOOLS, []])
