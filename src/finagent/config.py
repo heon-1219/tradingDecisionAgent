@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     chat_max_rounds: int = 8
     # How long a proposed ticket stays confirmable before it expires and must be regenerated.
     ticket_ttl_sec: int = 300
+    # /api/* (chat, tickets, settings, kill switch) answers loopback clients only. True lets any
+    # client address through (the Host allowlist and the anti-CSRF header still apply). UNSAFE
+    # unless you put your own authentication in front: /api/* can place paper orders and write keys.
+    api_allow_remote: bool = False
 
 
 @lru_cache
