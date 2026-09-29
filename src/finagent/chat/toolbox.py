@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import traceback
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -110,6 +111,20 @@ _EVIDENCE_ID_RE = re.compile(r"E\d{1,7}")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?")
 _TOKEN_STRIP_RE = re.compile(r"[^A-Za-z0-9._:/+\-]")
+# A plain ASCII decimal, optionally in exponent notation ("12.5", "-3", ".5", "1e3").
+_DECIMAL_STR_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+MONEY_ABS_LIMIT = Decimal("1e15")
+MONEY_MAX_DECIMALS = 12
+# Provider/DB numbers outside 1e-30..1e30 are treated as missing, and formatting falls back to
+# scientific notation beyond this, so an absurd exponent can never become a megabyte of digits.
+_DISPLAY_MAX_ADJUSTED = 30
+# Evidence from market-data tools; a buy must also cite at least one research source.
+MARKET_DATA_CONNECTORS = frozenset({"alpaca_quotes", "alpaca_bars", "alpaca_screener"})
+# `<untrusted source="E1,E2">` openers, whole wrapped blocks, and any leftover wrapper tag.
+_UNTRUSTED_OPENER_RE = re.compile(r'<untrusted source="([^"]*)">')
+_UNTRUSTED_BLOCK_RE = re.compile(r'<untrusted source="[^"]*">.*?</untrusted>', re.S)
+_UNTRUSTED_TAG_RE = re.compile(r"<\s*/?\s*untrusted", re.I)
+_QUOTE_TIME_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})?")
 
 _CENT = Decimal("0.01")
 _HUNDRED = Decimal("100")
@@ -136,7 +151,12 @@ def parse_money(value: Any, field_name: str) -> Decimal:
 
     `str` -> `Decimal(str)`, `int` -> `Decimal(int)`, `float` -> `Decimal(repr(float))` (the
     shortest decimal the model wrote, never the binary expansion), `Decimal` kept as is. `bool`,
-    `None` and every other type, unparseable strings and NaN/Infinity raise `ValueError`."""
+    `None` and every other type raise `ValueError`, and so do:
+    - strings that are not a plain ASCII decimal (`Decimal()` itself would also accept "1_000",
+      non-ASCII digits, "NaN" and "Infinity");
+    - non-finite values, magnitudes of `MONEY_ABS_LIMIT` (1e15) or more, and values needing more
+      than `MONEY_MAX_DECIMALS` decimal places (pathological exponents such as 1e-999999, which
+      would blow up formatting and quantize)."""
     hint = f'{field_name} must be a decimal string such as "10" or "187.25"'
     if isinstance(value, bool) or value is None:
         raise ValueError(f"{hint} (got {type(value).__name__})")
@@ -148,16 +168,17 @@ def parse_money(value: Any, field_name: str) -> Decimal:
         number = Decimal(repr(value))
     elif isinstance(value, str):
         text = value.strip()
-        if not text or len(text) > 40:
-            raise ValueError(hint)
-        try:
-            number = Decimal(text)
-        except InvalidOperation:
-            raise ValueError(f"{hint} (plain digits, no $ sign or thousands separators)") from None
+        if not text or len(text) > 40 or not _DECIMAL_STR_RE.fullmatch(text):
+            raise ValueError(f"{hint} (plain ASCII digits: no $ sign, spaces, underscores or thousands separators)")
+        number = Decimal(text)
     else:
         raise ValueError(f"{hint} (got {type(value).__name__})")
     if not number.is_finite():
         raise ValueError(f"{field_name} must be a finite number")
+    if abs(number) >= MONEY_ABS_LIMIT:
+        raise ValueError(f"{field_name} is too large (its magnitude must be below 1e15)")
+    if number != 0 and number.normalize().as_tuple().exponent < -MONEY_MAX_DECIMALS:
+        raise ValueError(f"{field_name} has too many decimal places (at most {MONEY_MAX_DECIMALS})")
     return number
 
 
@@ -326,9 +347,22 @@ def _sym(value: Any) -> str:
         return _token(value, 20) or "?"
 
 
+def _displayable(value: Decimal) -> bool:
+    """False for values whose plain (non-scientific) form would be absurdly long."""
+    return value == 0 or (value.is_finite() and abs(value.adjusted()) <= _DISPLAY_MAX_ADJUSTED)
+
+
+def _sci(value: Decimal) -> str:
+    return format(value, ".3e") if value.is_finite() else str(value)
+
+
 def _plain(value: Decimal | None) -> str:
     if value is None:
         return "n/a"
+    if value == 0:
+        return "0"
+    if not _displayable(value):
+        return _sci(value)
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -338,6 +372,10 @@ def _plain(value: Decimal | None) -> str:
 def _commas(value: Decimal | None) -> str:
     if value is None:
         return "n/a"
+    if value == 0:
+        return "0"
+    if not _displayable(value):
+        return _sci(value)
     text = format(value, ",f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -347,10 +385,12 @@ def _commas(value: Decimal | None) -> str:
 def _usd(value: Decimal | None) -> str:
     if value is None:
         return "n/a"
+    if not _displayable(value):
+        return f"${_sci(value)}"
     try:
         q = value.quantize(_CENT, rounding=ROUND_HALF_UP)
-    except InvalidOperation:
-        return f"${_plain(value)}"
+    except ArithmeticError:
+        return f"${_sci(value)}"
     return f"-${-q:,.2f}" if q < 0 else f"${q:,.2f}"
 
 
@@ -365,19 +405,26 @@ def _price(value: Decimal | None) -> str:
     """Like `_usd`, but sub-penny digits (up to 4 places) are kept."""
     if value is None:
         return "n/a"
+    if not _displayable(value):
+        return f"${_sci(value)}"
     try:
         if value == value.quantize(_CENT):
             return _usd(value)
         q = value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-    except InvalidOperation:
-        return f"${_plain(value)}"
+    except ArithmeticError:
+        return f"${_sci(value)}"
     return f"${q:,.4f}"
 
 
 def _pct_from_fraction(value: Decimal | None) -> str:
     if value is None:
         return "n/a"
-    q = (value * _HUNDRED).quantize(_CENT, rounding=ROUND_HALF_UP)
+    if not _displayable(value):
+        return f"{_sci(value)} (fraction)"
+    try:
+        q = (value * _HUNDRED).quantize(_CENT, rounding=ROUND_HALF_UP)
+    except ArithmeticError:
+        return f"{_sci(value)} (fraction)"
     return f"+{q}%" if q > 0 else f"{q}%"
 
 
@@ -389,12 +436,18 @@ def _signed_plain(value: Decimal | None) -> str:
 
 
 def _compact_usd(value: Decimal | None) -> str:
-    if value is None:
+    """$997.35B-style amount. Never raises: anything unrepresentable falls back to $1.000e+40."""
+    if value is None or not value.is_finite():
         return "n/a"
-    for threshold, suffix in ((Decimal("1e12"), "T"), (Decimal("1e9"), "B"), (Decimal("1e6"), "M"), (Decimal("1e3"), "K")):
-        if abs(value) >= threshold:
-            return f"${(value / threshold).quantize(_CENT, rounding=ROUND_HALF_UP)}{suffix}"
-    return _usd(value)
+    if not _displayable(value):
+        return f"${_sci(value)}"
+    try:
+        for threshold, suffix in ((Decimal("1e12"), "T"), (Decimal("1e9"), "B"), (Decimal("1e6"), "M"), (Decimal("1e3"), "K")):
+            if abs(value) >= threshold:
+                return f"${(value / threshold).quantize(_CENT, rounding=ROUND_HALF_UP)}{suffix}"
+        return _usd(value)
+    except ArithmeticError:
+        return f"${_sci(value)}"
 
 
 def _yn(flag: bool) -> str:
@@ -402,7 +455,7 @@ def _yn(flag: bool) -> str:
 
 
 def _dec(value: Any) -> Decimal | None:
-    """A provider/DB number as a finite Decimal, or None."""
+    """A provider/DB number as a finite Decimal of sane magnitude, or None."""
     if isinstance(value, bool) or value is None:
         return None
     try:
@@ -411,16 +464,57 @@ def _dec(value: Any) -> Decimal | None:
         elif isinstance(value, (int, Decimal)):
             number = Decimal(value)
         elif isinstance(value, str):
-            number = Decimal(value.strip())
+            text = value.strip()
+            if len(text) > 60 or not _DECIMAL_STR_RE.fullmatch(text):
+                return None
+            number = Decimal(text)
         else:
             return None
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
         return None
-    return number if number.is_finite() else None
+    return number if number.is_finite() and _displayable(number) else None
 
 
 def _clean(value: Any, max_chars: int) -> str:
     return sanitize_untrusted(str(value), max_chars=max_chars) if value is not None else ""
+
+
+def _wrapped_per_source(text: str, source_ids: list[str]) -> bool:
+    """True when every id in `source_ids` has its own `<untrusted source="…">` opener (the
+    attribute may list several ids) and no wrapper tag remains outside the well-formed blocks - a
+    literal "<untrusted" in attacker text, or a block opened for some other id, does not count."""
+    opened: set[str] = set()
+    for match in _UNTRUSTED_OPENER_RE.finditer(text):
+        opened.update(part.strip() for part in match.group(1).split(","))
+    if any(source_id not in opened for source_id in source_ids):
+        return False
+    return not _UNTRUSTED_TAG_RE.search(_UNTRUSTED_BLOCK_RE.sub("", text))
+
+
+def _parse_quote_time(value: Any) -> datetime | None:
+    """An Alpaca quote/trade timestamp (RFC 3339, possibly with nanoseconds) as aware UTC, or None."""
+    if not isinstance(value, str):
+        return None
+    match = _QUOTE_TIME_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    base, fraction, zone = match.groups()
+    zone = "+00:00" if zone in (None, "Z") else zone
+    try:
+        parsed = datetime.fromisoformat(base + (fraction or "")[:7] + zone)
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _oldest_quote_time(ctx: Any, symbols: list[str]) -> datetime | None:
+    times = []
+    for symbol in symbols:
+        quote = ctx.quotes.get(symbol)
+        parsed = _parse_quote_time(quote.as_of) if quote is not None else None
+        if parsed is not None:
+            times.append(parsed)
+    return min(times) if times else None
 
 
 def _one_line(value: Any, max_chars: int) -> str:
@@ -835,7 +929,10 @@ class ChatToolbox:
             log.warning("tool %s: upstream HTTP %s", tool.name, exc.status)
             return ToolOutput(f"Upstream data request failed (HTTP {exc.status}).", is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures go back to the model, never raise
-            log.warning("tool %s failed: %s", tool.name, type(exc).__name__, exc_info=True)
+            # Frames only: the exception message and any chained causes can carry provider text
+            # or secrets, so they are never logged (no exc_info).
+            frames = "".join(traceback.format_tb(exc.__traceback__))
+            log.warning("tool %s failed: %s (message omitted)\n%s", tool.name, type(exc).__name__, frames)
             return ToolOutput(f"Tool error ({type(exc).__name__})", is_error=True)
 
     def _scrub(self, text: str) -> str:
@@ -852,12 +949,13 @@ class ChatToolbox:
         return f"Broker request failed (HTTP {exc.status}): {wrap_untrusted('broker', clean)}"
 
     def _research(self, result: ResearchResult) -> ToolOutput:
-        """A connector result as a ToolOutput; untrusted text a connector left unwrapped is
-        sanitized and wrapped here (defense in depth)."""
+        """A connector result as a ToolOutput. Defense in depth: unless every untrusted source has
+        its own `<untrusted source="…id…">` block and no stray wrapper tag is left outside the
+        blocks, the whole text is sanitized and wrapped here."""
         text = result.text or ""
         if not result.is_error:
-            untrusted_ids = [s.id for s in result.sources if s.untrusted]
-            if untrusted_ids and "<untrusted" not in text:
+            untrusted_ids = list(dict.fromkeys(s.id for s in result.sources if s.untrusted))
+            if untrusted_ids and not _wrapped_per_source(text, untrusted_ids):
                 text = wrap_untrusted(",".join(untrusted_ids), sanitize_untrusted(text, max_chars=_RESEARCH_MAX_CHARS))
         return ToolOutput(text=text, sources=list(result.sources), is_error=bool(result.is_error))
 
@@ -1136,7 +1234,8 @@ class ChatToolbox:
                 continue
             uri = item.get("uri")
             uri = uri if isinstance(uri, str) and len(uri) <= 2000 and _is_http_url(uri) else None
-            title = _clean(item.get("title") or "", 200) or uri or "Untitled"
+            # A missing title falls back to the URI - through the same sanitizer as a title.
+            title = _clean(item.get("title") or "", 200) or (_clean(uri, 200) if uri else "") or "Untitled"
             # Only the title goes into the evidence record, never the grounded answer text.
             record = self._evidence.add(
                 session_id, connector="grounded_web", title=title, url=uri, publisher=title, tier=3,
@@ -1297,6 +1396,8 @@ class ChatToolbox:
         data = current.model_dump()
         changed: list[str] = []
         for key, value in args.items():
+            if value is None and key not in _MANDATE_MONEY_FIELDS:
+                continue  # null = omitted: keep the current value (only the money caps clear on null)
             if key in _MANDATE_MONEY_FIELDS:
                 if value is None and key in _MANDATE_NULLABLE:
                     data[key] = None
@@ -1316,11 +1417,11 @@ class ChatToolbox:
             elif key == "order_types":
                 data[key] = _str_list_arg(args, key, max_items=2, max_len=10) or []
             elif key == "direction_text":
-                if value is not None and not isinstance(value, str):
+                if not isinstance(value, str):
                     raise _ArgError("'direction_text' must be a string")
-                if value is not None and len(value) > 1000:
+                if len(value) > 1000:
                     raise _ArgError("'direction_text' is too long (max 1000 characters)")
-                data[key] = (value or "").strip()
+                data[key] = value.strip()
             elif key == "horizon":
                 data[key] = _str_arg(args, key, required=True, max_len=100)
             changed.append(key)
@@ -1353,9 +1454,15 @@ class ChatToolbox:
         thesis = _str_arg(args, "thesis", required=True, max_len=2000)
         risks = _str_arg(args, "risks", required=True, max_len=2000)
         invalidation = _str_arg(args, "invalidation", required=True, max_len=2000)
-        evidence_ids = self._evidence_ids(session_id, args.get("evidence_ids"))
-        if not evidence_ids and any(leg.side == "buy" for leg in legs):
-            raise _ArgError("a proposal with a buy leg needs at least one evidence id (E#) from this session's research")
+        cited = self._evidence_records(session_id, args.get("evidence_ids"))
+        evidence_ids = [record.id for record in cited]
+        if any(leg.side == "buy" for leg in legs) and all(r.connector in MARKET_DATA_CONNECTORS for r in cited):
+            listed = ", ".join(f"{r.id} ({r.connector})" for r in cited) or "none"
+            raise _ArgError(
+                "a proposal with a buy leg needs at least one research source among its evidence ids (news, web "
+                "search or page, SEC filings, grounded web answer, or the product database); quotes, price metrics "
+                f"and movers alone are not enough. Cited: {listed}."
+            )
 
         # Reserve the turn's single proposal slot before the first await, so concurrent calls in
         # the same turn cannot both create a ticket; it is released unless a ticket is created.
@@ -1371,8 +1478,12 @@ class ChatToolbox:
             report = _risk_report(decisions)
             if all(d.verdict == "reject" for d in decisions):
                 return self._all_rejected(report)
-            clock = getattr(self._tickets, "clock", None)
-            quote_as_of = clock() if callable(clock) else self._now()
+            # The ticket is only as fresh as its stalest leg quote; the store clock is the fallback
+            # when no leg quote carries a timestamp.
+            quote_as_of = _oldest_quote_time(ctx, symbols)
+            if quote_as_of is None:
+                clock = getattr(self._tickets, "clock", None)
+                quote_as_of = clock() if callable(clock) else self._now()
             try:
                 ticket = self._tickets.create(
                     session_id,
@@ -1460,25 +1571,27 @@ class ChatToolbox:
             raise _ArgError("invalid order legs - " + "; ".join(errors))
         return legs
 
-    def _evidence_ids(self, session_id: str, raw: Any) -> list[str]:
+    def _evidence_records(self, session_id: str, raw: Any) -> list[SourceRecord]:
+        """The cited evidence records (deduplicated, in order); every id must exist in this session."""
         if not isinstance(raw, list):
             raise _ArgError("'evidence_ids' must be an array of evidence ids such as [\"E1\", \"E4\"]")
         if len(raw) > MAX_EVIDENCE_IDS:
             raise _ArgError(f"'evidence_ids' accepts at most {MAX_EVIDENCE_IDS} ids")
-        ids: list[str] = []
+        records: list[SourceRecord] = []
         unknown: list[str] = []
         for item in raw:
             eid = item.strip() if isinstance(item, str) else ""
-            if not _EVIDENCE_ID_RE.fullmatch(eid) or self._evidence.get(session_id, eid) is None:
+            record = self._evidence.get(session_id, eid) if _EVIDENCE_ID_RE.fullmatch(eid) else None
+            if record is None:
                 label = eid if _EVIDENCE_ID_RE.fullmatch(eid) else repr(_token(item, 20))
                 if label not in unknown:
                     unknown.append(label)
                 continue
-            if eid not in ids:
-                ids.append(eid)
+            if all(r.id != record.id for r in records):
+                records.append(record)
         if unknown:
             raise _ArgError(
                 f"unknown evidence id(s) for this session: {', '.join(unknown)}. Cite only [E#] ids returned by "
                 "research tools in this session."
             )
-        return ids
+        return records
