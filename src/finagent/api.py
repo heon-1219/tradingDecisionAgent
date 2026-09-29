@@ -1,12 +1,19 @@
-"""FastAPI application: GET /answer (competition contract), GET /health.
+"""FastAPI application: GET /answer (competition contract), GET /health, and the chat app.
 
-Guarantees: always HTTP 200 with the five string fields; unknown query params ignored.
+Guarantees for /answer: always HTTP 200 with the five string fields; unknown query params ignored.
+
+The paper-trading chat app lives under `/api/*` (`api_chat.router`), guarded by
+`api_security.LocalApiGuard` (loopback clients, a Host allowlist, anti-CSRF header). Its web UI is
+served at `/` and `/app/*` from `web/app/` once `web/app/index.html` exists; until then `/` keeps
+its plain-text line. `/answer`, `/answer/stream`, `/health` and `/ui` are untouched by the guard.
+`main()` binds 127.0.0.1 unless `FINAGENT_HOST` says otherwise.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,13 +21,20 @@ from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
+from . import api_chat
 from .agent.answer import fallback_answer
+from .api_security import LocalApiGuard
 from .config import get_settings
 from .i18n import detect_lang
 from .models import AnswerResponse
+from .paths import ROOT
 
 log = logging.getLogger("finagent.api")
+
+WEB_APP_DIR = ROOT / "web" / "app"
+ROOT_TEXT = "Financial Product Agent API — GET /answer?question_id=Q-001&question=...  ·  test console: /ui"
 
 
 def _json(resp: AnswerResponse) -> JSONResponse:
@@ -30,7 +44,9 @@ def _json(resp: AnswerResponse) -> JSONResponse:
     )
 
 
-def create_app(state_factory: Callable | None = None) -> FastAPI:
+def create_app(state_factory: Callable | None = None, *, web_app_dir: Path | None = None) -> FastAPI:
+    web_dir = Path(web_app_dir) if web_app_dir is not None else WEB_APP_DIR
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if state_factory is not None:
@@ -40,13 +56,35 @@ def create_app(state_factory: Callable | None = None) -> FastAPI:
 
             logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
             app.state.fin = AppState.load(get_settings())
-        yield
+        chat = getattr(app.state.fin, "chat", None)
+        if chat is not None:
+            try:
+                await chat.startup()
+            except Exception as e:  # noqa: BLE001 - /answer must start regardless
+                log.warning("chat runtime startup failed (%s)", type(e).__name__)
+        try:
+            yield
+        finally:
+            if chat is not None:
+                await chat.shutdown()
 
     app = FastAPI(title="Financial Product Agent API", version="0.1.0", lifespan=lifespan)
 
-    @app.get("/", response_class=PlainTextResponse)
+    def allow_remote() -> bool:
+        settings = getattr(getattr(app.state, "fin", None), "settings", None)
+        return bool(getattr(settings, "api_allow_remote", False))
+
+    app.add_middleware(LocalApiGuard, allow_remote=allow_remote)
+    app.include_router(api_chat.router)
+    if (web_dir / "index.html").is_file():
+        app.mount("/app", StaticFiles(directory=web_dir), name="webapp")
+
+    @app.get("/")
     async def root():
-        return "Financial Product Agent API — GET /answer?question_id=Q-001&question=...  ·  test console: /ui"
+        index = web_dir / "index.html"
+        if index.is_file():
+            return HTMLResponse(index.read_text(encoding="utf-8"))
+        return PlainTextResponse(ROOT_TEXT)
 
     @app.get("/ui", response_class=HTMLResponse)
     async def ui():
@@ -162,7 +200,10 @@ app = create_app()
 def main():
     import uvicorn
 
-    uvicorn.run("finagent.api:app", host="0.0.0.0", port=8000, workers=1)
+    # Loopback by default: /api/* can place paper orders. Set FINAGENT_HOST=0.0.0.0 to expose
+    # /answer; the /api/* guard still refuses non-loopback clients (see api_security).
+    host = os.environ.get("FINAGENT_HOST", "127.0.0.1")
+    uvicorn.run("finagent.api:app", host=host, port=8000, workers=1)
 
 
 if __name__ == "__main__":
