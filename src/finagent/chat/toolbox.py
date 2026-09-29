@@ -170,7 +170,10 @@ def parse_money(value: Any, field_name: str) -> Decimal:
         text = value.strip()
         if not text or len(text) > 40 or not _DECIMAL_STR_RE.fullmatch(text):
             raise ValueError(f"{hint} (plain ASCII digits: no $ sign, spaces, underscores or thousands separators)")
-        number = Decimal(text)
+        try:
+            number = Decimal(text)
+        except InvalidOperation:  # exponent beyond the context's range, e.g. "1e99999999999999999999"
+            raise ValueError(f"{field_name} is out of range") from None
     else:
         raise ValueError(f"{hint} (got {type(value).__name__})")
     if not number.is_finite():

@@ -1093,7 +1093,7 @@ def test_parse_money_bounds_and_strict_decimal_strings():
     arabic_indic_12 = "١٢"  # Decimal() would read this as 12
     for bad in ("1e40", "1e15", "-1e15", 10**15, -(10**16), 1e15, 1e300, Decimal("1e40"),
                 "1_000", arabic_indic_12, "1e-40", Decimal("1e-999999"), "0.0000000000001", "1 000",
-                "+-1", ".", "1e", "0x10"):
+                "+-1", ".", "1e", "0x10", "1e99999999999999999999", "1e-99999999999999999999"):
         with pytest.raises(ValueError):
             parse_money(bad, "qty")
     assert parse_money("999999999999999", "qty") == D("999999999999999")
@@ -1124,6 +1124,8 @@ async def test_huge_or_odd_money_inputs_are_readable_argument_errors(world):
         ("screen_us_etfs", {"min_aum_usd": 1e300}),
         ("screen_us_etfs", {"max_expense_ratio": "1_0"}),
         ("screen_us_etfs", {"min_aum_usd": "1e-400"}),
+        ("screen_us_etfs", {"min_aum_usd": "1e99999999999999999999"}),
+        ("propose_trades", proposal([aapl_leg(qty="1e-99999999999999999999")], [e1])),
         ("draft_mandate", {"budget_usd": "1e40"}),
         ("draft_mandate", {"max_order_usd": "5_000"}),
         ("propose_trades", proposal([aapl_leg(qty="1e40")], [e1])),
