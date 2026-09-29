@@ -8,9 +8,9 @@ conversation it started so tests can read the provider-side transcript. No netwo
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
-import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -19,9 +19,12 @@ import pytest
 from fakes_trading import FakeBroker, FakeData
 from finagent.agent.llm import StubConversation, StubLLM, ToolCall, Turn
 from finagent.chat.agent import (
+    CACHE_MAX_TOOL_CHARS,
+    CACHE_MAX_TURNS,
     MAX_MESSAGE_CHARS,
     NUDGE_TEXT,
     TOOL_CANCELLED_TEXT,
+    UNKNOWN_TOOL,
     ChatAgent,
     chunk_text,
 )
@@ -76,15 +79,33 @@ class RecLLM(StubLLM):
 
 
 class GatedConversation(StubConversation):
-    """Every `step()` first waits for `gate` (so a turn can be held in flight)."""
+    """`step()` first waits for `gate` (so a turn can be held in flight): every step, or only the
+    0-based step numbers in `gated_steps`."""
 
-    def __init__(self, script, system, user_text, gate: asyncio.Event, entered: asyncio.Event):
+    def __init__(self, script, system, user_text, gate: asyncio.Event, entered: asyncio.Event,
+                 gated_steps: set[int] | None = None):
         super().__init__(script, system, user_text)
-        self.gate, self.entered = gate, entered
+        self.gate, self.entered, self.gated_steps = gate, entered, gated_steps
+        self.steps = 0
 
     async def step(self):
-        self.entered.set()
-        await self.gate.wait()
+        n, self.steps = self.steps, self.steps + 1
+        if self.gated_steps is None or n in self.gated_steps:
+            self.entered.set()
+            await self.gate.wait()
+        return await super().step()
+
+
+class ClockedConversation(StubConversation):
+    """Each `step()` advances the injected clock by the next entry of `advances` (a slow model)."""
+
+    def __init__(self, script, system, user_text, clock: "FakeClock", advances: list[float]):
+        super().__init__(script, system, user_text)
+        self.clock, self.advances = clock, list(advances)
+
+    async def step(self):
+        if self.advances:
+            self.clock.t += self.advances.pop(0)
         return await super().step()
 
 
@@ -373,7 +394,9 @@ async def test_injected_clock_stops_loop_and_nudges(world):
 
 
 async def test_slow_tool_is_cancelled_within_budget(world):
-    world.settings.chat_time_budget_sec = 0.3
+    # Deterministic: the injected clock says the model step used all but 0.05 s of the 90 s budget,
+    # so the hanging tool gets a 0.05 s timeout; it never finishes, so it is always cancelled.
+    clock = FakeClock()
     started = asyncio.Event()
 
     async def hanging_status(session_id, args, turn_id):
@@ -382,14 +405,13 @@ async def test_slow_tool_is_cancelled_within_budget(world):
         return ToolOutput("never")
 
     world.toolbox._t_get_market_status = hanging_status
-    llm = RecLLM([
-        Turn("Checking.", [call("c1", "get_market_status"), call("c2", "get_account")]),
-        Turn("Partial answer."),
-    ])
+    llm = RecLLM(
+        [Turn("Checking.", [call("c1", "get_market_status"), call("c2", "get_account")]), Turn("Partial answer.")],
+        conversation_cls=ClockedConversation, clock=clock, advances=[89.95],
+    )
     events = Events()
-    t0 = time.monotonic()
-    text = await world.agent(llm).run_turn(world.session_id, "Is the market open?", events)
-    assert time.monotonic() - t0 < 5
+    agent = world.agent(llm, clock=clock)
+    text = await asyncio.wait_for(agent.run_turn(world.session_id, "Is the market open?", events), 30)
     assert started.is_set()
     assert text == "Partial answer."
     outs = {e["toolCallId"]: e for e in events.of("tool-output-available")}
@@ -678,3 +700,160 @@ async def test_logs_carry_no_message_or_answer_text(world, caplog):
     await world.agent(llm).run_turn(world.session_id, "SECRET-QUESTION-TEXT", Events())
     assert "SECRET-QUESTION-TEXT" not in caplog.text and "SECRET-ANSWER-TEXT" not in caplog.text
     assert "99.9" not in caplog.text
+
+
+# --- hardening round 1 --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [0, -5])
+def test_chunk_text_nonpositive_size_does_not_hang(size):
+    assert chunk_text("ab c", size) == ["a", "b", " ", "c"]
+
+
+async def test_model_written_tool_names_are_never_stored_or_shown(world):
+    bad = "</script><img src=x>"
+    world.settings.chat_max_rounds = 1
+    llm = RecLLM([
+        Turn("", [ToolCall("c1", bad, {}), call("c2", "get_market_status")]),
+        Turn("", [ToolCall("c3", bad, {})]),  # the nudged model calls it again, and writes nothing
+    ])
+    events = Events()
+    text = await world.agent(llm).run_turn(world.session_id, "Is the market open?", events)
+    inputs = {e["toolCallId"]: e for e in events.of("tool-input-available")}
+    assert inputs["c1"]["toolName"] == UNKNOWN_TOOL
+    assert inputs["c2"]["toolName"] == "get_market_status"
+    assert [e["isError"] for e in events.of("tool-output-available")] == [True, False]
+    # the fallback lists only real tools
+    assert "get_market_status" in text and UNKNOWN_TOOL not in text
+    msgs = world.sessions.messages(world.session_id)
+    assert msgs[1]["meta"]["tools"] == [UNKNOWN_TOOL, "get_market_status"]
+    names = [e["toolName"] for e in msgs[2]["meta"]["events"] if "toolName" in e]
+    assert set(names) == {UNKNOWN_TOOL, "get_market_status"}
+    stored = json.dumps(msgs, ensure_ascii=False)
+    streamed = json.dumps([e for e in events if e["type"] != "tool-output-available"], ensure_ascii=False)
+    for blob in (stored, streamed, text):
+        assert "<img" not in blob and "script" not in blob
+    # the raw name still reaches the toolbox, which refuses it
+    assert tool_results(llm.convs[0])["c1"]["content"].startswith("Unknown tool")
+
+
+async def test_cached_conversation_is_rebuilt_after_max_turns(world):
+    llm = RecLLM(script_factory=lambda u: [Turn(f"answer {i}") for i in range(CACHE_MAX_TURNS + 2)])
+    agent = world.agent(llm)
+    for i in range(CACHE_MAX_TURNS):
+        await agent.run_turn(world.session_id, f"question {i}", Events())
+    assert len(llm.started) == 1
+    await agent.run_turn(world.session_id, "one more", Events())
+    assert len(llm.started) == 2
+    t = llm.convs[1].transcript()
+    assert t[1]["content"].startswith("question")  # rebuilt from the stored history
+
+
+async def test_cached_conversation_is_rebuilt_after_large_tool_outputs(world):
+    half = CACHE_MAX_TOOL_CHARS // 2 + 5_000
+
+    async def big_status(session_id, args, turn_id):
+        return ToolOutput("x" * half)
+
+    world.toolbox._t_get_market_status = big_status
+    llm = RecLLM(script_factory=lambda u: [Turn("", [call("c", "get_market_status")]), Turn("ok")] * 3)
+    agent = world.agent(llm)
+    await agent.run_turn(world.session_id, "one", Events())
+    assert len(llm.started) == 1
+    await agent.run_turn(world.session_id, "two", Events())  # crosses the limit: dropped afterwards
+    assert len(llm.started) == 1
+    await agent.run_turn(world.session_id, "three", Events())
+    assert len(llm.started) == 2
+
+
+async def test_cancel_during_tool_releases_slot_lock_and_cache(world):
+    e1 = world.evidence.add(
+        world.session_id, connector="edgar", title="Apple 10-K", url="https://www.sec.gov/a",
+        publisher="SEC EDGAR", tier=1, published_at=None, snippet="10-K", untrusted=False,
+    ).id
+    entered = asyncio.Event()
+
+    async def hanging_build_context(symbols):
+        entered.set()
+        await asyncio.sleep(3600)
+
+    world.executor.build_context = hanging_build_context
+    llm = RecLLM(script_factory=lambda u: [Turn("", [ToolCall("c1", "propose_trades", proposal_args([e1]))]),
+                                           Turn("after")])
+    agent = world.agent(llm)
+    events = Events()
+    task = asyncio.create_task(agent.run_turn(world.session_id, "buy apple", events))
+    await asyncio.wait_for(entered.wait(), 5)
+    turn_id = events[0]["messageId"]
+    assert (world.session_id, turn_id) in world.toolbox._proposal_turns  # the slot is held in flight
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (world.session_id, turn_id) not in world.toolbox._proposal_turns  # released
+    assert world.roles() == ["user"]
+    assert events[-1]["type"] == "tool-input-available"  # no error/finish after a cancellation
+    del world.executor.build_context  # back to the real one: the next turn's proposal completes
+    next_events = Events()
+    # the lock was released: the next turn runs
+    text =await asyncio.wait_for(agent.run_turn(world.session_id, "hello again", next_events), 30)
+    assert next_events.types()[0] == "start" and text
+    assert len(llm.started) == 2  # the cancelled turn's conversation was dropped
+
+
+async def test_cancel_during_nudge_reraises_and_cleans_up(world):
+    world.settings.chat_max_rounds = 1
+    gate, entered = asyncio.Event(), asyncio.Event()
+    llm = RecLLM(script_factory=lambda u: [Turn("", [call("c1", "get_market_status")]), Turn("late")],
+                 conversation_cls=GatedConversation, gate=gate, entered=entered, gated_steps={1})
+    agent = world.agent(llm)
+    task = asyncio.create_task(agent.run_turn(world.session_id, "first", Events()))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert llm.convs[0].transcript()[-1] == {"role": "user", "content": NUDGE_TEXT}  # parked in the nudge
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert world.roles() == ["user"]
+    gate.set()
+    events = Events()
+    await asyncio.wait_for(agent.run_turn(world.session_id, "second", events), 30)
+    assert events.types()[0] == "start"
+    assert len(llm.started) == 2
+
+
+async def test_grace_step_timeout_gives_fallback_then_finish(world, monkeypatch):
+    world.settings.chat_max_rounds = 1
+    gate, entered = asyncio.Event(), asyncio.Event()  # the gate never opens: the nudge step hangs
+    llm = RecLLM([Turn("", [call("c1", "get_market_status")]), Turn("never")],
+                 conversation_cls=GatedConversation, gate=gate, entered=entered, gated_steps={1})
+    agent = world.agent(llm)
+    monkeypatch.setattr(agent, "_grace_sec", lambda: 0.05)
+    events = Events()
+    text = await asyncio.wait_for(agent.run_turn(world.session_id, "Is the market open?", events), 30)
+    assert entered.is_set()
+    assert text.startswith("I ran out of time before finishing.") and "get_market_status" in text
+    assert events.types()[-2:] == ["text-delta", "finish"]
+    assert "".join(e["delta"] for e in events.of("text-delta")) == text
+    assert world.roles() == ["user", "assistant", "event"]
+
+
+@pytest.mark.parametrize("exc, expected", [
+    (KeyError("gone"), "not found"),
+    (RuntimeError("disk full /secret/path"), "went wrong"),
+])
+async def test_failing_user_append_emits_error_then_finish(world, monkeypatch, exc, expected):
+    real_append = world.sessions.append
+
+    def append(session_id, role, content, meta=None):
+        if role == "user":
+            raise exc
+        return real_append(session_id, role, content, meta)
+
+    monkeypatch.setattr(world.sessions, "append", append)
+    llm = RecLLM([Turn("never")])
+    events = Events()
+    text = await world.agent(llm).run_turn(world.session_id, "hello", events)
+    assert events.types() == ["start", "error", "finish"]
+    assert expected in events[1]["message"] and text == events[1]["message"]
+    assert "secret" not in text
+    assert llm.started == []
+    assert world.sessions.messages(world.session_id) == []

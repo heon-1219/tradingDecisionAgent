@@ -28,24 +28,26 @@ no text, a fallback lists the tools that ran.
 
 Conversations are cached per session in memory, keyed by the tool-name set. A missing entry (a new
 `ChatAgent`, e.g. after a restart), a changed tool set, or an entry dropped after an error, a
-cancellation, a nudge or an empty reply is rebuilt from the stored text history, which is always
-consistent (tool calls never reach it).
+cancellation, a nudge, an empty reply, `CACHE_MAX_TURNS` served turns or `CACHE_MAX_TOOL_CHARS` of
+tool output is rebuilt from the stored text history, which is always consistent (tool calls never
+reach it) and bounded.
 
 `run_turn` never raises except `asyncio.CancelledError` (client disconnect), which it re-raises
 after releasing the session lock and dropping the cached conversation. Logs carry ids, counts,
 types and timings only: never message or answer text, and never exception strings (provider errors
-can carry response bodies or keys).
+can carry response bodies or keys). A tool name the model wrote is recorded (events, stored meta,
+fallback text, logs) only if it is in the current tool set, otherwise as `unknown_tool`.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import re
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -65,8 +67,14 @@ NUDGE_TEXT = "Budget reached: answer now with what you have. Do not call tools."
 TOOL_CANCELLED_TEXT = "Tool cancelled: the time budget for this reply ran out."
 TOOL_REFUSED_TEXT = "Tool not run: the budget for this reply is spent. Answer with what you have."
 SUMMARY_CONTENT = "turn summary"
+# What is recorded (meta, summary, events, fallback) for a tool name not in the current tool set:
+# model-written names never reach storage or user-facing text.
+UNKNOWN_TOOL = "unknown_tool"
+# A cached conversation is rebuilt from the stored history once it has served this many turns, or
+# once the tool outputs fed into it exceed this many characters, so its context stays bounded.
+CACHE_MAX_TURNS = 6
+CACHE_MAX_TOOL_CHARS = 60_000
 
-_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,64}")
 # Events left out of the persisted turn summary (the text itself is the assistant row).
 _UNSUMMARIZED = frozenset({"start", "finish", "text-delta", "reasoning-delta", "source-url"})
 
@@ -107,7 +115,7 @@ def _msg(key: str, lang: Lang) -> str:
 
 def fallback_text(lang: Lang, tools: list[str]) -> str:
     """The answer when the budget ran out and the nudged model still gave no text."""
-    names = ", ".join(dict.fromkeys(tools))
+    names = ", ".join(dict.fromkeys(t for t in tools if t != UNKNOWN_TOOL))
     if names:
         return pick(
             lang,
@@ -127,7 +135,9 @@ def fallback_text(lang: Lang, tools: list[str]) -> str:
 
 def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     """`text` in chunks of at most `size` characters that concatenate back to exactly `text`.
-    A chunk ends just after whitespace when there is some in the second half of its window."""
+    A chunk ends just after whitespace when there is some in the second half of its window.
+    A `size` below 1 is treated as 1."""
+    size = max(1, size)
     chunks: list[str] = []
     start, n = 0, len(text)
     while n - start > size:
@@ -143,11 +153,6 @@ def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def _safe_name(name: Any) -> str:
-    """A model-supplied tool name, fit for a log line."""
-    return name if isinstance(name, str) and _SAFE_NAME_RE.fullmatch(name) else "?"
-
-
 def _safe_emit(emit: Callable[[dict], None], event: dict, where: str) -> bool:
     try:
         emit(event)
@@ -155,6 +160,14 @@ def _safe_emit(emit: Callable[[dict], None], event: dict, where: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - a broken consumer must never kill the turn
         log.warning("%s: emit failed (%s)", where, type(exc).__name__)
         return False
+
+
+@dataclass
+class _CachedConversation:
+    names: frozenset[str]  # the tool names it was built with
+    conv: Conversation
+    turns: int = 0  # turns served so far
+    tool_chars: int = 0  # characters of tool output fed into it so far
 
 
 class _StepFailed(Exception):
@@ -168,7 +181,9 @@ class _TurnState:
         self._emit = emit
         self.session_id, self.turn_id, self.lang = session_id, turn_id, lang
         self.usage: dict[str, int] = {}
+        self.known_tools: frozenset[str] = frozenset()  # the current tool set
         self.tools: list[str] = []  # names of the tool calls that ran (not cancelled), in order
+        self.tool_chars = 0  # characters of tool results fed back to the model this turn
         self.corpus: list[str] = []  # tool output texts, then the message, mandate and date
         self.summary: list[dict] = []
         self.call_names: dict[str, str] = {}
@@ -232,8 +247,7 @@ class ChatAgent:
         self._now = now
         self._clock = clock
         self._locks: dict[str, asyncio.Lock] = {}
-        # session id -> (tool names the conversation was built with, the provider conversation)
-        self._convs: OrderedDict[str, tuple[frozenset[str], Conversation]] = OrderedDict()
+        self._convs: OrderedDict[str, _CachedConversation] = OrderedDict()  # by session id, LRU
 
     # --- entry point ---------------------------------------------------------------------------
 
@@ -331,6 +345,7 @@ class ChatAgent:
     async def _drive(self, st: _TurnState, message: str, t0: float) -> tuple[str, bool]:
         """The model/tool loop. Returns (final text, whether the cached conversation is reusable)."""
         specs = self._toolbox.specs()
+        st.known_tools = frozenset(s.name for s in specs)
         mandate_json = self._mandate_json(st.session_id)
         today = self._today()
         turn_text = "\n".join([
@@ -340,7 +355,8 @@ class ChatAgent:
             f"Answer language: {language_name(st.lang)}",
             f"Active mandate: {mandate_json or 'none'}",
         ])
-        conv = self._conversation(st.session_id, message, specs, turn_text)
+        entry = self._conversation(st.session_id, message, specs, turn_text)
+        conv = entry.conv
         extra_corpus = [message, *([mandate_json] if mandate_json else []), f"Today: {today}"]
 
         deadline = t0 + self._budget_sec()
@@ -377,6 +393,12 @@ class ChatAgent:
         if not final.strip():
             final = _msg("empty_reply", st.lang)
             cacheable = False
+        entry.turns += 1
+        entry.tool_chars += st.tool_chars
+        if cacheable and (entry.turns >= CACHE_MAX_TURNS or entry.tool_chars > CACHE_MAX_TOOL_CHARS):
+            log.info("chat session %s: conversation retired after %d turns, %d tool chars",
+                     st.session_id, entry.turns, entry.tool_chars)
+            cacheable = False
         st.corpus.extend(extra_corpus)
         return final, cacheable
 
@@ -386,8 +408,9 @@ class ChatAgent:
         results: list[tuple[str, str, bool]] = []
         in_time = True
         for c in calls:
-            st.call_names[c.id] = c.name
-            st.emit({"type": "tool-input-available", "toolCallId": c.id, "toolName": c.name, "input": c.input})
+            name = c.name if isinstance(c.name, str) and c.name in st.known_tools else UNKNOWN_TOOL
+            st.call_names[c.id] = name
+            st.emit({"type": "tool-input-available", "toolCallId": c.id, "toolName": name, "input": c.input})
             out = None
             if in_time:
                 remaining = deadline - self._clock()
@@ -398,20 +421,21 @@ class ChatAgent:
                             timeout=remaining,
                         )
                     except TimeoutError:
-                        log.info("chat turn %s: tool %s cancelled at the time budget", st.turn_id, _safe_name(c.name))
+                        log.info("chat turn %s: tool %s cancelled at the time budget", st.turn_id, name)
                     except Exception as exc:  # noqa: BLE001 - execute() should never raise; be safe anyway
-                        log.warning("chat turn %s: tool %s raised %s", st.turn_id, _safe_name(c.name),
-                                    type(exc).__name__)
+                        log.warning("chat turn %s: tool %s raised %s", st.turn_id, name, type(exc).__name__)
                         out = ToolOutput(f"Tool error ({type(exc).__name__})", is_error=True)
                 if out is None:
                     in_time = False
             if out is None:
                 results.append((c.id, TOOL_CANCELLED_TEXT, True))
+                st.tool_chars += len(TOOL_CANCELLED_TEXT)
                 st.emit({"type": "tool-output-available", "toolCallId": c.id, "output": TOOL_CANCELLED_TEXT,
                          "isError": True, "sources": []})
                 continue
-            st.tools.append(c.name)
+            st.tools.append(name)
             st.corpus.append(out.text)
+            st.tool_chars += len(out.text)
             results.append((c.id, out.text, bool(out.is_error)))
             st.emit({
                 "type": "tool-output-available",
@@ -456,14 +480,14 @@ class ChatAgent:
 
     # --- conversation cache --------------------------------------------------------------------
 
-    def _conversation(self, session_id: str, message: str, specs: list[ToolSpec], turn_text: str) -> Conversation:
+    def _conversation(self, session_id: str, message: str, specs: list[ToolSpec],
+                      turn_text: str) -> _CachedConversation:
         names = frozenset(s.name for s in specs)
         cached = self._convs.get(session_id)
-        if cached is not None and cached[0] == names:
-            conv = cached[1]
+        if cached is not None and cached.names == names:
             self._convs.move_to_end(session_id)
-            conv.add_user(turn_text)
-            return conv
+            cached.conv.add_user(turn_text)
+            return cached
         rows = self._prior_history(session_id, message)
         if rows and rows[-1]["role"] == "user":  # a dangling user row (e.g. a cancelled turn)
             rows[-1]["content"] += "\n\n" + turn_text
@@ -476,12 +500,12 @@ class ChatAgent:
                 conv.add_assistant(row["content"])
             else:
                 conv.add_user(row["content"])
-        self._convs[session_id] = (names, conv)
+        entry = self._convs[session_id] = _CachedConversation(names, conv)
         self._convs.move_to_end(session_id)
         while len(self._convs) > MAX_CACHED_CONVERSATIONS:
             self._convs.popitem(last=False)
         log.info("chat session %s: conversation built from %d stored row(s)", session_id, len(rows) - 1)
-        return conv
+        return entry
 
     def _prior_history(self, session_id: str, message: str) -> list[dict]:
         """Stored user/assistant rows before this turn's message: leading assistant rows dropped,
