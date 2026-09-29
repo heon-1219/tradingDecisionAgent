@@ -1210,3 +1210,159 @@ async def test_a_value_error_subclass_after_placement_is_reconciled(world, make_
 def test_mandate_for_is_a_required_keyword_argument(world):
     with pytest.raises(TypeError):
         Executor(world.broker, world.data, world.tickets, world.ledger, world.settings)
+
+
+# --- Task 3.5: startup recovery of tickets stuck in `submitting` ---------------------------------
+
+
+def _stick(world: World, ticket: Ticket) -> Ticket:
+    """Simulate a crash mid-confirm: the claim CAS ran, nothing after it did."""
+    return world.tickets.transition(ticket.id, {TicketStatus.proposed}, TicketStatus.submitting)
+
+
+async def test_recover_stuck_found_order_moves_the_ticket_to_submitted(world):
+    ticket = _stick(world, await world.propose([aapl()]))
+    placed = world.broker.place(ticket.legs[0], ticket.client_order_ids[0])
+
+    moved = await world.executor.recover_stuck()
+
+    assert moved == 1
+    stored = world.tickets.get(ticket.id)
+    assert stored.status == TicketStatus.submitted
+    assert stored.broker_order_ids == [placed.id]
+    assert world.broker.submits == 0
+    assert world.broker.reconcile_calls == ticket.client_order_ids
+    rows = world.order_rows()
+    assert [(r["client_order_id"], r["broker_order_id"]) for r in rows] == [
+        (ticket.client_order_ids[0], placed.id)
+    ]
+    entries = world.ledger_entries()
+    recon = [e for e in entries if e["kind"] == "reconcile"]
+    assert recon and recon[-1]["payload"]["outcome"] == "found"
+    assert recon[-1]["payload"]["source"] == "startup"
+    recover = [e for e in entries if e["kind"] == "recover"]
+    assert recover and recover[-1]["payload"]["status"] == "submitted"
+
+
+async def test_recover_stuck_missing_order_fails_the_ticket_with_a_ledger_entry(world):
+    ticket = _stick(world, await world.propose([aapl()]))
+
+    moved = await world.executor.recover_stuck()
+
+    assert moved == 1
+    assert world.tickets.get(ticket.id).status == TicketStatus.failed
+    assert world.broker.submits == 0
+    assert world.order_rows() == []
+    kinds = world.ledger_kinds()
+    assert "reconcile" in kinds and kinds[-1] == "recover"
+    assert world.ledger_entries()[-1]["payload"]["status"] == "failed"
+
+
+async def test_recover_stuck_broker_error_leaves_the_ticket_as_is(world, caplog):
+    ticket = _stick(world, await world.propose([aapl()]))
+    world.broker.reconcile_error = BrokerError(503, None, f"down {FAKE_SECRET}")
+
+    moved = await world.executor.recover_stuck()
+
+    assert moved == 0
+    assert world.tickets.get(ticket.id).status == TicketStatus.submitting
+    assert world.order_rows() == []
+    assert FAKE_SECRET not in caplog.text
+    assert FAKE_SECRET not in json.dumps(world.ledger_entries())
+
+
+async def test_recover_stuck_mixed_legs_keep_the_found_one_and_fail_the_other(world):
+    ticket = _stick(world, await world.propose([aapl(), msft_sell()]))
+    placed = world.broker.place(ticket.legs[1], ticket.client_order_ids[1])
+
+    assert await world.executor.recover_stuck() == 1
+
+    stored = world.tickets.get(ticket.id)
+    assert stored.status == TicketStatus.submitted
+    assert stored.broker_order_ids == [None, placed.id]
+
+
+async def test_recover_stuck_never_adopts_a_mismatched_order(world):
+    ticket = _stick(world, await world.propose([aapl()]))
+    wrong_leg = OrderLeg(symbol="MSFT", side="buy", qty=D("1"), type="market")
+    world.broker.place(wrong_leg, ticket.client_order_ids[0])
+
+    assert await world.executor.recover_stuck() == 1
+
+    stored = world.tickets.get(ticket.id)
+    # Uncertain: never adopted, but the ticket is not `failed` (an order may exist).
+    assert stored.status == TicketStatus.submitted
+    assert stored.broker_order_ids == [None]
+    rows = world.order_rows()
+    assert len(rows) == 1 and rows[0]["broker_order_id"] is None
+
+
+async def test_recover_stuck_ignores_tickets_in_other_states(world):
+    proposed = await world.propose([aapl()])
+    moved = await world.executor.recover_stuck()
+    assert moved == 0
+    assert world.tickets.get(proposed.id).status == TicketStatus.proposed
+    assert world.broker.reconcile_calls == []
+
+
+# --- Task 3.5: order polling for GET /api/tickets/{id} -------------------------------------------
+
+
+async def test_ticket_orders_refreshes_a_working_order_from_the_broker(world):
+    ticket = await world.propose([aapl()])
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+    order_id = result.orders[0].id
+    world.broker.status_script[order_id] = ["filled"]
+    submits = world.broker.submits
+
+    tracked = await world.executor.ticket_orders(ticket.id, SESSION)
+
+    assert tracked is not None
+    stored, rows = tracked
+    assert stored.id == ticket.id and stored.status == TicketStatus.submitted
+    assert [r.client_order_id for r in rows] == ticket.client_order_ids
+    assert rows[0].broker_order_id == order_id
+    assert rows[0].order.status == "filled"
+    assert world.broker.submits == submits
+    body = OrderSnapshot.model_validate_json(world.order_rows()[0]["body"])
+    assert body.status == "filled"
+    polls = [e for e in world.ledger_entries() if e["kind"] == "order_status"]
+    assert polls[-1]["payload"]["status"] == "filled"
+    assert polls[-1]["payload"]["source"] == "poll"
+
+
+async def test_ticket_orders_does_not_refetch_a_final_order(world):
+    ticket = await world.propose([aapl()])
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+    world.broker.status_script[result.orders[0].id] = ["filled"]
+    await world.executor.ticket_orders(ticket.id, SESSION)
+    calls = len(world.broker.get_order_calls)
+
+    _, rows = await world.executor.ticket_orders(ticket.id, SESSION)
+
+    assert rows[0].order.status == "filled"
+    assert len(world.broker.get_order_calls) == calls
+
+
+async def test_ticket_orders_keeps_the_stored_snapshot_on_a_broker_error(world, caplog):
+    ticket = await world.propose([aapl()])
+    await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+    world.broker.get_order_error = BrokerError(500, None, f"boom {FAKE_SECRET}")
+
+    _, rows = await world.executor.ticket_orders(ticket.id, SESSION)
+
+    assert rows[0].order.status == "accepted"
+    assert FAKE_SECRET not in caplog.text
+
+
+async def test_ticket_orders_of_an_unknown_or_foreign_ticket_is_none(world):
+    ticket = await world.propose([aapl()])
+    assert await world.executor.ticket_orders("TNOPE", SESSION) is None
+    assert await world.executor.ticket_orders(ticket.id, "another-session") is None
+
+
+async def test_ticket_orders_before_confirm_has_no_rows(world):
+    ticket = await world.propose([aapl()])
+    stored, rows = await world.executor.ticket_orders(ticket.id, SESSION)
+    assert stored.status == TicketStatus.proposed and rows == []
+    assert world.broker.get_order_calls == []

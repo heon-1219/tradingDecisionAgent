@@ -80,9 +80,22 @@ new ticket. So a refresh racing a confirm can never leave a second live copy of 
 the session, so a requote (from confirm or refresh) also supersedes any unrelated proposal made in
 the same session meanwhile. This is the store's one-active-ticket rule, kept deliberately.
 
+**recover_stuck()** runs once at startup, before any confirm can be in flight. A ticket still in
+`submitting` means the process died mid-confirm. Each of its legs is looked up once with
+`get_order_by_client_id` (never resubmitted): a matching order is recorded and adopted, a missing
+one is "not placed", a mismatched one is uncertain (recorded without a broker id). If any lookup
+fails, the ticket is left as it is and retried at the next startup. Otherwise the outcome is
+written with the same CAS as a confirm: `submitted` if any leg is placed or uncertain, else
+`failed`.
+
+**ticket_orders(ticket_id, session_id)** serves order polling after confirm: the ticket and its
+local `orders` rows, each non-final order re-read with `get_order` (a read; never a submit). A
+changed status updates the local row and writes an `order_status` ledger entry.
+
 **Ledger.** Kinds: `confirm_request`, `claim`, `requote`, `submit`, `broker_response`,
-`reconcile`, `order_status`, `result` (confirm); `reject`; `refresh`; `kill_switch` (under the
-session id `SYSTEM_SESSION`). Payloads carry symbols as *values*, never as dict keys: the ledger
+`reconcile`, `order_status`, `result` (confirm); `reject`; `refresh`; `recover` and `reconcile`
+(startup recovery, `source: "startup"`); `order_status` (`source: "poll"`); `kill_switch` (under
+the session id `SYSTEM_SESSION`). Payloads carry symbols as *values*, never as dict keys: the ledger
 redacts the value of any dict key that looks secret-like, and "KEY" (KeyCorp) is a real ticker.
 They carry client order ids, leg indexes, statuses and short sanitized messages - never headers,
 raw HTTP bodies or credentials. Every broker message shown to a user or stored goes through
@@ -156,6 +169,16 @@ class ConfirmResult:
     orders: list[OrderSnapshot]
     message: str
     new_ticket: Ticket | None = None
+
+
+@dataclass
+class TrackedOrder:
+    """One local `orders` row of a ticket, for polling. `order` is None for an uncertain leg (no
+    broker id is known) or a row whose stored body cannot be read."""
+
+    client_order_id: str
+    broker_order_id: str | None
+    order: OrderSnapshot | None
 
 
 @dataclass
@@ -900,6 +923,141 @@ class Executor:
             "requote", superseded, [],
             "Re-quoted at current prices; review the new ticket.", new_ticket=new_ticket,
         )
+
+    # --- startup recovery and order polling -------------------------------------------------------
+
+    async def recover_stuck(self) -> int:
+        """Settle every ticket left in `submitting` by a crash; returns how many were moved. Call it
+        only at startup, before any confirm can be in flight (see the module docstring)."""
+        rows = self._db.query(
+            "SELECT id FROM tickets WHERE status=? ORDER BY created_at",
+            (TicketStatus.submitting.value,),
+        )
+        moved = 0
+        for row in rows:
+            try:
+                if await self._recover_one(row["id"]):
+                    moved += 1
+            except Exception as exc:  # noqa: BLE001 - one bad ticket must not stop the sweep
+                logger.warning("recovery of ticket %s failed: %s", row["id"], type(exc).__name__)
+        return moved
+
+    async def _recover_one(self, ticket_id: str) -> bool:
+        try:
+            ticket = self._tickets.get(ticket_id)
+        except TicketStateError:
+            logger.warning("stuck ticket %s could not be parsed; left as is", ticket_id)
+            return False
+        if ticket is None or ticket.status != TicketStatus.submitting:
+            return False
+        found: list[OrderSnapshot | None] = []
+        for client_order_id in ticket.client_order_ids:
+            try:
+                found.append(await self._broker.get_order_by_client_id(client_order_id))
+            except Exception as exc:  # noqa: BLE001 - unknown fate: leave it for the next startup
+                logger.warning(
+                    "stuck ticket %s left as is: order lookup failed (%s)",
+                    ticket.id, type(exc).__name__,
+                )
+                return False
+        run = _Run(ticket=ticket, session_id=ticket.session_id, attempted=len(ticket.legs))
+        for index, (leg, client_order_id, order) in enumerate(
+            zip(ticket.legs, ticket.client_order_ids, found)
+        ):
+            base = {
+                "ticket_id": ticket.id, "leg": index, "client_order_id": client_order_id,
+                "symbol": leg.symbol, "source": "startup",
+            }
+            if order is None:
+                self._log(run.session_id, "reconcile", {**base, "outcome": "not_found"})
+                run.outcomes.append(_LegOutcome(
+                    index, leg, client_order_id, "error",
+                    error="not placed (the broker has no order with this id)",
+                ))
+                continue
+            mismatch = _reconcile_mismatch(order, leg, client_order_id)
+            if mismatch:
+                self._log(run.session_id, "reconcile", {
+                    **base, "outcome": "mismatch", "found_broker_order_id": order.id,
+                    "message": mismatch,
+                })
+                self._record_uncertain(ticket.id, client_order_id)
+                run.outcomes.append(_LegOutcome(
+                    index, leg, client_order_id, "uncertain",
+                    error=f"the lookup returned an order that does not match this leg ({mismatch})",
+                ))
+                continue
+            self._log(run.session_id, "reconcile", {
+                **base, "outcome": "found", "broker_order_id": order.id, "status": order.status,
+            })
+            self._record_order(ticket.id, client_order_id, order)
+            run.outcomes.append(_LegOutcome(
+                index, leg, client_order_id, "placed", order=order, reconciled=True,
+            ))
+        self._persist(run)
+        final = run.final_ticket
+        self._log(run.session_id, "recover", {
+            "ticket_id": ticket.id,
+            "status": final.status.value if final is not None else "unchanged",
+            "legs": self._outcome_payload(run),
+        })
+        return final is not None
+
+    async def ticket_orders(
+        self, ticket_id: str, session_id: str
+    ) -> tuple[Ticket, list[TrackedOrder]] | None:
+        """The ticket and its local order rows, non-final orders refreshed from the broker (reads
+        only). None for an unknown ticket, another session's, or an unreadable one."""
+        try:
+            ticket = self._tickets.get(ticket_id)
+        except TicketStateError:
+            return None
+        if ticket is None or ticket.session_id != session_id:
+            return None
+        rows = self._db.query(
+            "SELECT client_order_id, broker_order_id, body FROM orders WHERE ticket_id=? "
+            "ORDER BY id",
+            (ticket.id,),
+        )
+        tracked: list[TrackedOrder] = []
+        for row in rows:
+            order: OrderSnapshot | None = None
+            if row["body"]:
+                try:
+                    order = OrderSnapshot.model_validate_json(row["body"])
+                except Exception:  # noqa: BLE001 - an unreadable row is shown without a snapshot
+                    logger.warning("order row %s has an unreadable body", row["client_order_id"])
+            broker_id = row["broker_order_id"]
+            if broker_id and (order is None or order.status.lower() not in FINAL_ORDER_STATUSES):
+                order = await self._poll_once(ticket, row["client_order_id"], broker_id, order)
+            tracked.append(TrackedOrder(row["client_order_id"], broker_id, order))
+        return self._latest(ticket.id, ticket), tracked
+
+    async def _poll_once(
+        self, ticket: Ticket, client_order_id: str, broker_order_id: str,
+        stored: OrderSnapshot | None,
+    ) -> OrderSnapshot | None:
+        try:
+            fresh = await self._broker.get_order(broker_order_id)
+        except Exception as exc:  # noqa: BLE001 - polling is best effort
+            logger.info("order %s poll failed: %s", broker_order_id, type(exc).__name__)
+            return stored
+        changed = stored is None or (fresh.status, fresh.filled_qty, fresh.filled_avg_price) != (
+            stored.status, stored.filled_qty, stored.filled_avg_price
+        )
+        if changed:
+            self._record_order(ticket.id, client_order_id, fresh)
+            self._log(ticket.session_id, "order_status", {
+                "ticket_id": ticket.id,
+                "client_order_id": client_order_id,
+                "broker_order_id": fresh.id,
+                "symbol": fresh.symbol,
+                "status": fresh.status,
+                "filled_qty": fresh.filled_qty,
+                "filled_avg_price": fresh.filled_avg_price,
+                "source": "poll",
+            })
+        return fresh
 
     # --- kill switch ----------------------------------------------------------------------------
 
