@@ -289,6 +289,24 @@ def _block_reasons(decisions: list[RiskDecision]) -> str:
     return "; ".join(parts)
 
 
+def stored_orders(db: AppDB, ticket_id: str) -> list[TrackedOrder]:
+    """A ticket's local `orders` rows, oldest first, as stored (no broker call)."""
+    rows = db.query(
+        "SELECT client_order_id, broker_order_id, body FROM orders WHERE ticket_id=? ORDER BY id",
+        (ticket_id,),
+    )
+    tracked: list[TrackedOrder] = []
+    for row in rows:
+        order: OrderSnapshot | None = None
+        if row["body"]:
+            try:
+                order = OrderSnapshot.model_validate_json(row["body"])
+            except Exception:  # noqa: BLE001 - an unreadable row is shown without a snapshot
+                logger.warning("order row %s has an unreadable body", row["client_order_id"])
+        tracked.append(TrackedOrder(row["client_order_id"], row["broker_order_id"], order))
+    return tracked
+
+
 def _ensure_orders_created_at(db: AppDB) -> None:
     """Add `orders.created_at` (needed for `orders_today`) to a table created before it existed."""
     if "created_at" in {row["name"] for row in db.query("PRAGMA table_info(orders)")}:
@@ -1014,23 +1032,14 @@ class Executor:
             return None
         if ticket is None or ticket.session_id != session_id:
             return None
-        rows = self._db.query(
-            "SELECT client_order_id, broker_order_id, body FROM orders WHERE ticket_id=? "
-            "ORDER BY id",
-            (ticket.id,),
-        )
         tracked: list[TrackedOrder] = []
-        for row in rows:
-            order: OrderSnapshot | None = None
-            if row["body"]:
-                try:
-                    order = OrderSnapshot.model_validate_json(row["body"])
-                except Exception:  # noqa: BLE001 - an unreadable row is shown without a snapshot
-                    logger.warning("order row %s has an unreadable body", row["client_order_id"])
-            broker_id = row["broker_order_id"]
-            if broker_id and (order is None or order.status.lower() not in FINAL_ORDER_STATUSES):
-                order = await self._poll_once(ticket, row["client_order_id"], broker_id, order)
-            tracked.append(TrackedOrder(row["client_order_id"], broker_id, order))
+        for row in stored_orders(self._db, ticket.id):
+            order = row.order
+            if row.broker_order_id and (
+                order is None or order.status.lower() not in FINAL_ORDER_STATUSES
+            ):
+                order = await self._poll_once(ticket, row.client_order_id, row.broker_order_id, order)
+            tracked.append(TrackedOrder(row.client_order_id, row.broker_order_id, order))
         return self._latest(ticket.id, ticket), tracked
 
     async def _poll_once(
