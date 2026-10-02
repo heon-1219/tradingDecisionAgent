@@ -456,7 +456,16 @@ It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no
 {"id": 12, "session_id": "S3F7QKX2M4ABC", "kind": "claim", "created_at": "2026-10-02T14:32:00.512345+00:00", "payload": {"ticket_id": "T4HQ7ZB2NAK", "legs": 1}}
 ```
 
-`kind` is one of `mandate_saved`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh` or `recover`. Payloads are redacted before they are stored, so secrets never appear. Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
+`kind` is one of `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh` or `recover`. A chat turn adds one `tool_call` line per tool call, a `proposal` line for a ticket it created (the ticket as shown) and a `proposal_rejected` line for a proposal that produced no ticket:
+
+```json
+{"id": 7, "session_id": "S3F7QKX2M4ABC", "kind": "tool_call", "created_at": "2026-10-02T14:31:20.104211+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "tool": "get_quotes", "args_sha256": "<64 hex>", "result_sha256": "<64 hex>", "is_error": false, "latency_ms": 212, "evidence_ids": ["E3"]}}
+{"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
+```
+
+`tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the arguments as canonical JSON (sorted keys, compact separators; `null` when the arguments are not an object), `result_sha256` the SHA-256 of the output text as UTF-8. A cancelled call has `"cancelled": true` and no `result_sha256`; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"` and `"supersedes": "<old ticket id>"` instead of a `turn_id`. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments` or `one_proposal_per_turn`), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
+
+Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included. Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
 
 ## Example: from a message to a confirmed ticket
 
@@ -964,7 +973,16 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {"id": 12, "session_id": "S3F7QKX2M4ABC", "kind": "claim", "created_at": "2026-10-02T14:32:00.512345+00:00", "payload": {"ticket_id": "T4HQ7ZB2NAK", "legs": 1}}
 ```
 
-`kind`는 `mandate_saved`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh`, `recover` 중 하나입니다. 페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
+`kind`는 `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh`, `recover` 중 하나입니다. 채팅 턴은 도구 호출마다 `tool_call` 한 줄을, 티켓을 만들었으면 `proposal` 한 줄(보여 준 그대로의 티켓)을, 티켓 없이 끝난 제안에는 `proposal_rejected` 한 줄을 남깁니다.
+
+```json
+{"id": 7, "session_id": "S3F7QKX2M4ABC", "kind": "tool_call", "created_at": "2026-10-02T14:31:20.104211+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "tool": "get_quotes", "args_sha256": "<64 hex>", "result_sha256": "<64 hex>", "is_error": false, "latency_ms": 212, "evidence_ids": ["E3"]}}
+{"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
+```
+
+`tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 인자를 정규화한 JSON(키 정렬, 공백 없는 구분자. 인자가 객체가 아니면 `null`)의 SHA-256이고, `result_sha256`은 출력 텍스트를 UTF-8로 인코딩한 값의 SHA-256입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`와 `"supersedes": "<이전 티켓 ID>"`가 들어갑니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn` 중 하나)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
+
+페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다. 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
 
 ## 예시: 메시지에서 티켓 확인까지
 
