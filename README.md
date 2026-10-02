@@ -55,10 +55,12 @@ python scripts/check_llm.py
 
 # 4) Start the API. Startup builds the search index, the vectors and the knowledge graph with inference:
 #    about 1.5 min with the vector cache, 3-3.5 min without (see the note in section 6)
-uvicorn finagent.api:app --app-dir src --host 127.0.0.1 --port 8000
+uvicorn finagent.api:app --app-dir src --host 127.0.0.1 --port 8000 --no-proxy-headers
 #    or: PYTHONPATH=src python -m finagent.api   (same host and port; FINAGENT_HOST overrides the host)
 #    Loopback only, since /api/* can place paper orders. To serve /answer to other machines use
 #    --host 0.0.0.0 (or Docker); /api/* still refuses every non-loopback client.
+#    --no-proxy-headers (python -m finagent.api sets it too) stops uvicorn from taking the client
+#    address from X-Forwarded-For, so a forwarded request can never pass as a local one.
 ```
 
 `curl -s http://localhost:8000/health` answers once startup has finished. Open <http://localhost:8000/ui> for the test console, which shows every step a question takes. You can also call the API directly:
@@ -539,10 +541,12 @@ python scripts/check_llm.py
 
 # 4) API 실행. 기동 시 검색 색인·벡터·지식그래프+추론을 구축합니다:
 #    벡터 캐시가 있으면 약 1분 30초, 없으면 3~3.5분 (6절의 주의 참고)
-uvicorn finagent.api:app --app-dir src --host 127.0.0.1 --port 8000
+uvicorn finagent.api:app --app-dir src --host 127.0.0.1 --port 8000 --no-proxy-headers
 #    또는: PYTHONPATH=src python -m finagent.api   (호스트·포트 동일, FINAGENT_HOST로 호스트 변경)
 #    /api/*는 모의 주문을 낼 수 있으므로 루프백에만 바인딩합니다. 다른 기기에 /answer를 제공하려면
 #    --host 0.0.0.0(또는 Docker)을 쓰세요. 이때도 /api/*는 루프백이 아닌 클라이언트를 모두 거부합니다.
+#    --no-proxy-headers(python -m finagent.api도 동일하게 설정)는 uvicorn이 X-Forwarded-For에서
+#    클라이언트 주소를 가져오지 않게 하여, 전달된 요청이 로컬 요청으로 보이지 않게 합니다.
 ```
 
 기동이 끝나면 `curl -s http://localhost:8000/health`가 응답합니다. <http://localhost:8000/ui>를 열면 질문이 답까지 가는 모든 단계를 보여주는 테스트 콘솔이 뜹니다. API를 직접 호출할 수도 있습니다:
