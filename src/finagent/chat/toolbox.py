@@ -850,6 +850,7 @@ class ChatToolbox:
         executor,
         settings,
         now: Callable[[], datetime] | None = None,
+        turn_slots: OrderedDict[tuple[str, str], str] | None = None,
     ):
         self._registry = registry
         self._orchestrator = orchestrator
@@ -865,8 +866,12 @@ class ChatToolbox:
         self._settings = settings
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._rdb = getattr(registry, "rdb", None) if registry is not None else None
-        # (session_id, turn_id) -> ticket id ("" while a proposal is in flight)
-        self._proposal_turns: OrderedDict[tuple[str, str], str] = OrderedDict()
+        # (session_id, turn_id) -> ticket id ("" while a proposal is in flight). The owner of several
+        # toolboxes in turn (ChatRuntime rebuilds) passes one shared map, so a rebuild mid-turn
+        # cannot reset the one-proposal-per-turn slot.
+        self._proposal_turns: OrderedDict[tuple[str, str], str] = (
+            turn_slots if turn_slots is not None else OrderedDict()
+        )
 
     # --- specs ---------------------------------------------------------------------------------
 

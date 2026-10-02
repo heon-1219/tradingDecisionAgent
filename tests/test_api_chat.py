@@ -30,7 +30,8 @@ from fakes_trading import (
 from finagent.agent.llm import StubLLM, ToolCall, Turn
 from finagent.api import create_app
 from finagent.api_chat import event_stream
-from finagent.app_state import ChatRuntime
+from finagent.api_security import LocalApiGuard, is_loopback, parse_host
+from finagent.app_state import ENV_NAMES, ChatRuntime
 from finagent.config import Settings
 from finagent.models import AnswerResponse
 from finagent.research.http import HttpClient
@@ -40,6 +41,8 @@ from finagent.trading.risk import evaluate
 
 FIXED_NOW = datetime(2026, 9, 28, 14, 0, 0, tzinfo=timezone.utc)
 HDR = {"X-FinAgent-Client": "1"}
+LOCAL_URL = "http://127.0.0.1"
+LOCAL_CLIENT = ("127.0.0.1", 50000)
 
 ALPACA_ID = "PKTESTKEYID0123456789"
 ALPACA_SECRET = "testSecretValue-abcdef0123456789"
@@ -189,7 +192,10 @@ class ApiWorld:
         return self.runtime.broker if self.runtime is not None else None
 
     def client(self, **kw) -> TestClient:
+        # A real loopback address and Host: the guard has no test-only allowances.
         kw.setdefault("headers", HDR)
+        kw.setdefault("base_url", LOCAL_URL)
+        kw.setdefault("client", LOCAL_CLIENT)
         return TestClient(create_app(self.state), **kw)
 
     def add_evidence(self, session_id: str) -> str:
@@ -210,6 +216,15 @@ class ApiWorld:
 @pytest.fixture
 def world(tmp_path) -> ApiWorld:
     return ApiWorld(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _no_env_overrides(monkeypatch):
+    """A shell-exported trading key would show up in `env_overrides`; keep every test independent
+    of the developer's environment."""
+    for name in [*ENV_NAMES.values(), "API_ALLOW_REMOTE"]:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
 
 
 def sse_events(text: str) -> list[dict]:
@@ -559,6 +574,7 @@ def test_settings_get_reports_status_and_never_secrets(world):
             "model": world.settings.llm_model,
             "effort": world.settings.llm_effort,
             "api_allow_remote": False,
+            "env_overrides": [],
         }
         assert_no_secrets(r)
 
@@ -758,7 +774,7 @@ def test_host_allowlist(world):
         r = client.get("/api/sessions", headers={"host": "evil.example"})
         assert r.status_code == 400 and r.json()["error"] == "bad_host"
         assert client.get("/api/sessions", headers={"host": "evil.example:8000"}).status_code == 400
-        for host in ("127.0.0.1:8000", "localhost:8000", "[::1]:8000", "LOCALHOST", "testserver"):
+        for host in ("127.0.0.1:8000", "localhost:8000", "[::1]:8000", "LOCALHOST", "127.0.0.1"):
             assert client.get("/api/sessions", headers={"host": host}).status_code == 200, host
         assert client.get("/answer", params={"question": "x"}, headers={"host": "evil.example"}).status_code == 200
 
@@ -782,9 +798,9 @@ def test_a_mismatched_origin_is_refused(world):
         assert r.status_code == 403 and r.json()["error"] == "origin_mismatch"
         assert client.post("/api/sessions", json={}, headers={"origin": "null"}).status_code == 403
         assert client.post("/api/sessions", json={},
-                           headers={"origin": "http://testserver.evil.example"}).status_code == 403
-        assert client.post("/api/sessions", json={}, headers={"origin": "http://testserver"}).status_code == 201
-        assert client.post("/api/sessions", json={}, headers={"origin": "https://testserver"}).status_code == 201
+                           headers={"origin": "http://127.0.0.1.evil.example"}).status_code == 403
+        assert client.post("/api/sessions", json={}, headers={"origin": "http://127.0.0.1"}).status_code == 201
+        assert client.post("/api/sessions", json={}, headers={"origin": "https://127.0.0.1"}).status_code == 201
         assert client.post("/api/sessions", json={}, headers={
             "origin": "http://127.0.0.1:8000", "host": "127.0.0.1:8000"}).status_code == 201
 
@@ -990,3 +1006,268 @@ def test_the_rebuilt_ledger_still_scrubs_the_replaced_keys(world):
         world.runtime.ledger.append(sid, "note", {"text": f"old {ALPACA_SECRET} new {NEW_SECRET}"})
         exported = "".join(world.runtime.ledger.export_jsonl(sid))
         assert ALPACA_SECRET not in exported and NEW_SECRET not in exported
+
+
+# --- fix round 1 ----------------------------------------------------------------------------------------------
+
+# I1: Unicode line separators and non-ASCII characters never reach the env file.
+
+
+@pytest.mark.parametrize("ch", ["\x85", "\u2028", "\u2029", "\x0b", "\x0c", "é"])
+def test_put_settings_refuses_non_ascii_and_line_separators(world, ch):
+    with world.client() as client:
+        before = world.env()
+        brokers = len(world.brokers)
+        for body, field in (
+            ({"sec_user_agent": f"Jane jane@example.com{ch}API_ALLOW_REMOTE=true #"}, "sec_user_agent"),
+            ({"tavily_key": f"tvly-{ch}x"}, "tavily_key"),
+            ({"alpaca_key_id": f"PK{ch}X", "alpaca_secret": NEW_SECRET}, "alpaca_key_id"),
+            ({"alpaca_key_id": NEW_ID, "alpaca_secret": f"{NEW_SECRET}{ch}"}, "alpaca_secret"),
+        ):
+            r = client.put("/api/settings", json=body)
+            assert r.status_code == 400, (body, r.text)
+            assert r.json()["error"] == "invalid_value" and r.json()["field"] == field
+            assert_no_secrets(r)
+        assert world.env() == before
+        assert len(world.brokers) == brokers  # refused before any live key check
+
+
+def test_put_settings_two_writes_never_create_a_new_key(world):
+    value = "Jane jane@example.com API_ALLOW_REMOTE=true #"
+    with world.client() as client:
+        assert client.put("/api/settings", json={"sec_user_agent": value}).status_code == 200
+        assert client.put("/api/settings", json={"trading_enabled": False}).status_code == 200
+        reread = Settings(_env_file=world.env_path)
+        assert reread.api_allow_remote is False
+        assert reread.sec_user_agent == value
+        assert reread.trading_enabled is False
+
+
+def test_put_settings_strips_only_ascii_whitespace(world):
+    with world.client() as client:
+        r = client.put("/api/settings", json={"tavily_key": f"  {TAVILY}\n"})
+        assert r.status_code == 200 and f"TAVILY_API_KEY={TAVILY}\n" in world.env()
+        r = client.put("/api/settings", json={"tavily_key": f"{TAVILY}\u2028"})
+        assert r.status_code == 400 and r.json()["field"] == "tavily_key"
+
+
+# M1: no test-only allowances in production.
+
+
+def test_testclient_and_testserver_are_not_allowed(world):
+    assert is_loopback("testclient") is False
+    assert parse_host("testserver") == "testserver"
+    with TestClient(create_app(world.state), headers=HDR) as client:  # client "testclient", Host "testserver"
+        r = client.get("/api/sessions")
+        assert r.status_code == 403 and r.json()["error"] == "local_only"
+        assert client.get("/answer", params={"question": "x"}).status_code == 200
+    with world.client(base_url="http://testserver") as client:
+        r = client.get("/api/sessions")
+        assert r.status_code == 400 and r.json()["error"] == "bad_host"
+
+
+# M2: uvicorn never trusts X-Forwarded-For.
+
+
+def test_main_binds_loopback_without_proxy_headers(monkeypatch):
+    import uvicorn
+
+    import finagent.api as api_module
+
+    calls = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+    monkeypatch.delenv("FINAGENT_HOST", raising=False)
+    api_module.main()
+    assert calls[-1]["host"] == "127.0.0.1" and calls[-1]["proxy_headers"] is False
+    monkeypatch.setenv("FINAGENT_HOST", "0.0.0.0")
+    api_module.main()
+    assert calls[-1]["host"] == "0.0.0.0" and calls[-1]["proxy_headers"] is False
+
+
+# M3: strict Host parsing.
+
+
+@pytest.mark.parametrize("header, expected", [
+    ("127.0.0.1", "127.0.0.1"), ("127.0.0.1:8000", "127.0.0.1"), ("LOCALHOST:80", "localhost"),
+    ("[::1]", "[::1]"), ("[::1]:8000", "[::1]"), ("example.com:443", "example.com"),
+    ("[::1]evil", None), ("[::1]:80x", None), ("[::1]:", None), ("localhost:", None),
+    ("localhost:8000:1", None), ("localhost:123456", None), ("user@localhost", None),
+    ("localhost/x", None), ("local host", None), ("", None), ("[::1", None), ("[]", None),
+    (":8000", None), ("localhost:-1", None), ("[::1]]:80", None), ("[x::1]", None),
+])
+def test_parse_host_is_strict(header, expected):
+    assert parse_host(header) == expected
+
+
+@pytest.mark.parametrize("host", ["[::1]evil", "[::1]:80x", "localhost:", "localhost:8000:1", "user@localhost"])
+def test_malformed_host_headers_are_refused(world, host):
+    with world.client() as client:
+        r = client.get("/api/sessions", headers={"host": host})
+        assert r.status_code == 400 and r.json()["error"] == "bad_host"
+
+
+# M4: the one-proposal-per-turn slot survives a rebuild.
+
+
+async def test_a_rebuild_mid_turn_keeps_the_one_proposal_per_turn_slot(tmp_path):
+    world = ApiWorld(tmp_path)
+    runtime = world.state().chat
+    try:
+        sid = runtime.sessions.create()["id"]
+        world.add_evidence(sid)
+        args = world._script("x")[0].tool_calls[0].input
+        first = await runtime.toolbox.execute(sid, "propose_trades", args, turn_id="turn-1")
+        assert not first.is_error, first.text
+        old_toolbox = runtime.toolbox
+        runtime.rebuild()
+        assert runtime.toolbox is not old_toolbox
+        second = await runtime.toolbox.execute(sid, "propose_trades", args, turn_id="turn-1")
+        assert second.is_error and "one trade proposal per turn" in second.text
+        assert runtime.db.query("SELECT COUNT(*) AS n FROM tickets")[0]["n"] == 1
+        third = await runtime.toolbox.execute(sid, "propose_trades", args, turn_id="turn-2")
+        assert not third.is_error  # a new turn may propose again
+    finally:
+        await runtime.shutdown()
+
+
+# M6: shell-exported settings override .env; say so (names only).
+
+
+def test_env_overrides_are_warned_by_name_and_reported(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("TRADING_ENABLED", "true")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", ALPACA_SECRET)
+    world = ApiWorld(tmp_path)
+    with caplog.at_level("WARNING"), world.client() as client:
+        r = client.get("/api/settings")
+    assert r.json()["env_overrides"] == ["ALPACA_API_SECRET_KEY", "TRADING_ENABLED"]
+    assert_no_secrets(r)
+    warned = [rec.getMessage() for rec in caplog.records if "overrides" in rec.getMessage()]
+    assert any("TRADING_ENABLED" in m for m in warned) and any("ALPACA_API_SECRET_KEY" in m for m in warned)
+    assert ALPACA_SECRET not in caplog.text
+
+
+# M7: a failed rebuild or env write changes nothing.
+
+
+def test_a_failed_rebuild_changes_nothing(world, caplog):
+    def data_factory(key_id, secret, http):
+        if key_id == NEW_ID:
+            raise RuntimeError(f"boom {NEW_SECRET}")
+        return world.data
+
+    world.data_factory = data_factory
+    with world.client() as client:
+        before, old_broker, old_toolbox = world.env(), world.runtime.broker, world.runtime.toolbox
+        r = client.put("/api/settings", json={
+            "alpaca_key_id": NEW_ID, "alpaca_secret": NEW_SECRET, "tavily_key": "", "trading_enabled": False,
+        })
+        assert r.status_code == 500 and r.json()["error"] == "settings_not_saved"
+        assert_no_secrets(r)
+        assert world.env() == before
+        assert world.settings.alpaca_api_key_id == ALPACA_ID
+        assert world.settings.alpaca_api_secret_key == ALPACA_SECRET
+        assert world.settings.tavily_api_key == TAVILY and world.settings.trading_enabled is True
+        assert world.runtime.broker is old_broker and world.runtime.toolbox is old_toolbox
+        assert client.get("/api/settings").json()["alpaca"] == "connected"
+    assert "boom" not in caplog.text and NEW_SECRET not in caplog.text
+
+
+def test_a_failed_env_write_changes_nothing_and_discards_the_new_clients(world, monkeypatch):
+    import finagent.app_state as app_state
+
+    def boom(path, updates):
+        raise OSError("disk full")
+
+    with world.client() as client:
+        old_broker = world.runtime.broker
+        monkeypatch.setattr(app_state, "update_env_file", boom)
+        r = client.put("/api/settings", json={"alpaca_key_id": NEW_ID, "alpaca_secret": NEW_SECRET})
+        assert r.status_code == 500 and r.json()["error"] == "settings_not_saved"
+        assert world.settings.alpaca_api_key_id == ALPACA_ID
+        assert world.runtime.broker is old_broker
+        built = [b for b in world.brokers if b.key_id == NEW_ID]
+        assert len(built) == 2  # the live check, then the discarded build
+        for _ in range(100):
+            if all(b.closed for b in built):
+                break
+            time.sleep(0.01)
+        assert all(b.closed for b in built)
+
+
+# M11: reject is a local transition and works without a broker.
+
+
+def test_reject_works_without_a_broker_but_confirm_and_refresh_do_not(world):
+    with world.client() as client:
+        sid = new_session(client)
+        ticket = propose(client, world, sid)
+        assert client.put("/api/settings", json={"alpaca_key_id": "", "alpaca_secret": ""}).status_code == 200
+        assert world.runtime.executor is None
+        r = confirm(client, ticket, sid)
+        assert r.status_code == 503 and r.json()["error"] == "broker_not_connected"
+        r = client.post(f"/api/tickets/{ticket['id']}/refresh", json={"session_id": sid})
+        assert r.status_code == 503
+        assert client.post(f"/api/tickets/{ticket['id']}/reject", json={"session_id": "SOTHER"}).status_code == 404
+        r = client.post(f"/api/tickets/{ticket['id']}/reject", json={"session_id": sid})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "rejected" and r.json()["ticket"]["status"] == "rejected_by_user"
+        assert client.post(f"/api/tickets/{ticket['id']}/reject", json={"session_id": sid}).status_code == 200
+        kinds = [json.loads(line)["kind"] for line in world.runtime.ledger.export_jsonl(sid)]
+        assert kinds.count("reject") == 2  # the foreign-session attempt is logged under its own id
+        assert world.total_submits() == 0
+
+
+# M13: the guard at the ASGI level.
+
+
+async def _guard(scope: dict, *, allow_remote: bool = False) -> tuple[list[str], list[dict]]:
+    called: list[str] = []
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        called.append(scope["type"])
+        if scope["type"] == "http":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive():
+        return {"type": "websocket.connect"} if scope["type"] == "websocket" else {"type": "http.request"}
+
+    async def send(message):
+        sent.append(message)
+
+    await LocalApiGuard(app, allow_remote=lambda: allow_remote)(scope, receive, send)
+    return called, sent
+
+
+def _scope(path: str, *, kind: str = "http", client=("127.0.0.1", 5000), host: bytes = b"127.0.0.1",
+           root_path: str = "", method: str = "GET") -> dict:
+    return {"type": kind, "path": path, "root_path": root_path, "client": client, "method": method,
+            "headers": [(b"host", host)]}
+
+
+async def test_guard_handles_root_path_in_both_spellings():
+    remote = ("203.0.113.9", 5000)
+    for scope in (_scope("/prefix/api/sessions", root_path="/prefix", client=remote),
+                  _scope("/api/sessions", root_path="/prefix", client=remote)):
+        called, sent = await _guard(scope)
+        assert called == [] and sent[0]["status"] == 403
+    called, sent = await _guard(_scope("/prefix/api/sessions", root_path="/prefix"))
+    assert called == ["http"] and sent[0]["status"] == 200
+
+
+async def test_guard_refuses_a_request_without_a_client_address():
+    called, sent = await _guard(_scope("/api/sessions", client=None))
+    assert called == [] and sent[0]["status"] == 403
+    assert json.loads(sent[1]["body"])["error"] == "local_only"
+
+
+async def test_guard_rejects_websockets_on_the_api_and_passes_others():
+    called, sent = await _guard(_scope("/api/chat", kind="websocket"))
+    assert called == [] and sent == [{"type": "websocket.close", "code": 1008}]
+    called, sent = await _guard(_scope("/api", kind="websocket", client=None))
+    assert called == [] and sent[0]["type"] == "websocket.close"
+    called, _ = await _guard(_scope("/other", kind="websocket"))
+    assert called == ["websocket"]
+    called, _ = await _guard({"type": "lifespan"})
+    assert called == ["lifespan"]

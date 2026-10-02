@@ -10,23 +10,31 @@ exactly one `ChatAgent` (its per-session turn locks must be unique). The rest is
 from the current settings by `rebuild()`: the HTTP client, the ledger (its known-secret list), the
 connectors, the Alpaca broker and market data (only when both keys are set), the executor (only
 with a broker) and the toolbox. The agent reaches the current toolbox through `_ToolboxHandle`, so
-a rebuild takes effect at the next tool call. Every component shares the *same* mutable `settings`
-object, so the kill switch (`settings.trading_enabled = False`) is seen everywhere at once.
+a rebuild takes effect at the next tool call; the toolbox's one-proposal-per-turn slots
+(`turn_slots`) are owned by the runtime and shared by every toolbox it builds, so a rebuild in the
+middle of a turn cannot reset them. Every component shares the *same* mutable `settings` object,
+so the kill switch (`settings.trading_enabled = False`) is seen everywhere at once.
 
-A rebuild swaps components without awaiting, and closes the old HTTP clients only after
-`close_grace_sec` (120 s), so turns and confirms already in flight finish on the old objects.
-`lock` serialises `rebuild()` against confirm, reject, refresh and the kill switch; chat turns do
-not take it.
+A rebuild is build-then-swap: `_build()` constructs a full set of components and touches nothing
+shared (a failure retires what it made and changes nothing); `_swap()` puts them in service
+without awaiting, and closes the old HTTP clients only after `close_grace_sec` (120 s), so turns
+and confirms already in flight finish on the old objects. `apply_settings()` is all or nothing:
+build for the new values, write the env file, and only then update the settings in place and swap.
+`lock` serialises rebuilds against confirm, reject, refresh and the kill switch; chat turns do not
+take it.
 
-`startup()` (from the app lifespan) expires stale tickets, settles tickets stuck in `submitting`
-(`Executor.recover_stuck`; without a broker it only logs how many there are) and checks the Alpaca
-keys. Nothing here logs a secret or an exception message: failures are logged by type.
+`startup()` (from the app lifespan) warns, by name only, about writable settings that the process
+environment overrides (`config.env_overrides`), expires stale tickets, settles tickets stuck in
+`submitting` (`Executor.recover_stuck`; without a broker it only logs how many there are) and
+checks the Alpaca keys. Nothing here logs a secret or an exception message: failures are logged by
+type.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,7 +48,7 @@ from .agent.tools import ToolRegistry
 from .chat.agent import ChatAgent
 from .chat.sessions import SessionStore
 from .chat.toolbox import ChatToolbox
-from .config import Settings
+from .config import ENV_NAMES, Settings, env_overrides
 from .envfile import update_env_file
 from .kb.docs import DocStore
 from .kb.entity import EntityResolver
@@ -72,16 +80,23 @@ SECRET_FIELDS = (
     "alpaca_api_key_id", "alpaca_api_secret_key", "gemini_api_key", "tavily_api_key",
     "anthropic_api_key", "openai_api_key",
 )
-# Settings field -> .env name, for the fields the settings endpoint and the kill switch write.
-ENV_NAMES = {
-    "alpaca_api_key_id": "ALPACA_API_KEY_ID",
-    "alpaca_api_secret_key": "ALPACA_API_SECRET_KEY",
-    "tavily_api_key": "TAVILY_API_KEY",
-    "sec_user_agent": "SEC_USER_AGENT",
-    "trading_enabled": "TRADING_ENABLED",
-}
 # Changing any of these needs new connectors (they capture keys at construction).
 _REBUILD_FIELDS = frozenset(ENV_NAMES) - {"trading_enabled"}
+
+
+@dataclass
+class _Built:
+    """One set of rebuildable components, constructed but not yet in service."""
+
+    http: Any
+    ledger: Ledger
+    edgar: Any
+    web: Any
+    grounded: Any
+    broker: Any
+    data: Any
+    executor: Any
+    toolbox: Any
 
 
 def alpaca_status_for(exc: BaseException) -> str:
@@ -153,6 +168,9 @@ class ChatRuntime:
         self._retired: list[Any] = []
         self._close_tasks: set[asyncio.Task] = set()
         self._secrets_seen: set[str] = set()
+        # (session_id, turn_id) -> ticket id: the toolbox's one-proposal-per-turn slots. Owned here
+        # and handed to every toolbox built, so a rebuild in the middle of a turn cannot reset them.
+        self.turn_slots: OrderedDict[tuple[str, str], str] = OrderedDict()
         self.http = self.ledger = self.edgar = self.web = self.grounded = None
         self.broker = self.data = self.executor = self.toolbox = None
         self.rebuild()
@@ -163,31 +181,48 @@ class ChatRuntime:
     def _mandate_for(self, session_id: str) -> Mandate:
         return self.sessions.get_mandate(session_id) or Mandate()
 
-    def _known_secrets(self) -> list[str]:
-        """Every secret value this process has used, current or replaced: turns still running on
-        the old components may log an old key after a rebuild."""
-        for name in SECRET_FIELDS:
-            value = getattr(self.settings, name, None)
+    def _known_secrets(self, *candidates: Any) -> list[str]:
+        """Every secret value this process has used, current or replaced (turns still running on
+        the old components may log an old key after a rebuild), plus `candidates` (the values a
+        build in progress is about to use)."""
+        values = [getattr(self.settings, name, None) for name in SECRET_FIELDS]
+        for value in [*values, *candidates]:
             if isinstance(value, str) and value:
                 self._secrets_seen.add(value)
         return sorted(self._secrets_seen)
 
     def rebuild(self) -> None:
         """(Re)create the rebuildable components from the current settings and swap them in. Call
-        it under `lock` once the app is running. Old clients are closed after the grace delay."""
+        it under `lock` once the app is running. Old clients are closed after the grace delay. If
+        building fails nothing is swapped."""
+        self._swap(self._build())
+
+    def _build(self, overrides: dict[str, Any] | None = None) -> "_Built":
+        """Construct the rebuildable components for the settings as they would be with `overrides`
+        (key fields -> new value) applied, touching nothing shared. On failure the clients made so
+        far are retired and the exception propagates."""
         s = self.settings
-        http = self._http_factory()
+
+        def value(name: str) -> Any:
+            return overrides[name] if overrides and name in overrides else getattr(s, name, None)
+
+        key_id, secret = value("alpaca_api_key_id"), value("alpaca_api_secret_key")
+        tavily_key, sec_user_agent = value("tavily_api_key"), value("sec_user_agent")
+        made: list[Any] = []
         try:
-            ledger = Ledger(self.db, known_secrets=self._known_secrets())
-            edgar = Edgar(http, self.evidence, s.sec_user_agent) if s.sec_user_agent else None
-            web = WebSearch(http, self.evidence, s.tavily_api_key)
+            http = self._http_factory()
+            made.append(http)
+            ledger = Ledger(self.db, known_secrets=self._known_secrets(key_id, secret, tavily_key))
+            edgar = Edgar(http, self.evidence, sec_user_agent) if sec_user_agent else None
+            web = WebSearch(http, self.evidence, tavily_key)
             grounded = None
             if getattr(s, "llm_provider", None) == "gemini" and s.gemini_api_key:
                 grounded = GroundedWeb(http, s.gemini_api_key, s.grounding_model)
             broker = data = executor = None
-            if s.alpaca_api_key_id and s.alpaca_api_secret_key:
-                broker = self._broker_factory(s.alpaca_api_key_id, s.alpaca_api_secret_key)
-                data = self._data_factory(s.alpaca_api_key_id, s.alpaca_api_secret_key, http)
+            if key_id and secret:
+                broker = self._broker_factory(key_id, secret)
+                made.append(broker)
+                data = self._data_factory(key_id, secret, http)
                 extra = {"sleep": self._sleep} if self._sleep is not None else {}
                 executor = Executor(broker, data, self.tickets, ledger, s,
                                     mandate_for=self._mandate_for, **extra)
@@ -195,18 +230,25 @@ class ChatRuntime:
                 registry=self.registry, orchestrator=self.orchestrator, broker=broker, data=data,
                 edgar=edgar, web=web, grounded=grounded, evidence=self.evidence,
                 sessions=self.sessions, tickets=self.tickets, executor=executor, settings=s,
+                turn_slots=self.turn_slots,
             )
         except BaseException:
-            self._retire([http])
+            self._retire(made)
             raise
+        return _Built(http, ledger, edgar, web, grounded, broker, data, executor, toolbox)
+
+    def _swap(self, built: "_Built") -> None:
+        """Put `built` in service in one synchronous step (no await, so no request sees a mix)."""
         old = [c for c in (self.http, self.broker) if c is not None]
-        # Swap everything in one synchronous step: no await, so no request sees a mix.
-        self.http, self.ledger, self.edgar, self.web, self.grounded = http, ledger, edgar, web, grounded
-        self.broker, self.data, self.executor, self.toolbox = broker, data, executor, toolbox
+        self.http, self.ledger, self.edgar = built.http, built.ledger, built.edgar
+        self.web, self.grounded = built.web, built.grounded
+        self.broker, self.data, self.executor = built.broker, built.data, built.executor
+        self.toolbox = built.toolbox
         self._retire(old)
         log.info(
             "chat runtime built: broker=%s edgar=%s web_search=%s grounding=%s",
-            broker is not None, edgar is not None, bool(s.tavily_api_key), grounded is not None,
+            built.broker is not None, built.edgar is not None,
+            bool(getattr(self.settings, "tavily_api_key", None)), built.grounded is not None,
         )
 
     def _retire(self, components: list[Any]) -> None:
@@ -232,7 +274,11 @@ class ChatRuntime:
     # --- lifecycle -------------------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Expire stale tickets, settle stuck ones and check the Alpaca keys. Never raises."""
+        """Warn about environment overrides, expire stale tickets, settle stuck ones and check the
+        Alpaca keys. Never raises."""
+        for name in env_overrides():
+            log.warning("startup: %s is set in the process environment and overrides .env; a value "
+                        "saved from the app will not survive a restart", name)
         try:
             expired = self.tickets.expire_stale()
             if expired:
@@ -299,16 +345,25 @@ class ChatRuntime:
     # --- settings writes -------------------------------------------------------------------------
 
     async def apply_settings(self, changes: dict[str, Any], *, alpaca_status: str | None = None) -> None:
-        """Persist `changes` (settings field -> value; None removes the key) to the env file, then
-        update the shared settings in place and rebuild if a key changed. The env write comes
-        first: if it fails nothing changes."""
+        """Apply `changes` (settings field -> value; None removes the key), all or nothing:
+        1. build the new components for the changed keys (a failure changes nothing);
+        2. write the env file atomically (a failure discards what was built and changes nothing);
+        3. only then update the shared settings in place and swap the components in. Neither of
+           those can fail, so the env file, the settings and the components never disagree."""
         async with self.lock:
-            updates = {ENV_NAMES[name]: _env_value(value) for name, value in changes.items()}
-            update_env_file(self.env_path, updates)
+            built = self._build(changes) if _REBUILD_FIELDS & set(changes) else None
+            try:
+                update_env_file(
+                    self.env_path, {ENV_NAMES[name]: _env_value(value) for name, value in changes.items()}
+                )
+            except BaseException:
+                if built is not None:
+                    self._retire([c for c in (built.http, built.broker) if c is not None])
+                raise
             for name, value in changes.items():
                 setattr(self.settings, name, value)
-            if _REBUILD_FIELDS & set(changes):
-                self.rebuild()
+            if built is not None:
+                self._swap(built)
             if {"alpaca_api_key_id", "alpaca_api_secret_key"} & set(changes):
                 # The caller has just checked the new keys; without keys there is no broker.
                 self.alpaca_status = "missing" if self.broker is None else alpaca_status

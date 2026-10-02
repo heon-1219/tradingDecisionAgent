@@ -80,6 +80,11 @@ new ticket. So a refresh racing a confirm can never leave a second live copy of 
 the session, so a requote (from confirm or refresh) also supersedes any unrelated proposal made in
 the same session meanwhile. This is the store's one-active-ticket rule, kept deliberately.
 
+**reject_ticket(tickets, ledger, ticket_id, session_id)** is the whole of a rejection: a local CAS
+`proposed -> rejected_by_user` and a `reject` ledger entry. It is a module-level function because
+it needs no broker: `Executor.reject` delegates to it, and the API calls it directly when no broker
+is configured (so there is no executor) to dismiss a ticket.
+
 **recover_stuck()** runs once at startup, before any confirm can be in flight. A ticket still in
 `submitting` means the process died mid-confirm. Each of its legs is looked up once with
 `get_order_by_client_id` (never resubmitted): a matching order is recorded and adopted, a missing
@@ -305,6 +310,56 @@ def stored_orders(db: AppDB, ticket_id: str) -> list[TrackedOrder]:
                 logger.warning("order row %s has an unreadable body", row["client_order_id"])
         tracked.append(TrackedOrder(row["client_order_id"], row["broker_order_id"], order))
     return tracked
+
+
+def _load_ticket(tickets: TicketStore, ticket_id: str, session_id: str) -> Ticket | ConfirmResult:
+    """The session's ticket, or the result to return instead: `error` for an unparseable row,
+    `not_found` for an unknown id or another session's ticket."""
+    try:
+        ticket = tickets.get(ticket_id)
+    except TicketStateError:
+        logger.warning("ticket %s could not be parsed", ticket_id)
+        return ConfirmResult(
+            "error", None, [], "This ticket could not be read; ask for a fresh quote."
+        )
+    if ticket is None or ticket.session_id != session_id:
+        return ConfirmResult("not_found", None, [], "Ticket not found.")
+    return ticket
+
+
+def _latest_ticket(tickets: TicketStore, ticket_id: str, fallback: Ticket | None) -> Ticket | None:
+    try:
+        return tickets.get(ticket_id) or fallback
+    except TicketStateError:
+        return fallback
+
+
+def reject_ticket(
+    tickets: TicketStore, ledger: Ledger, ticket_id: str, session_id: str
+) -> ConfirmResult:
+    """Reject a ticket: a local CAS `proposed -> rejected_by_user` plus a `reject` ledger entry. It
+    needs no broker, so it is a function that `Executor.reject` and the API (when no broker is
+    configured, so there is no executor) both call. A ticket that is no longer `proposed` is
+    reported with its current status; nothing is changed."""
+    loaded = _load_ticket(tickets, ticket_id, session_id)
+    if isinstance(loaded, ConfirmResult):
+        result = loaded
+    else:
+        try:
+            ticket = tickets.transition(
+                loaded.id, {TicketStatus.proposed}, TicketStatus.rejected_by_user
+            )
+            result = ConfirmResult("rejected", ticket, [], "Rejected by user")
+        except TicketStateError:
+            current = _latest_ticket(tickets, loaded.id, loaded)
+            result = ConfirmResult("rejected", current, [], f"ticket is {current.status.value}")
+    try:
+        ledger.append(session_id, "reject", {
+            "ticket_id": str(ticket_id)[:64], "status": result.status, "message": result.message,
+        })
+    except Exception as exc:  # noqa: BLE001 - an audit write must never abort the action
+        logger.error("ledger append failed for kind reject (%s)", type(exc).__name__)
+    return result
 
 
 def _ensure_orders_created_at(db: AppDB) -> None:
@@ -866,22 +921,7 @@ class Executor:
     # --- reject / refresh -----------------------------------------------------------------------
 
     async def reject(self, ticket_id: str, session_id: str) -> ConfirmResult:
-        loaded = self._load(ticket_id, session_id)
-        if isinstance(loaded, ConfirmResult):
-            result = loaded
-        else:
-            try:
-                ticket = self._tickets.transition(
-                    loaded.id, {TicketStatus.proposed}, TicketStatus.rejected_by_user
-                )
-                result = ConfirmResult("rejected", ticket, [], "Rejected by user")
-            except TicketStateError:
-                current = self._latest(loaded.id, loaded)
-                result = ConfirmResult("rejected", current, [], f"ticket is {current.status.value}")
-        self._log(session_id, "reject", {
-            "ticket_id": str(ticket_id)[:64], "status": result.status, "message": result.message,
-        })
-        return result
+        return reject_ticket(self._tickets, self._ledger, ticket_id, session_id)
 
     async def refresh(self, ticket_id: str, session_id: str) -> ConfirmResult:
         """Re-quote a still-proposed ticket at current prices into a new ticket (which supersedes
@@ -1112,23 +1152,11 @@ class Executor:
     # --- plumbing -------------------------------------------------------------------------------
 
     def _load(self, ticket_id: str, session_id: str) -> Ticket | ConfirmResult:
-        try:
-            ticket = self._tickets.get(ticket_id)
-        except TicketStateError:
-            logger.warning("ticket %s could not be parsed", ticket_id)
-            return ConfirmResult(
-                "error", None, [], "This ticket could not be read; ask for a fresh quote."
-            )
-        if ticket is None or ticket.session_id != session_id:
-            return ConfirmResult("not_found", None, [], "Ticket not found.")
-        return ticket
+        return _load_ticket(self._tickets, ticket_id, session_id)
 
     def _latest(self, ticket_id: str, fallback: Ticket | None) -> Ticket | None:
         """The stored ticket, for display only - never used to decide anything."""
-        try:
-            return self._tickets.get(ticket_id) or fallback
-        except TicketStateError:
-            return fallback
+        return _latest_ticket(self._tickets, ticket_id, fallback)
 
     def _short(self, exc: BaseException) -> str:
         """A short, single-line, secret-scrubbed description of `exc` for users and the ledger."""

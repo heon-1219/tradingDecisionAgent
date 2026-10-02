@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -119,3 +120,23 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# Settings field -> .env name, for the fields the app itself writes (PUT /api/settings and the
+# kill switch).
+ENV_NAMES = {
+    "alpaca_api_key_id": "ALPACA_API_KEY_ID",
+    "alpaca_api_secret_key": "ALPACA_API_SECRET_KEY",
+    "tavily_api_key": "TAVILY_API_KEY",
+    "sec_user_agent": "SEC_USER_AGENT",
+    "trading_enabled": "TRADING_ENABLED",
+}
+
+
+def env_overrides() -> list[str]:
+    """Names (never values) of the app-writable settings that are also set in the process
+    environment. pydantic-settings lets the environment win over `.env`, so a value saved from the
+    app would be ignored at the next start: an exported `TRADING_ENABLED=true` would silently undo
+    the kill switch. Names are compared case-insensitively, as pydantic-settings reads them."""
+    present = {name.upper() for name in os.environ}
+    return sorted(name for name in ENV_NAMES.values() if name in present)

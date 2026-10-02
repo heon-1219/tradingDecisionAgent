@@ -16,7 +16,9 @@ submitted 200; requote 409 on confirm (the new ticket is in `new_ticket`) but 20
 is what refresh is for); disabled 423; expired 410; not_found 404; rejected 200 for a ticket the
 user has rejected (reject is idempotent), 410 for an expired ticket (expire_stale runs first, so
 the executor reports it as rejected), else 409 (hash mismatch, wrong state, nothing executable);
-error 502. No broker: 503 `broker_not_connected`.
+error 502. No broker: confirm and refresh answer 503 `broker_not_connected`; reject still works (it
+is a local state change, `execution.reject_ticket`), so a card can be dismissed after the keys are
+cleared.
 
 **Errors** are `{"error": "<code>", "message": "<friendly English>"}`, never exception text:
 unexpected failures are logged by exception type only, and request-validation errors list field
@@ -47,8 +49,9 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .config import env_overrides
 from .envfile import EnvFileError, check_env_value
-from .trading.execution import ConfirmResult, TrackedOrder, stored_orders
+from .trading.execution import ConfirmResult, TrackedOrder, reject_ticket, stored_orders
 from .trading.models import Mandate, TicketStatus
 from .trading.proposals import TicketStateError
 
@@ -461,13 +464,14 @@ async def _ticket_action(rt, action: str, ticket_id: str, session_id: str, ticke
     async def locked() -> ConfirmResult | None:
         async with rt.lock:
             executor = rt.executor
+            if action == "reject":  # a local state change: works without a broker
+                rt.tickets.expire_stale()
+                return reject_ticket(rt.tickets, rt.ledger, ticket_id, session_id)
             if executor is None:
                 return None
             rt.tickets.expire_stale()
             if action == "confirm":  # the only call in this module that can submit an order
                 return await executor.confirm(ticket_id, session_id, ticket_hash)
-            if action == "reject":
-                return await executor.reject(ticket_id, session_id)
             return await executor.refresh(ticket_id, session_id)
 
     try:
@@ -494,17 +498,17 @@ async def _ticket_action(rt, action: str, ticket_id: str, session_id: str, ticke
 
 
 @router.post("/tickets/{ticket_id}/confirm")
-async def confirm_ticket(ticket_id: TicketId, body: ConfirmRequest, rt: Runtime):
+async def confirm_ticket_route(ticket_id: TicketId, body: ConfirmRequest, rt: Runtime):
     return await _ticket_action(rt, "confirm", ticket_id, body.session_id, body.hash)
 
 
 @router.post("/tickets/{ticket_id}/reject")
-async def reject_ticket(ticket_id: TicketId, body: TicketAction, rt: Runtime):
+async def reject_ticket_route(ticket_id: TicketId, body: TicketAction, rt: Runtime):
     return await _ticket_action(rt, "reject", ticket_id, body.session_id)
 
 
 @router.post("/tickets/{ticket_id}/refresh")
-async def refresh_ticket(ticket_id: TicketId, body: TicketAction, rt: Runtime):
+async def refresh_ticket_route(ticket_id: TicketId, body: TicketAction, rt: Runtime):
     return await _ticket_action(rt, "refresh", ticket_id, body.session_id)
 
 
@@ -527,6 +531,8 @@ def _settings_body(rt) -> dict:
         "model": s.llm_model,
         "effort": s.llm_effort,
         "api_allow_remote": bool(getattr(s, "api_allow_remote", False)),
+        # Names of writable settings that the process environment overrides (see env_overrides).
+        "env_overrides": env_overrides(),
     }
 
 
@@ -547,13 +553,14 @@ async def put_settings(body: SettingsUpdate, rt: Runtime):
             changes["trading_enabled"] = value
             continue
         target, label = _KEY_FIELDS[field]
-        value = value.strip()
+        value = value.strip(" \t\r\n")  # ASCII whitespace only: a Unicode separator is refused below
         if value:
             try:
                 check_env_value(value)
             except EnvFileError:
                 raise ApiError(400, "invalid_value", f"The {label} contains characters that cannot be "
-                               "saved (line breaks, quotes, backslashes or '${').", field=field) from None
+                               "saved: use plain ASCII only, without line breaks, double quotes, "
+                               "backslashes or '${'.", field=field) from None
         changes[target] = value or None
 
     has_id, has_secret = "alpaca_api_key_id" in changes, "alpaca_api_secret_key" in changes

@@ -1366,3 +1366,33 @@ async def test_ticket_orders_before_confirm_has_no_rows(world):
     stored, rows = await world.executor.ticket_orders(ticket.id, SESSION)
     assert stored.status == TicketStatus.proposed and rows == []
     assert world.broker.get_order_calls == []
+
+
+# --- Task 3.5 fix round 1: reject needs no broker -------------------------------------------------
+
+
+async def test_reject_ticket_works_without_an_executor(world):
+    from finagent.trading.execution import reject_ticket
+
+    ticket = await world.propose([aapl()])
+    result = reject_ticket(world.tickets, world.ledger, ticket.id, SESSION)
+    assert result.status == "rejected" and result.message == "Rejected by user"
+    assert world.tickets.get(ticket.id).status == TicketStatus.rejected_by_user
+    assert world.ledger_kinds()[-1] == "reject"
+    again = reject_ticket(world.tickets, world.ledger, ticket.id, SESSION)
+    assert again.status == "rejected" and again.message == "ticket is rejected_by_user"
+    foreign = reject_ticket(world.tickets, world.ledger, ticket.id, "another-session")
+    assert foreign.status == "not_found" and foreign.ticket is None
+    assert world.broker.calls.count("submit_order") == 0
+
+
+async def test_executor_reject_and_reject_ticket_agree(world):
+    from finagent.trading.execution import reject_ticket
+
+    first = await world.propose([aapl()])
+    via_executor = await world.executor.reject(first.id, SESSION)
+    second = await world.propose([aapl()], session_id="sess-2")
+    via_function = reject_ticket(world.tickets, world.ledger, second.id, "sess-2")
+    assert (via_executor.status, via_executor.message) == (via_function.status, via_function.message)
+    assert via_executor.ticket.status == via_function.ticket.status == TicketStatus.rejected_by_user
+    assert world.ledger_kinds()[-1] == world.ledger_kinds("sess-2")[-1] == "reject"

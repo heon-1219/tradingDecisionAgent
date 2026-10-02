@@ -202,8 +202,10 @@ def main():
 
     # Loopback by default: /api/* can place paper orders. Set FINAGENT_HOST=0.0.0.0 to expose
     # /answer; the /api/* guard still refuses non-loopback clients (see api_security).
+    # proxy_headers=False: the guard's client address must be the socket peer, never a value an
+    # X-Forwarded-For header supplied.
     host = os.environ.get("FINAGENT_HOST", "127.0.0.1")
-    uvicorn.run("finagent.api:app", host=host, port=8000, workers=1)
+    uvicorn.run("finagent.api:app", host=host, port=8000, workers=1, proxy_headers=False)
 
 
 if __name__ == "__main__":
