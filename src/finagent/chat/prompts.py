@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 # Logged with every turn so a change in behaviour can be tied to a change in the prompt.
-PROMPT_VERSION = "chat-1"
+PROMPT_VERSION = "chat-2"
 
 _DEFAULT_ROUNDS = 8
 
@@ -183,8 +183,11 @@ def _style(trading: bool) -> str:
 def _budget(rounds: int) -> str:
     return (
         "## Budget\n"
-        f"You have up to {rounds} tool rounds per turn, and several tools can be called in one round. Stop "
-        "researching and answer when you have enough."
+        f"You have up to {rounds} tool rounds per turn. Every round is one model call, and model calls are rate "
+        "limited, so use few rounds: call all the independent tools you need in the same round (for example the "
+        "account, positions and quotes together, then the research tools together) instead of one tool per round. "
+        "A typical trade turn takes three rounds: context, research, then the proposal. Stop researching and "
+        "answer when you have enough."
     )
 
 

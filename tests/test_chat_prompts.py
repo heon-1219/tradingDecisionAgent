@@ -30,7 +30,21 @@ def flat(text: str) -> str:
 
 
 def test_prompt_version():
-    assert PROMPT_VERSION == "chat-1"
+    assert PROMPT_VERSION == "chat-2"
+
+
+def test_prompt_asks_for_few_rounds_with_batched_tool_calls():
+    # Every round is one model call, and free-tier keys allow only a few calls a minute: a turn
+    # that spends one round per tool runs out of time before it can propose.
+    text = flat(prompt())
+    assert "every round is one model call" in text
+    assert "call all the independent tools you need in the same round" in text
+    assert "three rounds" in text
+
+
+def test_chat_time_budget_leaves_room_for_rate_limited_keys():
+    # 90 s could not fit a propose turn on a 5-requests-a-minute key once one 429 backoff hit.
+    assert Settings(_env_file=None).chat_time_budget_sec >= 150
 
 
 def test_the_real_toolbox_defines_the_tools_the_prompt_is_gated_on():

@@ -120,7 +120,10 @@ class Settings(BaseSettings):
 
     # Chat turn budget - separate from the QA agent's time_budget_sec/max_tool_rounds above, since
     # the chat agent's tool loop (research + trading) has different latency characteristics.
-    chat_time_budget_sec: float = 90.0
+    # 150 s: a propose turn is 4-6 model calls, and a free-tier key (about 5 calls a minute) spends
+    # tens of seconds in 429 backoff. At 90 s both live evaluation scenarios ran out of time
+    # (2026-10-02) before they could propose.
+    chat_time_budget_sec: float = 150.0
     chat_max_rounds: int = 8
     # How long a proposed ticket stays confirmable before it expires and must be regenerated.
     ticket_ttl_sec: int = 300

@@ -185,7 +185,7 @@ sequenceDiagram
     UI->>API: session_id and message
     API->>A: run_turn, events go to an SSE queue
     A-->>UI: start
-    loop Until the model answers, at most 8 rounds and 90 s
+    loop Until the model answers, at most 8 rounds and 150 s
         A->>L: Conversation so far
         L-->>A: Tool calls, or the final text
         A-->>UI: tool-input-available
@@ -218,7 +218,7 @@ What happens in a turn, in order:
 
 1. **Request checks.** The route answers 404 for an unknown session before any stream starts. The agent then refuses an empty message, a message over 8,000 characters, or a second message while a reply is still running in the same session. A refusal is one `error` event and one `finish`.
 2. **Conversation.** The user message is saved. The system prompt (versioned, with nothing per-turn in it) is followed by the user message plus three lines the app adds: `Today: <UTC date>`, `Answer language: English` or `Korean` (detected from the message), and `Active mandate: <JSON or none>`. A conversation is cached per session in memory. When it is missing, or after 6 turns or 60,000 characters of tool output, it is rebuilt from the last 24 stored user and assistant messages. Tool calls never reach the stored history.
-3. **Tool loop.** Each round the model either answers or calls tools. The calls of one round run in order, each result is sent back to the model, and the UI gets `tool-input-available`, `tool-output-available` and `source-url` events as they happen. The loop stops at `chat_max_rounds` (8) or `chat_time_budget_sec` (90 s). A tool still running when time is up is cancelled and its call gets an error result. The model is then asked once to answer without tools, and if it still produces no text, a fallback message lists the tools that ran.
+3. **Tool loop.** Each round the model either answers or calls tools. The calls of one round run in order, each result is sent back to the model, and the UI gets `tool-input-available`, `tool-output-available` and `source-url` events as they happen. The loop stops at `chat_max_rounds` (8) or `chat_time_budget_sec` (150 s). A tool still running when time is up is cancelled and its call gets an error result. The model is then asked once to answer without tools, and if it still produces no text, a fallback message lists the tools that ran.
 4. **`propose_trades`.** The toolbox runs these checks before anything is stored:
     - 1 to 10 legs. Each leg is parsed into an `OrderLeg`: exactly one of `qty` or `notional`, a limit price exactly when the order is a limit order, a dollar (notional) order only as a market `day` order. Money from the model becomes `Decimal` (a float is read through its shortest text form, booleans and `null` are refused, the magnitude must be below 1e15 and at most 12 decimals).
     - `thesis`, `risks` and `invalidation` are required.
@@ -682,7 +682,7 @@ sequenceDiagram
     UI->>API: session_id와 message
     API->>A: run_turn, 이벤트는 SSE 큐로 전달
     A-->>UI: start
-    loop 모델이 답할 때까지, 최대 8라운드와 90초
+    loop 모델이 답할 때까지, 최대 8라운드와 150초
         A->>L: 지금까지의 대화
         L-->>A: 도구 호출 또는 최종 텍스트
         A-->>UI: tool-input-available
@@ -715,7 +715,7 @@ sequenceDiagram
 
 1. **요청 확인.** 없는 세션이면 스트림이 시작되기 전에 라우트가 404로 답합니다. 이어서 에이전트가 빈 메시지, 8,000자를 넘는 메시지, 같은 세션에서 답변이 진행 중일 때 들어온 두 번째 메시지를 거절합니다. 거절은 `error` 이벤트 하나와 `finish` 하나로 끝납니다.
 2. **대화 구성.** 사용자 메시지를 저장합니다. 시스템 프롬프트(버전이 있고 턴마다 달라지는 내용은 없음) 뒤에 사용자 메시지와, 앱이 붙이는 세 줄이 따라옵니다. `Today: <UTC 날짜>`, `Answer language: English` 또는 `Korean`(메시지에서 감지), `Active mandate: <JSON 또는 none>`입니다. 대화는 세션별로 메모리에 캐시합니다. 캐시가 없거나 6턴 또는 도구 출력 6만 자를 넘으면, 저장된 사용자·어시스턴트 메시지 최근 24개로 다시 만듭니다. 도구 호출은 저장 기록에 들어가지 않습니다.
-3. **도구 루프.** 라운드마다 모델이 답하거나 도구를 호출합니다. 한 라운드의 호출은 순서대로 실행하고, 각 결과를 모델에게 돌려주며, UI에는 `tool-input-available`, `tool-output-available`, `source-url` 이벤트가 그때그때 갑니다. 루프는 `chat_max_rounds`(8) 또는 `chat_time_budget_sec`(90초)에서 멈춥니다. 시간이 다 됐을 때 실행 중인 도구는 취소되고 그 호출에는 오류 결과가 붙습니다. 이후 모델에게 도구 없이 답하라고 한 번 요청하고, 그래도 텍스트가 없으면 실행된 도구를 나열한 대체 메시지를 보냅니다.
+3. **도구 루프.** 라운드마다 모델이 답하거나 도구를 호출합니다. 한 라운드의 호출은 순서대로 실행하고, 각 결과를 모델에게 돌려주며, UI에는 `tool-input-available`, `tool-output-available`, `source-url` 이벤트가 그때그때 갑니다. 루프는 `chat_max_rounds`(8) 또는 `chat_time_budget_sec`(150초)에서 멈춥니다. 시간이 다 됐을 때 실행 중인 도구는 취소되고 그 호출에는 오류 결과가 붙습니다. 이후 모델에게 도구 없이 답하라고 한 번 요청하고, 그래도 텍스트가 없으면 실행된 도구를 나열한 대체 메시지를 보냅니다.
 4. **`propose_trades`.** 도구 상자는 무엇이든 저장하기 전에 다음을 확인합니다.
     - 레그 1~10개. 각 레그는 `OrderLeg`로 파싱됩니다. `qty`와 `notional` 중 정확히 하나, 지정가 주문일 때만 지정가, 금액(notional) 주문은 시장가 `day` 주문일 때만 허용합니다. 모델이 준 금액은 `Decimal`이 됩니다(float는 가장 짧은 문자열 표현으로 읽고, 불리언과 `null`은 거부하며, 절댓값은 1e15 미만, 소수 12자리 이하여야 합니다).
     - `thesis`, `risks`, `invalidation`은 필수입니다.
