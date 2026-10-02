@@ -53,6 +53,7 @@ BAD_SECRET = "badSecretValue-5555555555555555"
 DOWN_ID = "PKDOWNKEYID444444444"
 DOWN_SECRET = "downSecretValue-4444444444444444"
 TAVILY = "tvly-test-key-0123456789abcdef"
+SEC_UA_FROM_SHELL = "Shell User shell-user@example.com"
 GEMINI = "gemini-test-key-0123456789abcdef"
 SECRETS = [ALPACA_ID, ALPACA_SECRET, NEW_ID, NEW_SECRET, BAD_ID, BAD_SECRET, DOWN_ID, DOWN_SECRET,
            TAVILY, GEMINI]
@@ -219,8 +220,8 @@ def world(tmp_path) -> ApiWorld:
 
 
 @pytest.fixture(autouse=True)
-def _no_env_overrides(monkeypatch):
-    """A shell-exported trading key would show up in `env_overrides`; keep every test independent
+def _clean_trading_env(monkeypatch):
+    """A shell-exported trading key would show up in `env_fallbacks`; keep every test independent
     of the developer's environment."""
     for name in [*ENV_NAMES.values(), "API_ALLOW_REMOTE"]:
         monkeypatch.delenv(name, raising=False)
@@ -574,7 +575,7 @@ def test_settings_get_reports_status_and_never_secrets(world):
             "model": world.settings.llm_model,
             "effort": world.settings.llm_effort,
             "api_allow_remote": False,
-            "env_overrides": [],
+            "env_fallbacks": [],
         }
         assert_no_secrets(r)
 
@@ -1130,20 +1131,23 @@ async def test_a_rebuild_mid_turn_keeps_the_one_proposal_per_turn_slot(tmp_path)
         await runtime.shutdown()
 
 
-# M6: shell-exported settings override .env; say so (names only).
+# M6: .env wins over the process environment; a setting that only the environment provides is
+# reported by name (clearing it in the app would not survive a restart).
 
 
-def test_env_overrides_are_warned_by_name_and_reported(tmp_path, monkeypatch, caplog):
-    monkeypatch.setenv("TRADING_ENABLED", "true")
-    monkeypatch.setenv("ALPACA_API_SECRET_KEY", ALPACA_SECRET)
+def test_environment_only_settings_are_warned_by_name_and_reported(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("TRADING_ENABLED", "false")  # also in the env file: the file wins
+    monkeypatch.setenv("SEC_USER_AGENT", SEC_UA_FROM_SHELL)  # only in the environment
     world = ApiWorld(tmp_path)
     with caplog.at_level("WARNING"), world.client() as client:
         r = client.get("/api/settings")
-    assert r.json()["env_overrides"] == ["ALPACA_API_SECRET_KEY", "TRADING_ENABLED"]
+    assert r.json()["env_fallbacks"] == ["SEC_USER_AGENT"]
+    assert "env_overrides" not in r.json()
     assert_no_secrets(r)
-    warned = [rec.getMessage() for rec in caplog.records if "overrides" in rec.getMessage()]
-    assert any("TRADING_ENABLED" in m for m in warned) and any("ALPACA_API_SECRET_KEY" in m for m in warned)
-    assert ALPACA_SECRET not in caplog.text
+    warned = [rec.getMessage() for rec in caplog.records if "process environment" in rec.getMessage()]
+    assert any("SEC_USER_AGENT" in m for m in warned)
+    assert not any("TRADING_ENABLED" in m for m in warned)
+    assert SEC_UA_FROM_SHELL not in caplog.text and SEC_UA_FROM_SHELL not in r.text
 
 
 # M7: a failed rebuild or env write changes nothing.

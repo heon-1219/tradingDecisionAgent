@@ -21,8 +21,11 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+from dotenv import dotenv_values  # noqa: E402
+
 from finagent.agent.llm import ToolSpec, make_llm, rate_state  # noqa: E402
 from finagent.config import get_settings  # noqa: E402
+from finagent.paths import ROOT  # noqa: E402
 
 PING_TOOL = ToolSpec(
     "get_bond_count",
@@ -38,8 +41,15 @@ PING_TOOL = ToolSpec(
 def key_and_endpoint(s) -> tuple[str | None, str, str]:
     """The configured key, where it came from, and the endpoint for the active provider."""
     if s.llm_provider == "gemini":
-        env = next((v for v in ("GEMINI_API_KEY", "GOOGLE_API_KEY") if os.environ.get(v)), None)
-        source = f"environment variable {env} (overrides .env)" if env else ".env"
+        # .env wins when it has a key; the environment only fills in what .env leaves out.
+        names = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+        env_file = ROOT / ".env"
+        in_file = {k.upper() for k, v in dotenv_values(env_file).items() if v} if env_file.is_file() else set()
+        if any(n in in_file for n in names):
+            source = ".env"
+        else:
+            env = next((v for v in names if os.environ.get(v)), None)
+            source = f"environment variable {env} (.env has no key)" if env else ".env"
         return s.gemini_api_key, source, s.gemini_base_url
     if s.llm_provider == "anthropic":
         return s.anthropic_api_key, "ANTHROPIC_API_KEY", "(Anthropic default)"
@@ -51,8 +61,8 @@ def key_and_endpoint(s) -> tuple[str | None, str, str]:
 def hint(msg: str, model: str) -> str | None:
     low = msg.lower()
     if any(s in low for s in ("valid api key", "api key not valid", "api_key_invalid", "authentication")) or "401" in msg:
-        return ("The key was rejected. Create a new one at https://aistudio.google.com/apikey. "
-                "If GEMINI_API_KEY is also exported in your shell, that value overrides .env.")
+        return ("The key was rejected. Create a new one at https://aistudio.google.com/apikey and put it "
+                "in .env (a key in .env is used ahead of one exported in your shell).")
     if "403" in msg or "permission" in low:
         return "The key is valid but not allowed to call this API (restricted key or disabled Generative Language API)."
     if "404" in msg or "notfound" in low:

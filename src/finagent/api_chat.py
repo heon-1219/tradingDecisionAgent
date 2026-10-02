@@ -49,7 +49,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .config import env_overrides
+from .config import env_fallbacks
 from .envfile import EnvFileError, check_env_value
 from .trading.execution import ConfirmResult, TrackedOrder, reject_ticket, stored_orders
 from .trading.models import Mandate, TicketStatus
@@ -531,8 +531,8 @@ def _settings_body(rt) -> dict:
         "model": s.llm_model,
         "effort": s.llm_effort,
         "api_allow_remote": bool(getattr(s, "api_allow_remote", False)),
-        # Names of writable settings that the process environment overrides (see env_overrides).
-        "env_overrides": env_overrides(),
+        # Names of writable settings that only the process environment provides (see env_fallbacks).
+        "env_fallbacks": env_fallbacks(rt.env_path),
     }
 
 

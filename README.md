@@ -293,7 +293,7 @@ At startup the TBox (`ontology/*.ttl`) is merged into the same graph as the ABox
 ### Gemini integration details
 
 - **Endpoint and dependency.** Calls go to Gemini's OpenAI-compatible endpoint (`GEMINI_BASE_URL`) through the `openai` package already in `requirements.txt`, so there is no Gemini-specific SDK (`GeminiLLM` in [`src/finagent/agent/llm.py`](src/finagent/agent/llm.py)).
-- **Key source.** Environment variables take precedence over `.env`, so a `GEMINI_API_KEY` exported in your shell overrides the one in the file. `check_llm.py` prints which source it used. Without a key the server still starts and logs an error, and every question fails with an LLM error until a key is added.
+- **Key source.** `.env` takes precedence over environment variables: a key in the file is used even if a different `GEMINI_API_KEY` is exported in your shell, and the environment only supplies what the file leaves out or leaves empty. `check_llm.py` prints which source it used. Without a key the server still starts and logs an error, and every question fails with an LLM error until a key is added.
 - **Reasoning effort.** `LLM_EFFORT` is sent as `reasoning_effort` (`low` / `medium` / `high`; `xhigh` and `max` map to `high`). If a model rejects the parameter, the client drops it once and carries on without it.
 - **Thought signatures.** Gemini 3 models attach an encrypted signature to each function call (`extra_content.google.thought_signature`) and reject the next request if the signature is missing from the assistant message sent back. The adapter echoes every tool call with its `extra_content` intact, so multi-turn tool calling works.
 - **Output ceiling.** Gemini's thinking tokens count against `LLM_MAX_TOKENS`, so the default of 8192 leaves room for thinking plus the answer. The visible answer itself is short: the 54 answers recorded in the competition have a median of 108 characters and a maximum of 610. The prompt's answer rules and the per-question time budget guard against run-on answers. Lower the ceiling if you see long, slow answers.
@@ -779,7 +779,7 @@ erDiagram
 ### Gemini 연동 세부
 
 - **엔드포인트와 의존성.** `requirements.txt`에 이미 있는 `openai` 패키지로 Gemini의 OpenAI 호환 엔드포인트(`GEMINI_BASE_URL`)를 호출하므로, Gemini 전용 SDK가 없습니다([`src/finagent/agent/llm.py`](src/finagent/agent/llm.py)의 `GeminiLLM`).
-- **키 출처.** 환경변수가 `.env`보다 우선하므로, 셸에 export된 `GEMINI_API_KEY`가 파일의 값을 덮어씁니다. `check_llm.py`가 어느 쪽 키를 썼는지 출력합니다. 키가 없어도 서버는 뜨고 오류를 로그에 남기며, 키를 넣을 때까지 모든 질문이 LLM 오류로 실패합니다.
+- **키 출처.** `.env`가 환경변수보다 우선합니다. 셸에 다른 `GEMINI_API_KEY`가 export되어 있어도 파일의 키를 쓰고, 환경변수는 파일에 없거나 비어 있는 값만 채웁니다. `check_llm.py`가 어느 쪽 키를 썼는지 출력합니다. 키가 없어도 서버는 뜨고 오류를 로그에 남기며, 키를 넣을 때까지 모든 질문이 LLM 오류로 실패합니다.
 - **추론 강도.** `LLM_EFFORT`는 `reasoning_effort`(`low` / `medium` / `high`; `xhigh`·`max`는 `high`)로 전달됩니다. 모델이 이 파라미터를 거부하면 클라이언트가 한 번 빼고 계속 진행합니다.
 - **Thought signature.** Gemini 3 모델은 function call마다 암호화된 서명(`extra_content.google.thought_signature`)을 붙이고, 다음 요청의 assistant 메시지에 그 서명이 빠져 있으면 요청을 거부합니다. 어댑터가 모든 도구 호출을 `extra_content`째 그대로 돌려보내므로 여러 턴의 도구 호출이 동작합니다.
 - **출력 상한.** Gemini의 thinking 토큰이 `LLM_MAX_TOKENS`에 포함되므로, 기본값 8192는 thinking과 답변이 모두 들어갈 여유를 둔 값입니다. 보이는 답변 자체는 짧습니다 — 대회 때 기록된 답변 54개의 길이는 중앙값 108자, 최대 610자입니다. 장황한 답변은 프롬프트의 답변 규칙과 문항당 시간 예산이 막습니다. 길고 느린 답변이 보이면 상한을 낮추십시오.

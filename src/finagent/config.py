@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,9 +13,21 @@ from .paths import DATA_DIR, ONTOLOGY_DIR, ROOT
 
 
 class Settings(BaseSettings):
+    # An empty value ("GEMINI_API_KEY=") means "not set" in both `.env` and the environment.
     model_config = SettingsConfigDict(
-        env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore", env_ignore_empty=True
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings,
+                                   file_secret_settings):
+        """`.env` wins over the process environment (pydantic-settings' default is the reverse).
+
+        The app writes `.env` itself (PUT /api/settings, the kill switch), so what it saved must be
+        what the next start reads: a stale `GEMINI_API_KEY` or a `TRADING_ENABLED=true` exported in
+        some shell must not undo it. The environment still supplies whatever `.env` leaves out,
+        which is how a container without a `.env` file is configured."""
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
 
     # LLM
     # English edition: Google Gemini through its OpenAI-compatible endpoint. The competition build had to
@@ -133,10 +146,12 @@ ENV_NAMES = {
 }
 
 
-def env_overrides() -> list[str]:
-    """Names (never values) of the app-writable settings that are also set in the process
-    environment. pydantic-settings lets the environment win over `.env`, so a value saved from the
-    app would be ignored at the next start: an exported `TRADING_ENABLED=true` would silently undo
-    the kill switch. Names are compared case-insensitively, as pydantic-settings reads them."""
-    present = {name.upper() for name in os.environ}
-    return sorted(name for name in ENV_NAMES.values() if name in present)
+def env_fallbacks(env_path: Path | str | None = None) -> list[str]:
+    """Names (never values) of the app-writable settings that only the process environment
+    provides: set there, and absent or empty in the `.env` file (which wins when it has a value).
+    Saving such a setting from the app works, since that writes it to `.env`; clearing it there
+    does not survive a restart, because the environment value comes back."""
+    path = Path(env_path) if env_path is not None else ROOT / ".env"
+    in_file = {name.upper() for name, value in dotenv_values(path).items() if value} if path.is_file() else set()
+    in_env = {name.upper() for name, value in os.environ.items() if value}
+    return sorted(name for name in ENV_NAMES.values() if name in in_env and name not in in_file)

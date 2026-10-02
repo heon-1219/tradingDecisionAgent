@@ -24,7 +24,7 @@ build for the new values, write the env file, and only then update the settings 
 take it.
 
 `startup()` (from the app lifespan) warns, by name only, about writable settings that the process
-environment overrides (`config.env_overrides`), expires stale tickets, settles tickets stuck in
+environment-only settings (`config.env_fallbacks`), expires stale tickets, settles tickets stuck in
 `submitting` (`Executor.recover_stuck`; without a broker it only logs how many there are) and
 checks the Alpaca keys. Nothing here logs a secret or an exception message: failures are logged by
 type.
@@ -48,7 +48,7 @@ from .agent.tools import ToolRegistry
 from .chat.agent import ChatAgent
 from .chat.sessions import SessionStore
 from .chat.toolbox import ChatToolbox
-from .config import ENV_NAMES, Settings, env_overrides
+from .config import ENV_NAMES, Settings, env_fallbacks
 from .envfile import update_env_file
 from .kb.docs import DocStore
 from .kb.entity import EntityResolver
@@ -274,11 +274,11 @@ class ChatRuntime:
     # --- lifecycle -------------------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Warn about environment overrides, expire stale tickets, settle stuck ones and check the
+        """Warn about environment-only settings, expire stale tickets, settle stuck ones and check the
         Alpaca keys. Never raises."""
-        for name in env_overrides():
-            log.warning("startup: %s is set in the process environment and overrides .env; a value "
-                        "saved from the app will not survive a restart", name)
+        for name in env_fallbacks(self.env_path):
+            log.warning("startup: %s comes from the process environment, not .env; clearing it in "
+                        "the app will not survive a restart", name)
         try:
             expired = self.tickets.expire_stale()
             if expired:
