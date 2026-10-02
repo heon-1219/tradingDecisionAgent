@@ -90,6 +90,40 @@ def test_assets_are_served_with_a_usable_content_type(client, path):
     assert r.headers["x-content-type-options"] == "nosniff"
 
 
+@pytest.mark.parametrize("path", [
+    "/", "/app/js/main.js", "/app/js/markdown.js", "/app/app.css", "/app/vendor/purify.min.js",
+    "/app/vendor/streaming-markdown.min.js",
+])
+def test_the_page_and_its_assets_are_always_revalidated(client, path):
+    # Without this a browser keeps running a stale module after an update (heuristic caching).
+    r = client.get(path)
+    assert r.status_code == 200, path
+    assert r.headers["cache-control"] == "no-cache", path
+
+
+def test_a_conditional_request_still_says_no_cache(client):
+    first = client.get("/app/app.css")
+    etag = first.headers["etag"]
+    again = client.get("/app/app.css", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.headers["cache-control"] == "no-cache"
+    missing = client.get("/app/js/absent.js")
+    assert missing.status_code == 404 and missing.headers["cache-control"] == "no-cache"
+
+
+def test_other_routes_keep_their_own_caching(client):
+    assert "cache-control" not in client.get("/ui").headers
+    assert "cache-control" not in client.get("/api/settings").headers  # 503 here: no chat runtime
+
+
+def test_package_json_marks_the_modules_for_node_but_is_not_served(client):
+    assert (ROOT / "web" / "package.json").is_file()
+    assert not (WEB / "package.json").exists()
+    assert client.get("/app/package.json").status_code == 404
+    served = sorted(p.relative_to(WEB).as_posix() for p in WEB.rglob("*") if p.is_file())
+    assert all(name.endswith((".html", ".css", ".js", ".svg", ".md", ".LICENSE")) for name in served), served
+
+
 def test_vendored_files_match_their_recorded_checksums():
     versions = (WEB / "vendor" / "VERSIONS.md").read_text(encoding="utf-8")
     for name in VENDOR_FILES:
@@ -254,4 +288,17 @@ def test_sse_parser():
 @needs_node
 def test_markdown_dollar_escaping():
     result = _node("scripts/test_markdown.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_markdown_dom_behaviour():
+    # The real streaming-markdown parser, the app's renderer and sanitize walk, on a fake DOM.
+    result = _node("scripts/test_markdown_dom.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_shell_logic():
+    result = _node("scripts/test_shell.mjs")
     assert result.returncode == 0, result.stdout + result.stderr

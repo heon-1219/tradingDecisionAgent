@@ -4,11 +4,13 @@
  * every event goes through `dispatch(event, turn)` (registry.js), the single place where events
  * meet their views. When the stream ends the turn is closed, the top bar shows the tokens and
  * latency of `finish`, and one polite announcement is made. Stop aborts the fetch; that is a clean
- * end, not an error.
+ * end, not an error. Nothing can be sent while a response streams or while a chat is loading.
  *
- * Task 4.2: add `import './components/index.js';` to the imports below. Components register
- * themselves with `registerEvent` / `registerPanel` (registry.js) and `addPostProcessor`
- * (markdown.js); the shell's own handlers and Settings view are fallbacks and step aside.
+ * Task 4.2: add `import './components/index.js';` to the imports below. Components add listeners
+ * with `registerEvent`, take over the tool rows and the Thoughts block with `replaceEvent`, attach
+ * panel views with `registerPanel` (all in registry.js) and add markdown post-processors with
+ * `addPostProcessor` (markdown.js). The shell's own listeners for the answer text, errors and
+ * `finish` stay in place whatever a component registers.
  */
 import { api, isAbort } from './api.js';
 import { initCopyButtons } from './clipboard.js';
@@ -21,7 +23,7 @@ import { initPanels } from './panels.js';
 import { dispatch } from './registry.js';
 import { initSessions } from './sessions.js';
 import { streamChat } from './sse.js';
-import { emit, on, setState, state, storage, STORAGE_KEYS } from './state.js';
+import { canSend, createLoadGate, emit, on, setState, state, storage, STORAGE_KEYS } from './state.js';
 import { createThread } from './thread.js';
 import { initTopbar } from './topbar.js';
 import { registerDefaultHandlers, Turn } from './turn.js';
@@ -31,7 +33,7 @@ const TITLE_CHARS = 60;
 
 const $ = (id) => document.getElementById(id);
 let active = null; // {controller, turn} while a response streams
-let openSeq = 0;   // guards against a slow session load landing after a newer one
+const loads = createLoadGate(); // only the newest session load may render
 
 /* A chat title from its first message: the first line, cut at a word near 60 characters. */
 function titleFrom(message) {
@@ -79,6 +81,9 @@ on('chat:send', (text) => send(String(text ?? '')));
 on('panel:open', (name) => layout.openPanel(name));
 on('settings:refresh', () => refreshSettings());
 on('sessions:refresh', () => refreshSessions({ quiet: true }));
+on('change', (patch) => {
+  if ('loadingSession' in patch) composer.setBlocked(Boolean(state.loadingSession));
+});
 
 function setStreaming(value) {
   setState({ streaming: value });
@@ -120,9 +125,9 @@ async function refreshSessions({ quiet = false } = {}) {
 
 function newChat() {
   stop();
-  openSeq += 1;
+  loads.cancel();
   storage.remove(STORAGE_KEYS.session);
-  setState({ sessionId: null, sessionTitle: '', lastFinish: null });
+  setState({ sessionId: null, sessionTitle: '', lastFinish: null, loadingSession: null });
   sessions.setCurrent(null);
   thread.showEmpty();
   layout.closeDrawer();
@@ -133,29 +138,34 @@ function newChat() {
 async function openSession(id) {
   if (!id) return;
   stop();
-  const seq = ++openSeq;
+  const token = loads.begin();
+  // Sending is blocked until this load settles: a message sent now would go to the chat that was
+  // open before, and the history arriving afterwards would wipe its live turn.
+  setState({ loadingSession: id });
   layout.closeDrawer();
   thread.showLoading();
   try {
     const detail = await api.getSession(id);
-    if (seq !== openSeq) return;
+    if (!loads.isCurrent(token)) return; // a newer load, or New chat, took over
     const session = detail?.session || { id, title: '' };
     storage.set(STORAGE_KEYS.session, id);
     setState({ sessionId: id, sessionTitle: session.title || '', lastFinish: null });
     sessions.setCurrent(id);
-    thread.renderHistory(detail?.messages);
+    thread.renderHistory(detail?.messages, { sessionId: id });
     emit('session:loaded', detail);
   } catch (err) {
-    if (seq !== openSeq || isAbort(err)) return;
+    if (!loads.isCurrent(token) || isAbort(err)) return;
     notify(err.message || t('err_generic'));
     newChat();
     if (err.status === 404) refreshSessions({ quiet: true });
+  } finally {
+    if (loads.isCurrent(token)) setState({ loadingSession: null });
   }
 }
 
 async function send(raw) {
   const message = String(raw ?? '').trim();
-  if (!message || state.streaming) return;
+  if (!message || !canSend(state)) return;
   if (message.length > MAX_MESSAGE_CHARS) {
     notify(t('err_too_long'));
     return;
@@ -187,6 +197,7 @@ async function send(raw) {
       });
       sessions.render();
     }
+    turn.sessionId = sessionId;
     emit('turn:start', { turn, sessionId });
     const { finished } = await streamChat(sessionId, message, {
       signal: controller.signal,
@@ -233,7 +244,7 @@ async function start() {
   const last = storage.get(STORAGE_KEYS.session);
   thread.showEmpty();
   const loaded = await refreshSessions();
-  if (loaded && last && state.sessions.some((s) => s.id === last) && !state.streaming && !state.sessionId) {
+  if (loaded && last && state.sessions.some((s) => s.id === last) && canSend(state) && !state.sessionId) {
     await openSession(last);
   } else if (!layout.isPhone() && document.activeElement === document.body) {
     composer.focus();

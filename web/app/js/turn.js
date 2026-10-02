@@ -9,9 +9,9 @@
  * Empty slots take no space. Model and tool text only ever reaches the DOM through textContent or
  * the markdown pipeline; the element receiving streamed text is never an aria-live region.
  */
-import { bindText } from './i18n.js';
+import { bindText, t } from './i18n.js';
 import { icon } from './icons.js';
-import { createMarkdownStream } from './markdown.js';
+import { createMarkdownStream, refreshMarkdown } from './markdown.js';
 import { registerEvent } from './registry.js';
 
 function el(tag, className) {
@@ -38,7 +38,8 @@ export class Turn {
   constructor({ replay = false } = {}) {
     this.replay = replay;
     this.id = null;          // the server's messageId / turn_id
-    this.finish = null;      // the `finish` event, once seen
+    this.sessionId = null;   // the chat this turn belongs to (set by the shell)
+    this.finish = null;      // the first `finish` event (set by dispatch); later events are ignored
     this.hadError = false;
     this.closed = false;
     this.outcome = null;     // 'finish' | 'error' | 'stopped' | 'cut' | 'history'
@@ -82,8 +83,14 @@ export class Turn {
   }
 
   markdown() {
-    if (!this.md) this.md = createMarkdownStream(this.slots.body);
+    // Post-processors (citation chips) get this turn as their context.
+    if (!this.md) this.md = createMarkdownStream(this.slots.body, { context: { turn: this } });
     return this.md;
+  }
+
+  /* Re-run the markdown post-processors for this turn's answer, e.g. once its sources are known. */
+  refreshMarkdown() {
+    if (this.md) refreshMarkdown(this.md.root);
   }
 
   appendText(delta) {
@@ -121,7 +128,6 @@ export class Turn {
   }
 
   toolStart(id, name) {
-    this.newRound = true;
     const key = id || `tool-${this.tools.size + 1}`;
     if (this.tools.has(key)) return this.tools.get(key);
     const row = el('li', 'tool-row');
@@ -129,7 +135,7 @@ export class Turn {
     const spinner = el('span', 'tool-spinner');
     spinner.setAttribute('aria-hidden', 'true');
     const label = el('span', 'tool-label');
-    const entry = { row, label, name: name || 'tool' };
+    const entry = { row, label, name: name || t('tool_unnamed') };
     bindText(label, 'tool_running', { name: entry.name });
     row.append(spinner, label);
     this.slots.activity.appendChild(row);
@@ -179,22 +185,31 @@ export class Turn {
   }
 }
 
-/* The shell's handlers. Task 4.2 replaces the tool and thinking ones through `registerEvent`. */
+let registered = false;
+
+/* The shell's listeners (registered once).
+ * Core, never displaced: the turn id, the answer text, the inline error. `finish` needs no listener:
+ * dispatch itself stores the first one as `turn.finish` and ignores what follows.
+ * Fallback views, which a component takes over with `replaceEvent`: the Thoughts block and the
+ * one-line tool rows. */
 export function registerDefaultHandlers() {
-  const fallback = { fallback: true };
+  if (registered) return;
+  registered = true;
   registerEvent('start', (event, turn) => {
     if (typeof event.messageId === 'string') turn.id = event.messageId;
-  }, fallback);
+  });
+  registerEvent('text-delta', (event, turn) => turn.appendText(text(event.delta)));
+  registerEvent('error', (event, turn) => turn.showError(text(event.message)));
+  registerEvent('tool-input-available', (event, turn) => {
+    turn.newRound = true; // the next reasoning text starts a new paragraph
+  });
+
+  const fallback = { fallback: true };
   registerEvent('reasoning-delta', (event, turn) => turn.appendReasoning(text(event.delta)), fallback);
-  registerEvent('text-delta', (event, turn) => turn.appendText(text(event.delta)), fallback);
   registerEvent('tool-input-available', (event, turn) => {
     turn.toolStart(text(event.toolCallId), text(event.toolName));
   }, fallback);
   registerEvent('tool-output-available', (event, turn) => {
     turn.toolEnd(text(event.toolCallId), text(event.toolName), Boolean(event.isError));
-  }, fallback);
-  registerEvent('error', (event, turn) => turn.showError(text(event.message)), fallback);
-  registerEvent('finish', (event, turn) => {
-    turn.finish = event;
   }, fallback);
 }

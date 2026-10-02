@@ -86,7 +86,7 @@ export function createSseDecoder(onEvent) {
 }
 
 /* Stream one chat turn. Resolves `{finished}` (whether a `finish` event arrived) when the stream
- * ends. Rejects with an ApiError for an HTTP error (e.g. a 404 JSON body for an unknown session),
+ * ends. `finish` is the last event delivered: a duplicate, or anything after it, is dropped. Rejects with an ApiError for an HTTP error (e.g. a 404 JSON body for an unknown session),
  * a network failure or a non-stream response, and with the AbortError when `signal` aborts: the
  * caller treats that as a clean Stop. */
 export async function streamChat(sessionId, message, { onEvent, signal } = {}) {
@@ -113,6 +113,7 @@ export async function streamChat(sessionId, message, { onEvent, signal } = {}) {
 
   let finished = false;
   const decoder = createSseDecoder((event) => {
+    if (finished) return; // the first finish ends the turn: nothing after it is delivered
     if (event.type === 'finish') finished = true;
     handler(event);
   });

@@ -113,8 +113,10 @@ export function createThread({ scroller, thread, onSuggestion }) {
 
     /* Rebuild a stored conversation (`GET /api/sessions/{id}` -> messages). Assistant text goes
      * through the same markdown pipeline in one write; each stored turn summary (role `event`)
-     * is replayed through the registry into its turn, so 4.2's components also draw history. */
-    renderHistory(messages) {
+     * is replayed through the registry into its turn, so 4.2's components also draw history.
+     * Every turn is closed after the replay, which runs the markdown post-processors once more:
+     * by then the turn's replayed events (its sources) are known. */
+    renderHistory(messages, { sessionId = null } = {}) {
       reset();
       const rows = Array.isArray(messages) ? messages : [];
       const turns = new Map();
@@ -131,6 +133,7 @@ export function createThread({ scroller, thread, onSuggestion }) {
         } else if (row.role === 'assistant') {
           const turn = new Turn({ replay: true });
           turn.id = typeof meta.turn_id === 'string' ? meta.turn_id : null;
+          turn.sessionId = sessionId;
           turn.data.meta = meta;
           turn.el.classList.add('is-static');
           if (meta.error) turn.showError(content);

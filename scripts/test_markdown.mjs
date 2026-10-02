@@ -5,7 +5,10 @@
 // 2. `writeMarkdownChunk`: "$" stays a literal dollar sign outside code. streaming-markdown reads
 //    "$…$" as inline math, which would turn "Buy $VOO and $VTI" into an equation and drop the
 //    dollar signs; finance answers are full of them. A recording renderer stands in for the DOM.
-// The DOM half (the sanitize walk) needs a browser and is checked there.
+//    That includes indented and fenced code (no backslash may appear), every chunk split, a parser
+//    whose internals cannot be probed (the "$" is then written raw; no text is lost), and random
+//    markdown-ish input.
+// The DOM half (the renderer and the sanitize walk) is in scripts/test_markdown_dom.mjs.
 import assert from 'node:assert/strict';
 import * as smd from '../web/app/vendor/streaming-markdown.min.js';
 import { safeHttpUrl, writeMarkdownChunk } from '../web/app/js/markdown.js';
@@ -52,8 +55,9 @@ const NAMES = {
   [smd.LIST_ITEM]: 'li', [smd.HEADING_2]: 'h2',
 };
 
-/* Render `pieces` and return {text, tokens, attrs}: all text in order, the token names opened. */
-function render(pieces) {
+/* Render `pieces` and return {text, tokens, attrs}: all text in order, the token names opened.
+ * `prepare(parser)` can tamper with the parser before anything is written. */
+function render(pieces, prepare) {
   const out = { text: '', tokens: [], attrs: [] };
   const renderer = {
     data: {},
@@ -63,8 +67,8 @@ function render(pieces) {
     set_attr(_, type, value) { out.attrs.push(value); },
   };
   const parser = smd.parser(renderer);
-  const state = { backslashes: 0 };
-  for (const piece of pieces) writeMarkdownChunk(parser, piece, state);
+  if (prepare) prepare(parser);
+  for (const piece of pieces) writeMarkdownChunk(parser, piece);
   smd.parser_end(parser);
   return out;
 }
@@ -145,6 +149,78 @@ test('every split point of a mixed message gives the same text', () => {
   }
   const chars = render([...source]);
   assert.equal(chars.text, whole.text);
+});
+
+test('the first "$" of an indented code block is not escaped', () => {
+  for (const source of [
+    'Run:\n\n    $ pip install foo\n\nThen buy $VOO.',
+    'Run:\n\n\t$ make all\n\nThen buy $VOO.',
+    'Run:\n\n    $HOME/bin and $PATH\n    $ second line\n\nThen buy $VOO.',
+  ]) {
+    const whole = render([source]);
+    assert.ok(noMath(whole), source);
+    assert.ok(whole.tokens.includes('pre'), source);
+    assert.ok(!whole.text.includes('\\'), `${JSON.stringify(source)} -> ${JSON.stringify(whole.text)}`);
+    assert.ok(whole.text.includes('$VOO.'));
+    for (let cut = 1; cut < source.length; cut += 1) {
+      const out = render([source.slice(0, cut), source.slice(cut)]);
+      assert.ok(noMath(out), `cut ${cut}`);
+      assert.equal(out.text, whole.text, `cut ${cut} of ${JSON.stringify(source)}`);
+    }
+    assert.equal(render([...source]).text, whole.text);
+  }
+  assert.ok(render(['Run:\n\n    $ pip install foo\n']).text.includes('$ pip install foo'));
+});
+
+test('fenced code split at every point keeps "$" exactly', () => {
+  const source = 'Shell:\n\n```sh\n$ echo $HOME\ncost=$5 # $x$\n```\n\nAfter: $VTI and `$y`.';
+  const whole = render([source]);
+  assert.ok(noMath(whole));
+  assert.ok(whole.text.includes('$ echo $HOME') && whole.text.includes('cost=$5 # $x$'));
+  assert.ok(whole.text.includes('After: $VTI and') && !whole.text.includes('\\'));
+  for (let cut = 1; cut < source.length; cut += 1) {
+    const out = render([source.slice(0, cut), source.slice(cut)]);
+    assert.ok(noMath(out), `cut ${cut}`);
+    assert.equal(out.text, whole.text, `cut ${cut}`);
+  }
+});
+
+test('if the parser internals cannot be probed, "$" is written raw and nothing is dropped', () => {
+  const source = 'Buy $VOO and $VTI now, then $5 more.';
+  const breakProbe = (parser) => {
+    // The probe copies the parser's fields; a field that throws on read stands in for a future
+    // streaming-markdown whose internals differ.
+    Object.defineProperty(parser, 'changed_internal', {
+      enumerable: true,
+      get() { throw new Error('internals changed'); },
+    });
+  };
+  let out;
+  assert.doesNotThrow(() => { out = render([source], breakProbe); });
+  // Raw "$" brings the parser's math back (the two cashtags vanish into an equation), but every
+  // other character of the chunk still arrives: nothing after a "$" is dropped.
+  assert.ok(out.tokens.includes('EQ'));
+  assert.equal(out.text.replace(/\s+/g, ''), 'BuyVOOandVTInow,then$5more.');
+  assert.equal(render([...source], breakProbe).text, out.text);
+});
+
+test('random markdown-ish text never opens math and never gains a backslash', () => {
+  const alphabet = ['$', '$', '`', '*', '_', '[', ']', '(', ')', ' ', ' ', '\n', '\n', 'a', 'V', '5', '|', '-', '#', '>', '.', '    '];
+  let seed = 0x2545f491;
+  const rand = () => {
+    seed ^= seed << 13; seed >>>= 0;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5; seed >>>= 0;
+    return seed / 0x100000000;
+  };
+  for (let i = 0; i < 3000; i += 1) {
+    let source = '';
+    const length = 1 + Math.floor(rand() * 40);
+    for (let j = 0; j < length; j += 1) source += alphabet[Math.floor(rand() * alphabet.length)];
+    const out = render(rand() < 0.5 ? [source] : [...source]);
+    assert.ok(noMath(out), JSON.stringify(source));
+    assert.ok(!out.text.includes('\\') && !out.attrs.some((a) => String(a).includes('\\')), JSON.stringify(source));
+  }
 });
 
 console.log(`\n${checks} markdown checks passed`);

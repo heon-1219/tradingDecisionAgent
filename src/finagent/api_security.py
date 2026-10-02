@@ -21,7 +21,9 @@ connections under `/api` are refused outright (close code 1008): there are no We
 one added later would otherwise run without the checks above.
 
 Responses under `/api/`, `/` and `/app/` also get anti-framing and no-sniff headers, so a hostile
-page cannot frame the app and trick the user into pressing Confirm. `/answer`, `/answer/stream`,
+page cannot frame the app and trick the user into pressing Confirm. The web app itself (`/` and
+`/app/`) is always sent with `Cache-Control: no-cache`: the browser may keep a copy but must
+revalidate it, so it never runs a stale script after an update. `/answer`, `/answer/stream`,
 `/health` and `/ui` pass through untouched. This is a pure ASGI middleware (not `BaseHTTPMiddleware`)
 so streaming responses and cancellation behave exactly as without it.
 """
@@ -47,6 +49,7 @@ _SECURITY_HEADERS = [
     (b"content-security-policy", b"frame-ancestors 'none'"),
     (b"x-content-type-options", b"nosniff"),
 ]
+_APP_CACHE_CONTROL = (b"cache-control", b"no-cache")
 _POLICY_VIOLATION = 1008  # WebSocket close code
 
 
@@ -151,9 +154,13 @@ class LocalApiGuard:
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                present = {name.lower() for name, _ in message.get("headers", [])}
-                extra = [(n, v) for n, v in _SECURITY_HEADERS if n not in present]
-                message = {**message, "headers": [*message.get("headers", []), *extra]}
+                headers = list(message.get("headers", []))
+                if not api:  # the web app: every response, whatever it set itself
+                    headers = [(n, v) for n, v in headers if n.lower() != _APP_CACHE_CONTROL[0]]
+                    headers.append(_APP_CACHE_CONTROL)
+                present = {name.lower() for name, _ in headers}
+                headers.extend((n, v) for n, v in _SECURITY_HEADERS if n not in present)
+                message = {**message, "headers": headers}
             await send(message)
 
         await self.app(scope, receive, send_with_headers)

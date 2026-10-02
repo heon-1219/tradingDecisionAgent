@@ -5,7 +5,9 @@
  *   data-i18n-aria-label="<key>"  -> aria-label
  *   data-i18n-title="<key>"       -> title
  *   data-i18n-placeholder="<key>" -> placeholder
- *   data-i18n-vars='{"name":"x"}' supplies {placeholders} for any of the above.
+ * {placeholders} come from a JSON attribute per binding, so text and attributes on one element
+ * never share variables: data-i18n-vars for the text, data-i18n-aria-label-vars,
+ * data-i18n-title-vars and data-i18n-placeholder-vars for the attributes.
  * Strings are plain text, never markup. `scripts/check_i18n.mjs` checks that both languages have
  * the same keys and no empty value.
  */
@@ -103,6 +105,7 @@ export const dict = {
     tool_done: '✓ {name}',
     tool_error: '✕ {name} failed',
     tool_stopped: '{name} · stopped',
+    tool_unnamed: 'tool',
     stopped_note: 'Stopped',
     md_image: '🖼 image: {alt}',
     md_image_bare: '🖼 image',
@@ -193,11 +196,11 @@ export const dict = {
     status_unknown: '알 수 없음',
 
     empty_greeting: '오늘은 무엇을 리서치해 볼까요?',
-    empty_lede: '모의투자 전용입니다. 출처를 밝혀 리서치하고 전략을 설명한 뒤 주문을 제안합니다. 직접 확인하기 전에는 어떤 주문도 넣지 않습니다.',
+    empty_lede: '모의투자 전용입니다. 출처를 밝혀 리서치하고 전략을 설명한 뒤 주문을 제안합니다. 승인하기 전에는 어떤 주문도 넣지 않습니다.',
     suggestions_label: '추천 질문',
     suggest_1: '5,000달러로 저비용 미국 ETF 핵심 포트폴리오를 구성해 줘',
     suggest_2: '장기 핵심 보유 종목으로 VOO와 VTI를 비교해 줘',
-    suggest_3: '배당 ETF로 1,500달러 규모의 배당 비중을 추가해 줘',
+    suggest_3: '배당 ETF로 1,500달러 규모의 배당 포트폴리오를 추가해 줘',
     suggest_4: '지금 보유 종목을 점검하고 리밸런싱 방안을 제안해 줘',
 
     composer_label: '메시지',
@@ -217,6 +220,7 @@ export const dict = {
     tool_done: '✓ {name}',
     tool_error: '✕ {name} 실패',
     tool_stopped: '{name} · 중지됨',
+    tool_unnamed: '도구',
     stopped_note: '중지됨',
     md_image: '🖼 이미지: {alt}',
     md_image_bare: '🖼 이미지',
@@ -274,8 +278,8 @@ export function setLang(lang) {
   return next;
 }
 
-function varsOf(el) {
-  const raw = el.getAttribute('data-i18n-vars');
+function varsOf(el, attribute) {
+  const raw = el.getAttribute(attribute);
   if (!raw) return undefined;
   try {
     return JSON.parse(raw);
@@ -303,12 +307,11 @@ export function applyI18n(root) {
   const tagged = [scope, ...scope.querySelectorAll('[data-i18n],[data-i18n-aria-label],[data-i18n-title],[data-i18n-placeholder]')];
   for (const el of tagged) {
     if (!el.getAttribute) continue;
-    const vars = varsOf(el);
     const key = el.getAttribute('data-i18n');
-    if (key) el.textContent = t(key, vars);
+    if (key) el.textContent = t(key, varsOf(el, 'data-i18n-vars'));
     for (const [attr, target] of ATTRS) {
       const k = el.getAttribute(attr);
-      if (k) el.setAttribute(target, t(k, vars));
+      if (k) el.setAttribute(target, t(k, varsOf(el, `${attr}-vars`)));
     }
   }
 }
@@ -322,10 +325,12 @@ export function bindText(el, key, vars) {
   return el;
 }
 
-/* Same for an attribute: `bindAttr(btn, 'aria-label', 'send')`. */
+/* Same for an attribute: `bindAttr(btn, 'aria-label', 'send')`. Each attribute keeps its own
+ * variables (`data-i18n-aria-label-vars`), apart from the text's. */
 export function bindAttr(el, attr, key, vars) {
   el.setAttribute(`data-i18n-${attr}`, key);
-  if (vars) el.setAttribute('data-i18n-vars', JSON.stringify(vars));
+  if (vars) el.setAttribute(`data-i18n-${attr}-vars`, JSON.stringify(vars));
+  else el.removeAttribute(`data-i18n-${attr}-vars`);
   el.setAttribute(attr, t(key, vars));
   return el;
 }

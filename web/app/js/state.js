@@ -43,10 +43,37 @@ export const state = {
   sessionTitle: '',
   sessions: [],        // GET /api/sessions -> sessions
   streaming: false,    // a /api/chat stream is open
+  loadingSession: null, // the id of the chat being loaded, or null
   settings: null,      // GET /api/settings body, or null
   settingsError: null, // the message to show when settings could not be loaded
   lastFinish: null,    // the last `finish` event {usage, elapsed_ms}
 };
+
+/* Whether a message may be sent now. Not while a response streams, and not while a chat is
+ * loading: a message sent then would go to the chat that was open before, and the history that
+ * arrives would wipe the live turn. */
+export function canSend(s = state) {
+  return !s.streaming && !s.loadingSession;
+}
+
+/* Orders overlapping session loads: `begin()` returns a token, and only the token of the newest
+ * load `isCurrent`, so a slow, older load never renders over a newer one. `cancel()` (New chat)
+ * makes every load in flight stale. */
+export function createLoadGate() {
+  let latest = 0;
+  return {
+    begin() {
+      latest += 1;
+      return latest;
+    },
+    isCurrent(token) {
+      return token === latest;
+    },
+    cancel() {
+      latest += 1;
+    },
+  };
+}
 
 const listeners = new Map();
 

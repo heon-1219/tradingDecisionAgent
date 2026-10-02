@@ -230,5 +230,17 @@ await test('streamChat: a network failure rejects with status 0', async () => {
   await assert.rejects(streamChat('s', 'm'), (err) => err.status === 0 && err.error === 'network_error');
 });
 
+await test('streamChat: the first finish wins; nothing after it is delivered', async () => {
+  const first = { type: 'finish', usage: { input: 1 }, elapsed_ms: 5 };
+  globalThis.fetch = async () => streamResponse([
+    frame(EVENTS[0]), frame(first), frame({ type: 'text-delta', delta: 'late' }),
+    frame({ type: 'finish', usage: {}, elapsed_ms: 9 }),
+  ]);
+  const got = [];
+  const result = await streamChat('s', 'm', { onEvent: (e) => got.push(e) });
+  assert.equal(result.finished, true);
+  assert.deepEqual(got, [EVENTS[0], first]);
+});
+
 globalThis.fetch = realFetch;
 console.log(`\n${checks} SSE checks passed`);

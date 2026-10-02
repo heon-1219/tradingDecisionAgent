@@ -10,9 +10,11 @@
  *     keeps absolute http(s) URLs.
  *  3. After every write and at the end, the rendered subtree is walked: unknown elements become
  *     text, `on*`/`style` attributes go, links keep only http(s) hrefs and get
- *     rel="noopener noreferrer nofollow", target="_blank", referrerpolicy="no-referrer", any <img>
- *     is replaced by a text link, and tables/code blocks get a copy button.
- * No DOM is touched at import time, so Node can import the pure helpers.
+ *     rel="noopener noreferrer nofollow", target="_blank", referrerpolicy="no-referrer" and a
+ *     title naming the destination host (link text can claim another site), any <img> is replaced
+ *     by a text link, and tables/code blocks get a copy button.
+ * No DOM is touched at import time, so Node can import the module: scripts/test_markdown.mjs covers
+ * the pure helpers and scripts/test_markdown_dom.mjs runs the renderer and the walk on a fake DOM.
  */
 import * as smd from '../vendor/streaming-markdown.min.js';
 import { bindText, bindAttr } from './i18n.js';
@@ -48,30 +50,45 @@ export function safeHttpUrl(value) {
 //
 // streaming-markdown reads "$…$" as inline math, so "Buy $VOO and $VTI" would lose its dollar
 // signs and swallow the text between them (even across paragraphs). Finance text is full of "$",
-// so outside code, links' URLs and math each unescaped "$" is written as "\$", which the parser
-// renders as a literal "$". This reads the parser's state (tokens/len/pending) of the pinned 0.2.15.
+// so a "$" that would open math is written as "\$", which the parser renders as a literal "$".
+// Everywhere else (inline, fenced and indented code, link URLs, after a backslash) it is written
+// as it is, because there a backslash would show.
 
-const KEEP_DOLLAR = new Set([smd.CODE_BLOCK, smd.CODE_FENCE, smd.CODE_INLINE, smd.RAW_URL, smd.IMAGE,
-  smd.EQUATION_BLOCK, smd.EQUATION_INLINE]);
-
-function dollarNeedsEscape(parser) {
-  if (KEEP_DOLLAR.has(parser.tokens[parser.len])) return false;
-  const pending = parser.pending || '';
-  return !pending.includes('`') && !pending.startsWith('](');
+/* Would "$" open math in the parser's current state? Asked of a throwaway copy of the parser with
+ * a renderer that only watches for an equation token, so the real parser and the DOM are not
+ * touched and no guess about its internal states is needed. If the copy cannot be made or driven
+ * (a streaming-markdown whose internals differ), the answer is "no": the "$" is written raw and
+ * the worst case is the library's own math rendering, never lost text. */
+function dollarOpensMath(parser) {
+  try {
+    let opened = false;
+    const probe = { ...parser };
+    for (const [key, value] of Object.entries(probe)) {
+      if (ArrayBuffer.isView(value)) probe[key] = value.slice();
+    }
+    probe.renderer = {
+      data: null,
+      add_token(_, type) {
+        if (type === smd.EQUATION_INLINE || type === smd.EQUATION_BLOCK) opened = true;
+      },
+      end_token() {},
+      add_text() {},
+      set_attr() {},
+    };
+    smd.parser_write(probe, '$a');
+    return opened;
+  } catch {
+    return false;
+  }
 }
 
-/* Write `chunk` into a streaming-markdown `parser`; `state.backslashes` carries the count of
- * trailing backslashes across chunks (an already escaped "\$" is left alone). */
-export function writeMarkdownChunk(parser, chunk, state) {
+/* Write `chunk` into a streaming-markdown `parser`, keeping every "$" a literal dollar sign. */
+export function writeMarkdownChunk(parser, chunk) {
   let start = 0;
-  for (let i = 0; i < chunk.length; i += 1) {
-    const ch = chunk[i];
-    if (ch === '$' && state.backslashes % 2 === 0) {
-      if (i > start) smd.parser_write(parser, chunk.slice(start, i));
-      smd.parser_write(parser, dollarNeedsEscape(parser) ? '\\$' : '$');
-      start = i + 1;
-    }
-    state.backslashes = ch === '\\' ? state.backslashes + 1 : 0;
+  for (let at = chunk.indexOf('$'); at !== -1; at = chunk.indexOf('$', start)) {
+    if (at > start) smd.parser_write(parser, chunk.slice(start, at));
+    smd.parser_write(parser, dollarOpensMath(parser) ? '\\$' : '$');
+    start = at + 1;
   }
   if (start < chunk.length) smd.parser_write(parser, chunk.slice(start));
 }
@@ -121,11 +138,35 @@ function createRenderer(root) {
 // --- the walk ------------------------------------------------------------------------------------
 
 const postProcessors = [];
+const streams = new WeakMap(); // rendered root -> {context, ended}
 
-/* Task 4.2 hook: `fn(root, {final})` runs after every sanitize pass (e.g. turning `.md-cite`
- * spans into source chips). It must be idempotent and build DOM with textContent only. */
+/* Task 4.2 hook: `fn(root, info)` runs after every sanitize pass (e.g. turning `.md-cite` spans
+ * into source chips). `info` is `{final, ...context}`, where `context` is what the caller of
+ * `createMarkdownStream` passed: for a chat turn that is `{turn}`, and `turn.id` / `turn.sessionId`
+ * say whose sources to look up. `final` is true once the message is complete. It runs many times
+ * per message, so it must be idempotent, and it must build DOM with textContent only. */
 export function addPostProcessor(fn) {
   if (typeof fn === 'function') postProcessors.push(fn);
+}
+
+function runPostProcessors(root, final) {
+  const stream = streams.get(root);
+  const info = { ...(stream ? stream.context : null), final };
+  for (const fn of postProcessors) {
+    try {
+      fn(root, info);
+    } catch (err) {
+      console.error('markdown post-processor failed', err);
+    }
+  }
+}
+
+/* Run the post-processors again for a message that is already on screen: call it when what they
+ * depend on arrives later (a turn's sources after its text, as in history replay). `root` is the
+ * `.md` element (`stream.root`); a root this module did not render is ignored. */
+export function refreshMarkdown(root) {
+  const stream = root ? streams.get(root) : null;
+  if (stream) runPostProcessors(root, stream.ended);
 }
 
 function imageLink(alt, url) {
@@ -166,9 +207,12 @@ function finishLink(a) {
     a.setAttribute('rel', LINK_REL);
     a.setAttribute('target', '_blank');
     a.setAttribute('referrerpolicy', 'no-referrer');
+    // The text of a link can name another site: the tooltip always shows the real destination.
+    a.setAttribute('title', new URL(a.getAttribute('href')).host);
   } else {
     a.removeAttribute('target');
     a.removeAttribute('rel');
+    a.removeAttribute('title');
   }
 }
 
@@ -267,35 +311,30 @@ export function sanitizeTree(root, { final = false } = {}) {
     wrapBlock(table, 'table', '', 'table_label');
   }
   if (final) root.normalize();
-  for (const fn of postProcessors) {
-    try {
-      fn(root, { final });
-    } catch (err) {
-      console.error('markdown post-processor failed', err);
-    }
-  }
+  runPostProcessors(root, final);
 }
 
-/* DOMPurify's verdict on the accumulated text: true when nothing would be removed. Fails closed:
- * without DOMPurify every message is shown as plain text. */
-function purifyAccepts(text) {
-  const purify = globalThis.DOMPurify;
+/* The purify step's verdict on the accumulated text: true when nothing would be removed. Fails
+ * closed: without a sanitizer every message is shown as plain text. */
+function purifyAccepts(purify, text) {
   if (!purify || typeof purify.sanitize !== 'function') return false;
   purify.sanitize(text);
   return Array.isArray(purify.removed) && purify.removed.length === 0;
 }
 
 /* A streaming markdown view appended to `container`. `write(chunk)` any number of times, then
- * `end()`. Once HTML is detected, the rest of the message goes into a plain-text block. */
-export function createMarkdownStream(container) {
+ * `end()`. Once HTML is detected, the rest of the message goes into a plain-text block.
+ * Options: `purify` is the sanitizer used for the gate (DOMPurify by default; tests inject their
+ * own); `context` is handed to the post-processors (a chat turn passes `{turn}`). */
+export function createMarkdownStream(container, { purify = globalThis.DOMPurify, context = null } = {}) {
   const root = document.createElement('div');
   root.className = 'md';
   container.appendChild(root);
   const parser = smd.parser(createRenderer(root));
-  const escapeState = { backslashes: 0 };
+  const stream = { context, ended: false };
+  streams.set(root, stream);
   let source = '';
   let plain = null;
-  let ended = false;
 
   function switchToPlain(rest) {
     try {
@@ -319,22 +358,22 @@ export function createMarkdownStream(container) {
     get text() { return source; },
     get isPlain() { return plain !== null; },
     write(chunk) {
-      if (ended || typeof chunk !== 'string' || chunk === '') return;
+      if (stream.ended || typeof chunk !== 'string' || chunk === '') return;
       source += chunk;
       if (plain) {
         plain.appendData(chunk);
         return;
       }
-      if (!purifyAccepts(source)) {
+      if (!purifyAccepts(purify, source)) {
         switchToPlain(chunk);
         return;
       }
-      writeMarkdownChunk(parser, chunk, escapeState);
+      writeMarkdownChunk(parser, chunk);
       sanitizeTree(root);
     },
     end() {
-      if (ended) return;
-      ended = true;
+      if (stream.ended) return;
+      stream.ended = true;
       if (!plain) {
         smd.parser_end(parser);
         sanitizeTree(root, { final: true });
@@ -344,8 +383,8 @@ export function createMarkdownStream(container) {
 }
 
 /* History: the whole text in one write, through the same pipeline. */
-export function renderMarkdown(container, text) {
-  const view = createMarkdownStream(container);
+export function renderMarkdown(container, text, options) {
+  const view = createMarkdownStream(container, options);
   view.write(String(text ?? ''));
   view.end();
   return view;

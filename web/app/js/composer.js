@@ -14,6 +14,7 @@ export function isImeEvent(event) {
 
 export function initComposer({ form, input, sendButton, stopButton, onSend, onStop }) {
   let streaming = false;
+  let blocked = false; // a chat is loading: typing is fine, sending is not
 
   function resize() {
     input.style.height = 'auto';
@@ -23,11 +24,11 @@ export function initComposer({ form, input, sendButton, stopButton, onSend, onSt
   }
 
   function refresh() {
-    sendButton.disabled = streaming || input.value.trim() === '';
+    sendButton.disabled = streaming || blocked || input.value.trim() === '';
   }
 
   function submit() {
-    if (streaming || input.value.trim() === '') return;
+    if (streaming || blocked || input.value.trim() === '') return;
     onSend(input.value);
   }
 
@@ -61,6 +62,11 @@ export function initComposer({ form, input, sendButton, stopButton, onSend, onSt
       stopButton.hidden = !streaming;
       refresh();
       if (!streaming && stopHadFocus) input.focus();
+    },
+    /* Hold sending back (while a chat loads); the text stays in the box. */
+    setBlocked(on) {
+      blocked = Boolean(on);
+      refresh();
     },
     /* Put `text` in the box (a suggested prompt) without sending it. */
     fill(text) {
