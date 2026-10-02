@@ -16,33 +16,37 @@ anything, and the run fails if the fake broker saw a submit.
 --delay SEC         pause between scenarios (default 15 for live, 0 for demo).
 --out PATH          results file (default data/eval/scenario_results.jsonl for live,
                     data/eval/scenario_results_demo.jsonl for demo).
---resume            skip the ids that already have an `ok` line for the same llm and model.
+--resume            skip the ids that already have an `ok` line for the same configuration.
 --real-products     use the real product database and Q&A stack (slow to load) instead of the tiny one.
 --live-broker       read the real Alpaca PAPER account and market data instead of the fake broker.
-                    Reads only: the broker is wrapped so that order writes raise.
---time-budget SEC   seconds one turn may take (default: the configured CHAT_TIME_BUDGET_SEC, 90).
-                    A rate-limited key spends much of a turn waiting on 429 retries; a larger budget
-                    lets such a turn finish. The value in effect is recorded on every line.
+                    Reads only: the broker is wrapped so that order writes raise. Its result lines
+                    quote the real paper account (balances, positions, prices) in `answer` and
+                    `ticket`: think before committing or sharing such a file.
+--time-budget SEC   seconds one turn may take (default: the configured turn budget). It sets every
+                    turn-budget setting the backend has. A rate-limited key spends much of a turn
+                    waiting on 429 retries; a larger budget lets such a turn finish.
 
-Results are one JSON line per scenario, keyed by (id, llm, model): a run replaces the lines it
-re-ran and keeps the others, so partial runs add up. A scenario whose turn ended in a model error
-(a free-tier 429 or 503 shows up as an `error` event) is recorded with status `llm_error`, left out
-of the averages and retried by `--resume`; one that ran out of the turn budget is `budget_exhausted`
-and treated the same way. The 429s and 5xx that the model client retried inside a step are counted
-per line as `provider_retries`. A live scenario costs roughly 4-8 model requests; the Gemini free
-tier allows about 20 a day and 5 a minute, so run a few scenarios at a time and `--resume`. On such
-a key a turn with more than 5 model steps has to wait out 429s: give it room with `--delay 65
---time-budget 240`.
+Results are one JSON line per scenario, keyed by (id, llm, model, broker, products, turn budget, and
+the turn mode when the backend reports one): a run replaces the lines it re-ran with the same key
+and keeps all others, so partial runs add up and a `--live-broker` or `--real-products` run never
+overwrites or skips fake-world lines. The summary shows the lines of the current configuration only.
+A scenario whose turn ended in a model error (a free-tier 429 or 503 shows up as an `error` event)
+is recorded with status `llm_error`, left out of the averages and retried by `--resume`; one that
+ran out of the turn budget is `budget_exhausted` and treated the same way. The 429s and 5xx that the
+model client retried inside a step are counted per line as `provider_retries`. The demo model's
+token counts are character-based estimates and are marked `"estimated": true`. A live scenario costs
+roughly 4-8 model requests; the Gemini free tier allows about 20 a day and 5 a minute, so run a few
+scenarios at a time and `--resume`, e.g. with `--delay 65`.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import logging
 import os
 import pathlib
-import re
 import shutil
 import sys
 import tempfile
@@ -52,18 +56,24 @@ from pathlib import Path
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-for _path in (ROOT / "src", pathlib.Path(__file__).resolve().parent):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+_HERE = os.path.normcase(os.path.abspath(os.path.dirname(__file__)))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+# Run as a script, Python puts this directory first on sys.path. Keep it last instead, so that a
+# file here (scripts/trace.py) can never shadow a standard-library module.
+sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.curdir)) != _HERE] + [_HERE]
 
 from _eval_metrics import retries_text, scenario_metrics, summary_table, ticket_summary  # noqa: E402
+from _eval_support import CountingLLM, ProviderRetryLog, ReadOnlyBroker, error_kind  # noqa: E402,F401
 from _fakeworld import DemoLLM, FakeBroker, build_fake_world, build_products, release_sqlite  # noqa: E402
 from finagent.agent.llm import make_llm  # noqa: E402
 from finagent.app_state import ChatRuntime  # noqa: E402
 from finagent.chat.agent import fallback_text  # noqa: E402
-from finagent.config import get_settings  # noqa: E402
+from finagent.config import Settings, get_settings  # noqa: E402
 from finagent.trading.broker import AlpacaPaper  # noqa: E402
 from finagent.trading.models import Mandate  # noqa: E402
+
+log = logging.getLogger("eval_scenarios")
 
 DEFAULT_SCENARIOS = ROOT / "data" / "eval" / "scenarios.jsonl"
 DEFAULT_OUT = {"live": ROOT / "data" / "eval" / "scenario_results.jsonl",
@@ -72,121 +82,76 @@ LIVE_REQUESTS_PER_SCENARIO = (4, 8)
 _SCENARIO_KEYS = {"id", "lang", "message", "category", "expect"}
 # The agent's fallback answer when the turn budget ran out and the model gave no text.
 _BUDGET_PREFIXES = tuple(fallback_text(lang, []).split(".")[0] for lang in ("en", "ko"))
-_ERROR_KINDS = {
-    "RateLimitError": "rate_limited_429", "InternalServerError": "server_error_5xx", "APITimeoutError": "timeout",
-    "APIConnectionError": "connection", "AuthenticationError": "auth", "PermissionDeniedError": "auth",
-    "NotFoundError": "model_not_found", "BadRequestError": "bad_request", "GEMINI_API_KEY": "missing_key",
-}
 _LLM_KEY_FIELDS = {"gemini": ("gemini_api_key", "GEMINI_API_KEY"), "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
                    "openai": ("openai_api_key", "OPENAI_API_KEY")}
+# Non-secret settings that decide a turn's limits; a live run copies those that exist into the fake world.
+_LIMIT_FIELDS = ("llm_provider", "gemini_paid", "chat_time_budget_sec", "chat_max_rounds", "shallow_time_budget_sec",
+                 "shallow_max_rounds", "ticket_ttl_sec", "llm_timeout_sec")
 
 
 class UsageError(SystemExit):
     """A request the script cannot run (unknown scenario, missing keys); `main` prints it and returns 2."""
 
 
-# --- counting model calls ---------------------------------------------------------------------------------
+# --- turn limits: tolerant of the backend with and without `chat_limits` ---------------------------------
 
 
-def error_kind(text: str) -> str:
-    """A short label for a failed model step. Only the exception class is read from the step's
-    error text; the provider's message (which can quote request details) is never kept."""
-    match = re.match(r"LLM call error: (\w+)", text or "")
-    return _ERROR_KINDS.get(match[1] if match else "", "error_turn")
-
-
-class _CountingConversation:
-    def __init__(self, owner: "CountingLLM", inner):
-        self._owner, self._inner = owner, inner
-
-    async def step(self):
-        self._owner.calls += 1
+def _chat_limits_fn():
+    """The backend's `chat_limits(settings)` if it has one (`finagent.chat.limits` or `finagent.config`)."""
+    for name in ("finagent.chat.limits", "finagent.config"):
         try:
-            turn = await self._inner.step()
-        except asyncio.CancelledError:
-            self._owner.errors.append("cancelled_at_time_budget")
-            raise
-        except Exception as exc:  # noqa: BLE001 - recorded by type, then left to the agent
-            self._owner.errors.append(type(exc).__name__)
-            raise
-        if turn.stop_reason == "error":
-            self._owner.errors.append(error_kind(turn.text))
-        return turn
-
-    def add_tool_results(self, results) -> None:
-        self._inner.add_tool_results(results)
-
-    def add_user(self, text: str) -> None:
-        self._inner.add_user(text)
-
-    def add_assistant(self, text: str) -> None:
-        self._inner.add_assistant(text)
-
-    def transcript(self):
-        return self._inner.transcript()
+            fn = getattr(importlib.import_module(name), "chat_limits", None)
+        except Exception:  # noqa: BLE001 - an absent or broken module means "no such function"
+            continue
+        if callable(fn):
+            return fn
+    return None
 
 
-class CountingLLM:
-    """A thin `LLMClient` wrapper: `calls` counts every `conv.step`, `errors` lists the failed ones."""
-
-    def __init__(self, inner):
-        self.inner = inner
-        self.name = getattr(inner, "name", "llm")
-        self.model = getattr(inner, "model", None)
-        self.calls = 0
-        self.errors: list[str] = []
-
-    def start(self, system, tools, user_text):
-        return _CountingConversation(self, self.inner.start(system, tools, user_text))
-
-
-class ProviderRetryLog(logging.Handler):
-    """Counts the model client's retry warnings (logger `finagent.llm`): a 429 or a 5xx that the
-    client retried inside one step never reaches the event stream, but it is why a turn ran out of
-    its budget. Only the kind is counted; the messages are not kept."""
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.counts: dict[str, int] = {}
-
-    def emit(self, record: logging.LogRecord) -> None:
+def effective_limits(settings) -> dict:
+    """`{"time_budget_sec", "max_rounds", "mode"}` a turn runs under with these settings: from the
+    backend's `chat_limits(settings)` when there is one (an object or a dict; `mode` may be an enum),
+    else from `chat_time_budget_sec` / `chat_max_rounds`, with `mode` None."""
+    fn = _chat_limits_fn()
+    limits = None
+    if fn is not None:
         try:
-            message = record.getMessage()  # also right when a record factory has pre-formatted it
-        except Exception:  # noqa: BLE001 - a malformed record is not a retry
-            return
-        if "retrying" not in message:
-            return
-        if message.startswith("429"):
-            kind = "rate_limited_429"
-        elif message.startswith("InternalServerError"):
-            kind = "server_error_5xx"
-        else:
-            kind = "timeout_or_connection"
-        self.counts[kind] = self.counts.get(kind, 0) + 1
+            limits = fn(settings)
+        except Exception as exc:  # noqa: BLE001 - e.g. a different signature: fall back to the settings
+            log.warning("chat_limits not usable (%s); reading the turn limits from the settings", type(exc).__name__)
+
+    def read(*names: str):
+        for name in names:
+            value = limits.get(name) if isinstance(limits, dict) else getattr(limits, name, None)
+            if value is not None:
+                return value
+        return None
+
+    budget, rounds, mode = read("time_budget_sec", "time_budget"), read("max_rounds", "rounds"), read("mode")
+    if budget is None or rounds is None:  # no function, or a shape this script cannot read
+        budget, rounds, mode = settings.chat_time_budget_sec, settings.chat_max_rounds, None
+    mode = getattr(mode, "value", mode)
+    return {"time_budget_sec": float(budget), "max_rounds": int(rounds), "mode": str(mode) if mode is not None else None}
+
+
+def budget_overrides(settings_cls, seconds: float) -> dict:
+    """`--time-budget` for every turn-budget setting this backend has (`chat_time_budget_sec`,
+    `shallow_time_budget_sec`, ...), but not `time_budget_sec`, which is the product Q&A agent's."""
+    return {name: float(seconds) for name in getattr(settings_cls, "model_fields", {}) if name.endswith("_time_budget_sec")}
+
+
+def world_overrides(llm_settings, time_budget: float | None) -> dict:
+    """`Settings` overrides for the fake world: the limit-related settings of the live model's
+    configuration (so a live run gets the limits the real app would apply; no key is copied), then
+    `--time-budget`."""
+    over = {name: getattr(llm_settings, name) for name in _LIMIT_FIELDS
+            if llm_settings is not None and hasattr(llm_settings, name)}
+    if time_budget:
+        over.update(budget_overrides(Settings, time_budget))
+    return over
 
 
 # --- the live paper account, reads only -------------------------------------------------------------------
-
-
-class ReadOnlyBroker:
-    """Wraps a broker so that only its reads go through. Order writes raise `PermissionError`, and
-    any other attribute does not exist: this script proposes, it never trades."""
-
-    READS = frozenset({"account", "positions", "orders", "asset", "clock", "get_order", "get_order_by_client_id",
-                       "aclose"})
-    WRITES = frozenset({"submit_order", "cancel_order", "set_suspend_trade"})
-
-    def __init__(self, inner):
-        self._inner = inner
-
-    def __getattr__(self, name: str):
-        if name in ReadOnlyBroker.READS:
-            return getattr(self._inner, name)
-        if name in ReadOnlyBroker.WRITES:
-            async def blocked(*args, **kwargs):
-                raise PermissionError(f"eval_scenarios is read-only: {name} is blocked (proposals only, never orders)")
-            return blocked
-        raise AttributeError(name)
 
 
 @dataclass
@@ -229,6 +194,17 @@ def build_live_broker_world(*, llm, tmp_dir: Path, settings, real_products: bool
     return LiveBrokerWorld(runtime=runtime, registry=registry)
 
 
+async def read_account(world) -> dict | None:
+    """Equity and the shares held per symbol, read from the broker before the turns: what the
+    account-based expectations compare against. None if the broker cannot be read."""
+    try:
+        account, positions = await world.broker.account(), await world.broker.positions()
+    except Exception as exc:  # noqa: BLE001 - the scenarios still run; those expectations then fail loudly
+        log.warning("account not readable (%s); account-based expectations cannot be checked", type(exc).__name__)
+        return None
+    return {"equity": str(account.equity), "positions": {s: str(p.qty_available) for s, p in positions.items()}}
+
+
 # --- files ------------------------------------------------------------------------------------------------
 
 
@@ -251,16 +227,27 @@ def load_results(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _key(row: dict) -> tuple:
-    return row.get("id"), row.get("llm"), row.get("model")
+def config_key(row: dict) -> tuple:
+    """What identifies a result line: the scenario and the configuration it ran under. A line
+    written before a field existed counts as fake broker, fake products, unknown budget, no mode."""
+    return (row.get("id"), row.get("llm"), row.get("model"), row.get("broker", "fake"), row.get("products", "fake"),
+            row.get("time_budget_sec"), row.get("mode"))
+
+
+def same_config(row: dict, labels: dict) -> bool:
+    """Did this line run under the configuration `labels` describes? The mode is compared only
+    when both sides have one (the old backend reports none)."""
+    if config_key({**row, "id": None, "mode": None}) != config_key({**labels, "id": None, "mode": None}):
+        return False
+    return row.get("mode") is None or labels.get("mode") is None or row["mode"] == labels["mode"]
 
 
 def merge_results(existing: list[dict], new: list[dict], order: list[str]) -> list[dict]:
-    """`existing` with the lines for the same (id, llm, model) replaced by `new`, in scenario order."""
-    fresh = {_key(r) for r in new}
-    rows = [r for r in existing if _key(r) not in fresh] + list(new)
+    """`existing` with the lines of the same `config_key` replaced by `new`, in scenario order."""
+    fresh = {config_key(r) for r in new}
+    rows = [r for r in existing if config_key(r) not in fresh] + list(new)
     position = {sid: i for i, sid in enumerate(order)}
-    return sorted(rows, key=lambda r: (position.get(r.get("id"), len(order)), str(r.get("llm")), str(r.get("model"))))
+    return sorted(rows, key=lambda r: (position.get(r.get("id"), len(order)), str(config_key(r)[1:])))
 
 
 def write_results(path: Path, rows: list[dict]) -> None:
@@ -279,10 +266,12 @@ def write_results(path: Path, rows: list[dict]) -> None:
 
 
 async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict,
-                       retry_log: ProviderRetryLog | None = None) -> dict:
-    """One fresh session, the optional mandate saved first, one turn; returns the result line."""
-    base = {"id": scenario["id"], "category": scenario["category"], "lang": scenario["lang"], **labels,
-            "time_budget_sec": float(world.runtime.settings.chat_time_budget_sec),
+                       retry_log: ProviderRetryLog | None = None, account: dict | None = None) -> dict:
+    """One fresh session, the optional mandate saved first, one turn; returns the result line.
+    `labels` is the run's configuration (llm, provider, model, broker, products, the expected turn
+    limits); what the `finish` event reports about the turn's mode and limits replaces the expectation."""
+    base = {"id": scenario["id"], "category": scenario["category"], "lang": scenario["lang"],
+            **{k: v for k, v in labels.items() if v is not None},
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if labels["broker"] == "live" and scenario.get("web_pages"):
         return {**base, "status": "skipped",
@@ -299,6 +288,13 @@ async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict
     retries = {kind: count - retries_before.get(kind, 0) for kind, count in retries_now.items()
                if count > retries_before.get(kind, 0)}
     row = dict(base, status="ok")
+    finish = next((e for e in reversed(events) if e.get("type") == "finish"), {})
+    if finish.get("mode") is not None:
+        row["mode"] = str(finish["mode"])
+    if finish.get("max_rounds") is not None:
+        row["max_rounds"] = int(finish["max_rounds"])
+    if finish.get("time_budget_sec") is not None:
+        row["time_budget_sec"] = float(finish["time_budget_sec"])
     if any(e.get("type") == "error" for e in events):
         row.update(status="llm_error", error_kind=errors[-1] if errors else "error_event")
     elif answer.startswith(_BUDGET_PREFIXES):
@@ -308,7 +304,10 @@ async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict
     if retries:
         row["provider_retries"] = retries
     proposals = [e["ticket"] for e in events if e.get("type") == "data-trade-proposal"]
-    row["metrics"] = scenario_metrics(scenario, events, answer, llm_calls=counter.calls - calls_before)
+    metrics = scenario_metrics(scenario, events, answer, llm_calls=counter.calls - calls_before, account=account)
+    if labels.get("provider") == "demo":  # DemoLLM counts characters, not tokens
+        metrics["usage"] = {"estimated": True, **metrics["usage"]}
+    row["metrics"] = metrics
     row["answer"] = answer
     row["ticket"] = ticket_summary(proposals[-1] if proposals else None)
     return row
@@ -334,7 +333,7 @@ def _progress(index: int, total: int, row: dict) -> str:
 @dataclass
 class Report:
     out: Path
-    rows: list[dict] = field(default_factory=list)  # every line in `out` for this llm and model
+    rows: list[dict] = field(default_factory=list)  # every line in `out` for this configuration
     ran: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # done before (--resume)
     broker_submits: int | None = None  # submits the fake broker saw (must be 0); None with --live-broker
@@ -348,11 +347,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--scenario", action="append", default=[], metavar="ID", help="run only this id (repeatable)")
     ap.add_argument("--delay", type=float, default=None, help="seconds between scenarios (default 15 live, 0 demo)")
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--resume", action="store_true", help="skip ids already done for the same llm and model")
+    ap.add_argument("--resume", action="store_true", help="skip ids already done for the same configuration")
     ap.add_argument("--real-products", action="store_true", help="load the real product database (slow)")
-    ap.add_argument("--live-broker", action="store_true", help="read the real paper account (never places orders)")
+    ap.add_argument("--live-broker", action="store_true",
+                    help="read the real paper account (never places orders); its result lines quote that account")
     ap.add_argument("--time-budget", type=float, default=None, metavar="SEC",
-                    help="seconds one turn may take (default: the configured CHAT_TIME_BUDGET_SEC, 90)")
+                    help="seconds one turn may take (default: the configured turn budget)")
     ap.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -390,33 +390,43 @@ def _resolve_llm(args) -> tuple[Any, str, str, Any]:
 
 async def run_async(args) -> Report:
     scenarios = load_scenarios(args.scenarios)
+    order = [s["id"] for s in scenarios]
     selected = _select(scenarios, args.scenario)
     inner, provider, model, llm_settings = _resolve_llm(args)
-    broker_settings = None
+    broker_settings, overrides = None, {}
     if args.live_broker:
         broker_settings = get_settings()
         if not (broker_settings.alpaca_api_key_id and broker_settings.alpaca_api_secret_key):
             raise UsageError("--live-broker needs ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY (paper keys) in .env. "
                              "Nothing was run.")
+        if args.time_budget:
+            broker_settings = broker_settings.model_copy(update=budget_overrides(type(broker_settings), args.time_budget))
+        limits = effective_limits(broker_settings)
+    else:
+        overrides = world_overrides(llm_settings, args.time_budget)
+        limits = effective_limits(Settings(_env_file=None, **{"llm_provider": "stub", **overrides}))
+    labels = {"llm": args.llm, "provider": provider, "model": model,
+              "broker": "live" if args.live_broker else "fake", "products": "real" if args.real_products else "fake",
+              **limits}
     out = Path(args.out)
     existing = load_results(out)
-    done = {r["id"] for r in existing
-            if args.resume and r.get("llm") == args.llm and r.get("model") == model and r.get("status") == "ok"}
+    done = {r["id"] for r in existing if args.resume and r.get("status") == "ok" and same_config(r, labels)}
     report = Report(out=out, skipped=[s["id"] for s in selected if s["id"] in done])
     todo = [s for s in selected if s["id"] not in done]
     if args.limit > 0:
         todo = todo[: args.limit]
-    labels = {"llm": args.llm, "provider": provider, "model": model,
-              "broker": "live" if args.live_broker else "fake", "products": "real" if args.real_products else "fake"}
+    config = (f"{args.llm}/{model}, broker {labels['broker']}, products {labels['products']}, "
+              f"turn budget {limits['time_budget_sec']:g}s, {limits['max_rounds']} rounds"
+              + (f", mode {limits['mode']}" if limits["mode"] else ""))
     if report.skipped:
-        print(f"Resume: {len(report.skipped)} scenario(s) already done for {args.llm}/{model}: {', '.join(report.skipped)}")
+        print(f"Resume: {len(report.skipped)} scenario(s) already done for this configuration: {', '.join(report.skipped)}")
     if args.llm == "live" and todo:
         low, high = (n * len(todo) for n in LIVE_REQUESTS_PER_SCENARIO)
         print(f"Live run: {len(todo)} scenario(s) with {provider}/{model}, {args.delay:g}s apart.")
         print(f"Estimated model requests: {low}-{high} ({LIVE_REQUESTS_PER_SCENARIO[0]}-{LIVE_REQUESTS_PER_SCENARIO[1]} "
               "per scenario; retries after a 429 and --real-products add more). The Gemini free tier allows about "
               "20 a day and 5 a minute: run a few at a time and continue with --resume. If turns end as "
-              "budget_exhausted after 429 retries, try --delay 65 --time-budget 240.")
+              "budget_exhausted after 429 retries, try --delay 65 and a larger --time-budget.")
 
     new_rows: list[dict] = []
     if todo:
@@ -427,26 +437,20 @@ async def run_async(args) -> Report:
         tmp_dir = Path(tempfile.mkdtemp(prefix="finagent-eval-"))
         try:
             if args.live_broker:
-                if args.time_budget:
-                    broker_settings = broker_settings.model_copy(update={"chat_time_budget_sec": args.time_budget})
                 world = build_live_broker_world(llm=counter, tmp_dir=tmp_dir, settings=broker_settings,
                                                 real_products=args.real_products)
             else:
                 pages = {url: text for s in scenarios for url, text in (s.get("web_pages") or {}).items()}
-                budget = {name: getattr(llm_settings, name) for name in
-                          ("chat_time_budget_sec", "chat_max_rounds", "ticket_ttl_sec", "llm_timeout_sec")
-                          } if llm_settings is not None else {}
-                if args.time_budget:
-                    budget["chat_time_budget_sec"] = args.time_budget
                 world = build_fake_world(llm=counter, tmp_dir=tmp_dir, real_products=args.real_products,
-                                         web_pages=pages, settings_over=budget)
+                                         web_pages=pages, settings_over=overrides)
             try:
+                account = await read_account(world)
                 for index, scenario in enumerate(todo, 1):
                     if index > 1 and args.delay > 0:
                         await asyncio.sleep(args.delay)
-                    row = await run_scenario(world, counter, scenario, labels, retry_log)
+                    row = await run_scenario(world, counter, scenario, labels, retry_log, account)
                     new_rows.append(row)
-                    write_results(out, merge_results(existing, new_rows, [s["id"] for s in scenarios]))
+                    write_results(out, merge_results(existing, new_rows, order))
                     print(_progress(index, len(todo), row), flush=True)
             finally:
                 if isinstance(world.broker, FakeBroker):
@@ -462,10 +466,11 @@ async def run_async(args) -> Report:
         print("Nothing to run.")
 
     report.ran = [r["id"] for r in new_rows]
-    merged = merge_results(existing, new_rows, [s["id"] for s in scenarios])
-    report.rows = [r for r in merged if r.get("llm") == args.llm and r.get("model") == model]
+    # the mode a turn reported is the configuration's mode from here on (the old backend reports none)
+    shown = {**labels, "mode": next((r["mode"] for r in new_rows if r.get("mode")), labels["mode"])}
+    report.rows = [r for r in merge_results(existing, new_rows, order) if same_config(r, shown)]
     report.table = summary_table(report.rows)
-    print(f"\nResults for {args.llm}/{model} in {out} ({len(report.ran)} run now, {len(report.rows)} line(s) in all):")
+    print(f"\nResults for {config} in {out} ({len(report.ran)} run now, {len(report.rows)} line(s) in all):")
     print(report.table)
     return report
 

@@ -13,7 +13,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
-    sys.path.insert(0, str(ROOT / "scripts"))
+    sys.path.append(str(ROOT / "scripts"))  # at the end: scripts/trace.py must never shadow the stdlib
 
 import _eval_metrics as em  # noqa: E402
 import _fakeworld as fw  # noqa: E402
@@ -24,7 +24,8 @@ from finagent.config import Settings  # noqa: E402
 from finagent.trading.models import Mandate  # noqa: E402
 
 SCENARIOS = ROOT / "data" / "eval" / "scenarios.jsonl"
-SCRIPTS = ["eval_scenarios.py", "_eval_metrics.py", "_fakeworld.py", "_demo_llm.py", "_demo_text.py"]
+SCRIPTS = ["eval_scenarios.py", "_eval_metrics.py", "_eval_text.py", "_eval_support.py", "_fakeworld.py",
+           "_demo_llm.py", "_demo_text.py"]
 
 
 def read_jsonl(path) -> list[dict]:
@@ -68,6 +69,13 @@ def test_scenarios_cover_the_required_cases():
     assert symbol in denied["message"] and symbol in denied["expect"]["symbols_forbidden"]
     assert by_category["vague"]["expect"]["max_unsupported_numbers"] == 0
     assert by_category["liquidate"]["expect"]["sides_allowed"] == ["sell"]
+    # each scenario's expectations check its own point
+    assert by_category["liquidate"]["expect"]["sells_cover_all_positions"] is True
+    sector = by_category["sector"]["expect"]
+    assert sector["max_buy_pct_of_equity"] == 10 and "max_buy_usd" not in sector  # the 10% cap, not the budget
+    assert by_category["sector"]["mandate"]["max_position_pct"] == "10"
+    rebalance = by_category["rebalance"]["expect"]
+    assert rebalance["sides_required"] == ["sell", "buy"] and {"BND", "AGG"} <= set(rebalance["buys_any_of"])
 
 
 # --- the runner, demo mode ------------------------------------------------------------------------------
@@ -100,8 +108,22 @@ def test_demo_run_of_every_scenario_writes_10_lines_and_never_submits(tmp_path, 
     assert by_id["korean_etf_core"]["metrics"]["answer_lang"] == "ko"
     assert by_id["injection_web_page"]["metrics"]["tool_calls"] == {"fetch_source": 1}
     assert by_id["etf_core"]["metrics"]["llm_calls"] == 5
+    # the scripted model's token counts are estimates, and marked as such
+    assert all(r["metrics"]["usage"].get("estimated") is True for r in rows)
+    # every line records the configuration it ran under
+    limits = ev.effective_limits(Settings(_env_file=None, llm_provider="stub"))
+    for row in rows:
+        assert (row["broker"], row["products"]) == ("fake", "fake")
+        assert row["time_budget_sec"] == limits["time_budget_sec"] and row["max_rounds"] == limits["max_rounds"]
+    # the tightened expectations hold for what the scripted model really proposed
+    assert {leg["symbol"] for leg in by_id["sell_everything"]["ticket"]["legs"]} == {"VTI", "AAPL", "BND"}
+    assert [leg["qty"] for leg in by_id["sell_everything"]["ticket"]["legs"]] == ["40", "30", "100"]
+    sides = {leg["symbol"]: leg["side"] for leg in by_id["rebalance_60_40"]["ticket"]["legs"]}
+    assert sides == {"VTI": "sell", "BND": "buy"}
+    assert float(by_id["tech_tilt"]["metrics"]["buy_cost_usd"]) <= 12810.0
     printed = capsys.readouterr().out
     assert all(r["id"] in printed for r in rows) and "TOTAL" in printed
+    assert "citation coverage macro" in printed and "micro" in printed and em.CITATION_DEFINITION in printed
     assert printed == printed.encode("utf-8", "replace").decode("utf-8")
 
 
@@ -330,12 +352,61 @@ def test_provider_retries_are_counted_per_scenario(tmp_path, monkeypatch, capsys
     assert not [h for h in logging.getLogger("finagent.llm").handlers if isinstance(h, ev.ProviderRetryLog)]
 
 
-def test_time_budget_flag_sets_the_turn_budget_and_is_recorded(tmp_path):
+def test_time_budget_flag_sets_the_turn_budget_and_is_part_of_the_results_key(tmp_path):
     out = tmp_path / "results.jsonl"
+    default = ev.effective_limits(Settings(_env_file=None, llm_provider="stub"))["time_budget_sec"]
     assert ev.parse_args([]).time_budget is None
     ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--time-budget", "240", "--out", str(out)]))
     (row,) = read_jsonl(out)
-    assert row["time_budget_sec"] == 240.0
+    assert row["time_budget_sec"] == 240.0 != default
+    # the default budget is another configuration: its line is added, the 240 s line is kept
+    plain = ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--out", str(out)]))
+    rows = read_jsonl(out)
+    assert sorted(r["time_budget_sec"] for r in rows) == sorted([240.0, default])
+    assert [r["time_budget_sec"] for r in plain.rows] == [default]  # the report shows this configuration only
+    # --resume: done for 240 s is not done for the default budget, and the other way round
+    again = ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--time-budget", "240", "--resume",
+                                  "--out", str(out)]))
+    assert again.ran == [] and again.skipped == ["options_out_of_scope"]
+    other = ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--time-budget", "777", "--resume",
+                                  "--out", str(out)]))
+    assert other.ran == ["options_out_of_scope"] and len(read_jsonl(out)) == 3
+
+
+def test_lines_of_another_broker_or_product_set_are_neither_skipped_nor_overwritten(tmp_path):
+    out = tmp_path / "results.jsonl"
     ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--out", str(out)]))
-    (row,) = read_jsonl(out)
-    assert row["time_budget_sec"] == Settings(_env_file=None).chat_time_budget_sec
+    (fake_row,) = read_jsonl(out)
+    live_broker = {**fake_row, "broker": "live", "answer": "equity figures of the real paper account"}
+    real_products = {**fake_row, "products": "real", "answer": "from the real product database"}
+    legacy = {k: v for k, v in fake_row.items() if k not in ("broker", "products", "time_budget_sec", "max_rounds")}
+    legacy["model"] = "an-older-run"
+    out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in (live_broker, real_products, legacy)),
+                   encoding="utf-8")
+    report = ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--resume", "--out", str(out)]))
+    assert report.ran == ["options_out_of_scope"] and report.skipped == []  # none of them is this configuration
+    rows = read_jsonl(out)
+    assert len(rows) == 4 and live_broker in rows and real_products in rows and legacy in rows
+    assert [(r["broker"], r["products"]) for r in report.rows] == [("fake", "fake")]
+
+
+def test_account_based_expectations_get_the_seeded_account(tmp_path):
+    scenarios = tmp_path / "scenarios.jsonl"
+    rows = [
+        {"id": "all", "lang": "en", "category": "liquidate", "message": "Sell everything in my account.",
+         "expect": {"ticket": True, "sells_cover_all_positions": True}},
+        {"id": "not_all", "lang": "en", "category": "x", "message": "Buy $1,000 of VOO.",
+         "expect": {"sells_cover_all_positions": True, "max_buy_pct_of_equity": 0.25}},
+        {"id": "capped", "lang": "en", "category": "x", "message": "Buy $1,000 of VOO.",
+         "expect": {"max_buy_pct_of_equity": 1}},
+    ]
+    scenarios.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    out = tmp_path / "results.jsonl"
+    ev.run(ev.parse_args(["--scenarios", str(scenarios), "--out", str(out)]))
+    covered, not_covered, capped = read_jsonl(out)
+    assert covered["metrics"]["expect_pass"] is True
+    failures = not_covered["metrics"]["expect_failures"]
+    assert len(failures) == 2
+    assert any("no sell leg for AAPL" in f and "BND" in f and "VTI" in f for f in failures)
+    assert any("0.25% of equity $128,100.00" in f for f in failures)  # a quarter percent is $320.25
+    assert capped["metrics"]["expect_pass"] is True                   # $610.01 is within 1% ($1,281.00)
