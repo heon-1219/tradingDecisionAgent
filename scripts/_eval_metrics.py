@@ -325,6 +325,15 @@ def totals(rows: list[dict]) -> dict:
     }
 
 
+_RETRY_LABELS = {"rate_limited_429": "429", "server_error_5xx": "5xx", "timeout_or_connection": "timeout"}
+
+
+def retries_text(row: dict) -> str:
+    """The provider retries of a result line, e.g. "5xx x1, 429 x2" (empty without any)."""
+    retries = row.get("provider_retries") or {}
+    return ", ".join(f"{_RETRY_LABELS.get(kind, kind)} x{count}" for kind, count in retries.items())
+
+
 def _pct(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.0f}%"
 
@@ -347,7 +356,8 @@ def summary_table(rows: list[dict]) -> str:
         seconds = f"{(m.get('elapsed_ms') or 0) / 1000:.1f}"
         verdict = "PASS" if m.get("expect_pass") else "FAIL: " + "; ".join(m.get("expect_failures") or [])
         if row.get("status") != "ok":
-            verdict = f"({row.get('error_kind') or row.get('status')})"
+            retries = retries_text(row)
+            verdict = f"({row.get('error_kind') or row.get('status')}{'; retries: ' + retries if retries else ''})"
         lines.append(
             f"{row['id']:<22} {row.get('status', '?'):<16} {m.get('tickets_proposed', 0):>3} {legs:>10} "
             f"{_pct(m.get('accepted_share')):>5} {_pct(m.get('citation_coverage')):>5} "

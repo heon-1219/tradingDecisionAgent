@@ -20,13 +20,19 @@ anything, and the run fails if the fake broker saw a submit.
 --real-products     use the real product database and Q&A stack (slow to load) instead of the tiny one.
 --live-broker       read the real Alpaca PAPER account and market data instead of the fake broker.
                     Reads only: the broker is wrapped so that order writes raise.
+--time-budget SEC   seconds one turn may take (default: the configured CHAT_TIME_BUDGET_SEC, 90).
+                    A rate-limited key spends much of a turn waiting on 429 retries; a larger budget
+                    lets such a turn finish. The value in effect is recorded on every line.
 
 Results are one JSON line per scenario, keyed by (id, llm, model): a run replaces the lines it
 re-ran and keeps the others, so partial runs add up. A scenario whose turn ended in a model error
 (a free-tier 429 or 503 shows up as an `error` event) is recorded with status `llm_error`, left out
 of the averages and retried by `--resume`; one that ran out of the turn budget is `budget_exhausted`
-and treated the same way. A live scenario costs roughly 4-8 model requests; the Gemini free tier
-allows about 20 a day and 5 a minute, so run a few scenarios at a time and `--resume`.
+and treated the same way. The 429s and 5xx that the model client retried inside a step are counted
+per line as `provider_retries`. A live scenario costs roughly 4-8 model requests; the Gemini free
+tier allows about 20 a day and 5 a minute, so run a few scenarios at a time and `--resume`. On such
+a key a turn with more than 5 model steps has to wait out 429s: give it room with `--delay 65
+--time-budget 240`.
 """
 from __future__ import annotations
 
@@ -50,7 +56,7 @@ for _path in (ROOT / "src", pathlib.Path(__file__).resolve().parent):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from _eval_metrics import scenario_metrics, summary_table, ticket_summary  # noqa: E402
+from _eval_metrics import retries_text, scenario_metrics, summary_table, ticket_summary  # noqa: E402
 from _fakeworld import DemoLLM, FakeBroker, build_fake_world, build_products  # noqa: E402
 from finagent.agent.llm import make_llm  # noqa: E402
 from finagent.app_state import ChatRuntime  # noqa: E402
@@ -132,6 +138,31 @@ class CountingLLM:
 
     def start(self, system, tools, user_text):
         return _CountingConversation(self, self.inner.start(system, tools, user_text))
+
+
+class ProviderRetryLog(logging.Handler):
+    """Counts the model client's retry warnings (logger `finagent.llm`): a 429 or a 5xx that the
+    client retried inside one step never reaches the event stream, but it is why a turn ran out of
+    its budget. Only the kind is counted; the messages are not kept."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.counts: dict[str, int] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()  # also right when a record factory has pre-formatted it
+        except Exception:  # noqa: BLE001 - a malformed record is not a retry
+            return
+        if "retrying" not in message:
+            return
+        if message.startswith("429"):
+            kind = "rate_limited_429"
+        elif message.startswith("InternalServerError"):
+            kind = "server_error_5xx"
+        else:
+            kind = "timeout_or_connection"
+        self.counts[kind] = self.counts.get(kind, 0) + 1
 
 
 # --- the live paper account, reads only -------------------------------------------------------------------
@@ -253,9 +284,11 @@ def write_results(path: Path, rows: list[dict]) -> None:
 # --- one scenario -----------------------------------------------------------------------------------------
 
 
-async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict) -> dict:
+async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict,
+                       retry_log: ProviderRetryLog | None = None) -> dict:
     """One fresh session, the optional mandate saved first, one turn; returns the result line."""
     base = {"id": scenario["id"], "category": scenario["category"], "lang": scenario["lang"], **labels,
+            "time_budget_sec": float(world.runtime.settings.chat_time_budget_sec),
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     if labels["broker"] == "live" and scenario.get("web_pages"):
         return {**base, "status": "skipped",
@@ -265,8 +298,12 @@ async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict
         world.sessions.save_mandate(session["id"], Mandate.model_validate(scenario["mandate"]))
     events: list[dict] = []
     calls_before, errors_before = counter.calls, len(counter.errors)
+    retries_before = dict(retry_log.counts) if retry_log is not None else {}
     answer = await world.agent.run_turn(session["id"], scenario["message"], events.append)
     errors = counter.errors[errors_before:]
+    retries_now = retry_log.counts if retry_log is not None else {}
+    retries = {kind: count - retries_before.get(kind, 0) for kind, count in retries_now.items()
+               if count > retries_before.get(kind, 0)}
     row = dict(base, status="ok")
     if any(e.get("type") == "error" for e in events):
         row.update(status="llm_error", error_kind=errors[-1] if errors else "error_event")
@@ -274,6 +311,8 @@ async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict
         row.update(status="budget_exhausted", error_kind=errors[-1] if errors else "turn_budget")
     if errors:
         row["llm_errors"] = errors
+    if retries:
+        row["provider_retries"] = retries
     proposals = [e["ticket"] for e in events if e.get("type") == "data-trade-proposal"]
     row["metrics"] = scenario_metrics(scenario, events, answer, llm_calls=counter.calls - calls_before)
     row["answer"] = answer
@@ -288,6 +327,8 @@ def _progress(index: int, total: int, row: dict) -> str:
     verdict = "PASS" if m["expect_pass"] else "FAIL"
     if row["status"] != "ok":
         verdict = row.get("error_kind") or row["status"]
+        if retries_text(row):
+            verdict += f" (retries: {retries_text(row)})"
     return (f"[{index}/{total}] {row['id']}: {row['status']}, ticket {m['tickets_proposed']}, "
             f"legs a/c/r {m['legs_accepted']}/{m['legs_clamped']}/{m['legs_rejected']}, "
             f"{m['llm_calls']} LLM call(s), {(m['elapsed_ms'] or 0) / 1000:.1f}s, {verdict}")
@@ -316,6 +357,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--resume", action="store_true", help="skip ids already done for the same llm and model")
     ap.add_argument("--real-products", action="store_true", help="load the real product database (slow)")
     ap.add_argument("--live-broker", action="store_true", help="read the real paper account (never places orders)")
+    ap.add_argument("--time-budget", type=float, default=None, metavar="SEC",
+                    help="seconds one turn may take (default: the configured CHAT_TIME_BUDGET_SEC, 90)")
     ap.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -378,28 +421,36 @@ async def run_async(args) -> Report:
         print(f"Live run: {len(todo)} scenario(s) with {provider}/{model}, {args.delay:g}s apart.")
         print(f"Estimated model requests: {low}-{high} ({LIVE_REQUESTS_PER_SCENARIO[0]}-{LIVE_REQUESTS_PER_SCENARIO[1]} "
               "per scenario; retries after a 429 and --real-products add more). The Gemini free tier allows about "
-              "20 a day and 5 a minute: run a few at a time and continue with --resume.")
+              "20 a day and 5 a minute: run a few at a time and continue with --resume. If turns end as "
+              "budget_exhausted after 429 retries, try --delay 65 --time-budget 240.")
 
     new_rows: list[dict] = []
     if todo:
         counter = CountingLLM(inner)
+        retry_log = ProviderRetryLog()
+        llm_logger = logging.getLogger("finagent.llm")
+        llm_logger.addHandler(retry_log)
         tmp_dir = Path(tempfile.mkdtemp(prefix="finagent-eval-"))
         try:
             if args.live_broker:
+                if args.time_budget:
+                    broker_settings = broker_settings.model_copy(update={"chat_time_budget_sec": args.time_budget})
                 world = build_live_broker_world(llm=counter, tmp_dir=tmp_dir, settings=broker_settings,
                                                 real_products=args.real_products)
             else:
                 pages = {url: text for s in scenarios for url, text in (s.get("web_pages") or {}).items()}
                 budget = {name: getattr(llm_settings, name) for name in
                           ("chat_time_budget_sec", "chat_max_rounds", "ticket_ttl_sec", "llm_timeout_sec")
-                          } if llm_settings is not None else None
+                          } if llm_settings is not None else {}
+                if args.time_budget:
+                    budget["chat_time_budget_sec"] = args.time_budget
                 world = build_fake_world(llm=counter, tmp_dir=tmp_dir, real_products=args.real_products,
                                          web_pages=pages, settings_over=budget)
             try:
                 for index, scenario in enumerate(todo, 1):
                     if index > 1 and args.delay > 0:
                         await asyncio.sleep(args.delay)
-                    row = await run_scenario(world, counter, scenario, labels)
+                    row = await run_scenario(world, counter, scenario, labels, retry_log)
                     new_rows.append(row)
                     write_results(out, merge_results(existing, new_rows, [s["id"] for s in scenarios]))
                     print(_progress(index, len(todo), row), flush=True)
@@ -408,6 +459,7 @@ async def run_async(args) -> Report:
                     report.broker_submits = world.broker.submits
                 await world.close()
         finally:
+            llm_logger.removeHandler(retry_log)
             shutil.rmtree(tmp_dir, ignore_errors=True)
         if report.broker_submits:
             raise RuntimeError(f"eval_scenarios must never submit orders, but the fake broker saw "

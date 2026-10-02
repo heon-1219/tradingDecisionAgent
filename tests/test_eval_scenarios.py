@@ -479,3 +479,66 @@ def test_live_broker_reads_through_a_read_only_broker_and_skips_fake_page_scenar
     assert len(made) == 1 and made[0].submits == 0
     assert report.broker_submits is None  # not a FakeBroker world: nothing to count, writes are blocked instead
     assert not (tmp_path / "never-used.db").exists()  # the app DB went to the run's own scratch directory
+
+
+# --- provider retries and the turn budget ----------------------------------------------------------------
+
+
+class _RateLimitedLLM:
+    """A model client whose every step logs the client's 429 and 503 retry warnings, then fails."""
+
+    name = "gemini"
+    model = "gemini-test"
+
+    def start(self, system, tools, user_text):
+        return self
+
+    async def step(self):
+        import logging
+
+        log = logging.getLogger("finagent.llm")
+        log.warning("%s (%s); retrying in %.1fs (%d/%d)", "InternalServerError", 503, 2.0, 1, 2)
+        log.warning("429 rate limited; retrying in %.1fs (%d/%d)", 4.0, 2, 4)
+        log.warning("429 rate limited; retrying in %.1fs (%d/%d)", 8.0, 3, 4)
+        return Turn("LLM call error: RateLimitError: Error code: 429 - quota", [], "error")
+
+    def add_tool_results(self, results):
+        pass
+
+    def add_user(self, text):
+        pass
+
+    def add_assistant(self, text):
+        pass
+
+    def transcript(self):
+        return []
+
+
+def test_provider_retries_are_counted_per_scenario(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ev, "get_settings", lambda: _settings(tmp_path, llm_provider="gemini", gemini_api_key="k" * 20,
+                                                               llm_model="gemini-test"))
+    monkeypatch.setattr(ev, "make_llm", lambda settings: _RateLimitedLLM())
+    out = tmp_path / "results.jsonl"
+    report = ev.run(ev.parse_args(["--llm", "live", "--scenario", "etf_core", "--scenario", "vague", "--delay", "0",
+                                   "--out", str(out)]))
+    first, second = read_jsonl(out)
+    for row in (first, second):
+        assert row["status"] == "llm_error" and row["error_kind"] == "rate_limited_429"
+        assert row["provider_retries"] == {"server_error_5xx": 1, "rate_limited_429": 2}
+    assert em.totals(report.rows)["ok"] == 0
+    assert "429 x2" in capsys.readouterr().out
+    import logging
+
+    assert not [h for h in logging.getLogger("finagent.llm").handlers if isinstance(h, ev.ProviderRetryLog)]
+
+
+def test_time_budget_flag_sets_the_turn_budget_and_is_recorded(tmp_path):
+    out = tmp_path / "results.jsonl"
+    assert ev.parse_args([]).time_budget is None
+    ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--time-budget", "240", "--out", str(out)]))
+    (row,) = read_jsonl(out)
+    assert row["time_budget_sec"] == 240.0
+    ev.run(ev.parse_args(["--scenario", "options_out_of_scope", "--out", str(out)]))
+    (row,) = read_jsonl(out)
+    assert row["time_budget_sec"] == Settings(_env_file=None).chat_time_budget_sec
