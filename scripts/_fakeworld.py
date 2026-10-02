@@ -354,10 +354,25 @@ def build_products(tmp_dir: Path | str, *, llm, real_products: bool = False) -> 
         "alpaca_api_key_id": None, "alpaca_api_secret_key": None, "app_db_path": tmp / "qa_app.db",
     })
     state = AppState.load(qa_settings, llm=llm)
+    if state.chat is not None:  # the chat runtime `load` also built is not used: release its scratch DB
+        release_sqlite(state.chat.db)
     return state.tools, state.orchestrator
 
 
 # --- the world ------------------------------------------------------------------------------------------
+
+
+def release_sqlite(*stores: Any) -> None:
+    """Close the SQLite connections of the given stores, best effort, so their files can be deleted
+    (Windows keeps an open file locked). `AppDB` has `close()`; the read-only `RDB` only has its
+    connection."""
+    for store in stores:
+        closer = getattr(store, "close", None) or getattr(getattr(store, "_con", None), "close", None)
+        try:
+            if closer is not None:
+                closer()
+        except Exception:  # noqa: BLE001 - best effort
+            pass
 
 
 @dataclass
@@ -395,13 +410,7 @@ class FakeWorld:
     async def close(self) -> None:
         """Shut the runtime down and release the SQLite files, so `tmp_dir` can be removed."""
         await self.runtime.shutdown()
-        for owner in (self.runtime.db, getattr(self.registry, "rdb", None)):
-            connection = getattr(owner, "_con", None)
-            try:
-                if connection is not None:
-                    connection.close()
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+        release_sqlite(self.runtime.db, getattr(self.registry, "rdb", None))
 
 
 def build_fake_world(*, llm, tmp_dir, real_products: bool = False, web_pages: dict[str, str] | None = None,

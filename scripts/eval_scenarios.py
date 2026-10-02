@@ -57,7 +57,7 @@ for _path in (ROOT / "src", pathlib.Path(__file__).resolve().parent):
         sys.path.insert(0, str(_path))
 
 from _eval_metrics import retries_text, scenario_metrics, summary_table, ticket_summary  # noqa: E402
-from _fakeworld import DemoLLM, FakeBroker, build_fake_world, build_products  # noqa: E402
+from _fakeworld import DemoLLM, FakeBroker, build_fake_world, build_products, release_sqlite  # noqa: E402
 from finagent.agent.llm import make_llm  # noqa: E402
 from finagent.app_state import ChatRuntime  # noqa: E402
 from finagent.chat.agent import fallback_text  # noqa: E402
@@ -210,13 +210,7 @@ class LiveBrokerWorld:
 
     async def close(self) -> None:
         await self.runtime.shutdown()
-        for owner in (self.runtime.db, getattr(self.registry, "rdb", None)):
-            connection = getattr(owner, "_con", None)
-            try:
-                if connection is not None:
-                    connection.close()
-            except Exception:  # noqa: BLE001 - best effort
-                pass
+        release_sqlite(self.runtime.db, getattr(self.registry, "rdb", None))
 
 
 def build_live_broker_world(*, llm, tmp_dir: Path, settings, real_products: bool) -> LiveBrokerWorld:

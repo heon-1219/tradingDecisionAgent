@@ -363,3 +363,35 @@ def test_parse_risk_report_reads_verdicts_clamps_costs_and_reason_codes():
     assert legs[1]["clamped_to"] == "BUY 45 XLK limit $280.01 day" and legs[1]["reasons"] == ["max_position_pct"]
     assert legs[2]["reasons"] == ["denied_symbol"]
     assert legs[2]["messages"] == ["NVDA is on the mandate's deny list"]
+
+
+async def test_close_releases_the_sqlite_files_so_the_scratch_directory_can_be_removed(tmp_path):
+    import shutil
+
+    scratch = tmp_path / "world"
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=scratch)
+    await turn(world, CORE)
+    assert (scratch / "app.db").is_file() and (scratch / "products.db").is_file()
+    await world.close()
+    shutil.rmtree(scratch)  # raises on Windows if a connection still holds a file
+    assert not scratch.exists()
+
+
+@pytest.mark.slow
+async def test_real_products_world_runs_the_default_flow_and_cleans_up(tmp_path):
+    """The real QA stack (about 75 s to load; needs data/store/products.db) behind the fake broker."""
+    import shutil
+
+    if not (ROOT / "data" / "store" / "products.db").is_file():
+        pytest.skip("data/store/products.db is not built")
+    scratch = tmp_path / "world"
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=scratch, real_products=True)
+    try:
+        assert isinstance(world.runtime.broker, fw.FakeBroker)
+        _sid, events, _text = await turn(world, CORE)
+        assert "screen_us_etfs" in tools(events) and len(of(events, "data-trade-proposal")) == 1
+        assert world.broker.submits == 0 and world.refused == []
+    finally:
+        await world.close()
+    shutil.rmtree(scratch)
+    assert not scratch.exists()
