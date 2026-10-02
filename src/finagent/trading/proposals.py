@@ -182,6 +182,53 @@ def canonical_hash(legs: list[OrderLeg], decisions: list[RiskDecision], ticket_i
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def decision_audit_rows(decisions: list[RiskDecision]) -> list[dict]:
+    """Each risk decision as the audit ledger records it: index, the decided leg's symbol and side,
+    the verdict, the reason *codes* (never the message text) and the estimates, money as strings."""
+    return [
+        {
+            "index": decision.index,
+            "symbol": str(decision.leg.symbol)[:20],
+            "side": str(decision.leg.side)[:8],
+            "verdict": decision.verdict,
+            "reasons": [reason.code for reason in decision.reasons],
+            "est_price": None if decision.est_price is None else str(decision.est_price),
+            "est_cost_usd": None if decision.est_cost_usd is None else str(decision.est_cost_usd),
+        }
+        for decision in decisions
+    ]
+
+
+def ticket_audit_payload(ticket: Ticket) -> dict:
+    """The ticket "as shown", for the audit ledger's `proposal` entry: id, hash, status, mandate
+    version, the three times, the cited evidence ids, the executable legs (money as strings) and
+    every decision (`decision_audit_rows`). `thesis`, `risks` and `invalidation` are model-authored
+    free text, so only the SHA-256 of their UTF-8 bytes and their length are recorded - enough to
+    prove later which text was shown, without copying it into the ledger."""
+    shown = ticket.model_dump(mode="json")
+    payload = {
+        "ticket_id": ticket.id,
+        "hash": ticket.hash,
+        "status": ticket.status.value,
+        "mandate_version": ticket.mandate_version,
+        "quote_as_of": shown["quote_as_of"],
+        "created_at": shown["created_at"],
+        "expires_at": shown["expires_at"],
+        "evidence_ids": list(ticket.evidence_ids),
+        "legs": shown["legs"],
+        "decisions": decision_audit_rows(ticket.decisions),
+    }
+    for name in ("thesis", "risks", "invalidation"):
+        text = getattr(ticket, name)
+        payload[f"{name}_sha256"] = _text_digest(text)
+        payload[f"{name}_len"] = len(text)
+    return payload
+
+
 def _executable_legs(decisions: list[RiskDecision]) -> list[OrderLeg]:
     return [decision.leg for decision in decisions if decision.verdict != "reject"]
 

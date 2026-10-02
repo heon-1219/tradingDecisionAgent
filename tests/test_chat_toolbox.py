@@ -10,6 +10,8 @@ detect SQL injection) read through the real `kb.rdb.RDB`. No network anywhere.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -22,6 +24,7 @@ import pytest
 
 from fakes_trading import FakeBroker, FakeData, make_open_order
 from finagent.agent.tools import ToolResult
+from finagent.chat.audit import args_sha256
 from finagent.chat.sessions import SessionStore
 from finagent.chat.toolbox import (
     FORBIDDEN_TOOL_NAME_RE,
@@ -1277,3 +1280,297 @@ async def test_ticket_create_validation_error_is_short_and_frees_the_turn(world,
     world.tickets.create = real_create
     ok = await world.run("propose_trades", proposal([aapl_leg()], [e1]))
     assert not ok.is_error, ok.text
+
+
+# --- audit ledger: tool calls and proposals (Task 3.6) ------------------------------------------
+
+ARG_SENTINEL = "SENTINEL-ARG-7c1f"
+OUT_SENTINEL = "SENTINEL-OUT-93ab"
+TOOL_CALL_KEYS = {"turn_id", "tool", "args_sha256", "result_sha256", "is_error", "latency_ms", "evidence_ids"}
+REJECTED_LEG = {"symbol": "ZZZZ", "side": "buy", "qty": "1", "type": "limit", "limit_price": "10"}
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical(args) -> str:
+    return json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def audit(world: World, kind: str | None = None) -> list[dict]:
+    rows = [json.loads(line) for line in world.ledger.export_jsonl(world.session_id)]
+    return [row for row in rows if kind is None or row["kind"] == kind]
+
+
+def stored_ledger_text(world: World) -> str:
+    return "\n".join(row["payload"] for row in world.db.query("SELECT payload FROM ledger"))
+
+
+async def test_tool_call_is_ledgered_with_hashes_only(world):
+    tb = world.toolbox(ledger=world.ledger)
+    args = {"symbols": ["AAPL"]}
+    out = await world.run("get_quotes", args, toolbox=tb, turn="turn-7")
+    assert not out.is_error and out.sources
+    [entry] = audit(world)
+    assert entry["kind"] == "tool_call" and entry["session_id"] == world.session_id
+    payload = entry["payload"]
+    assert set(payload) == TOOL_CALL_KEYS
+    assert payload["turn_id"] == "turn-7" and payload["tool"] == "get_quotes"
+    assert payload["is_error"] is False
+    assert payload["args_sha256"] == sha(canonical(args)) == sha('{"symbols":["AAPL"]}')
+    assert payload["result_sha256"] == sha(out.text)
+    assert payload["evidence_ids"] == [s.id for s in out.sources]
+    assert isinstance(payload["latency_ms"], int) and payload["latency_ms"] >= 0
+
+
+def test_args_hash_is_canonical():
+    assert args_sha256({"b": 1, "a": [D("1.5"), None]}) == sha('{"a":["1.5",null],"b":1}')
+    assert args_sha256({"a": [D("1.5"), None], "b": 1}) == args_sha256({"b": 1, "a": [D("1.5"), None]})
+    assert args_sha256(None) == args_sha256("not a dict") == args_sha256([1, 2]) == sha("null")
+    assert args_sha256({}) == sha("{}") != sha("null")
+
+
+async def test_failed_tool_calls_are_ledgered_as_errors(world):
+    tb = world.toolbox(ledger=world.ledger)
+    world.registry.result = RuntimeError("boom")
+    calls = [
+        ("search_products", {"query": "chips"}, "search_products"),  # the tool itself fails
+        ("no_such_tool", {"x": 1}, "unknown_tool"),
+        ("get_quotes", {"symbols": "AAPL"}, "get_quotes"),  # an argument of the wrong type
+        ("get_quotes", {}, "get_quotes"),  # a missing required argument
+        ("get_quotes", {"symbols": ["AAPL"], "bogus": 1}, "get_quotes"),  # an unknown argument
+        ("get_quotes", "AAPL", "get_quotes"),  # the arguments are not an object: hashed as null
+    ]
+    for name, args, _label in calls:
+        out = await tb.execute(world.session_id, name, args, turn_id="turn-1")
+        assert out.is_error, (name, args)
+    payloads = [row["payload"] for row in audit(world, "tool_call")]
+    assert [p["tool"] for p in payloads] == [label for _name, _args, label in calls]
+    assert all(p["is_error"] is True and set(p) == TOOL_CALL_KEYS for p in payloads)
+    assert payloads[1]["args_sha256"] == sha('{"x":1}')
+    assert payloads[-1]["args_sha256"] == sha("null")
+
+
+async def test_a_registered_tool_that_is_unavailable_keeps_its_name(world):
+    tb = world.toolbox(broker=None, ledger=world.ledger)
+    out = await tb.execute(world.session_id, "get_account", {}, turn_id="turn-1")
+    assert out.is_error and "Unknown tool" in out.text
+    [entry] = audit(world, "tool_call")
+    assert entry["payload"]["tool"] == "get_account" and entry["payload"]["is_error"] is True
+
+
+async def test_cancelled_tool_call_is_ledgered_and_still_raises(world):
+    tb = world.toolbox(ledger=world.ledger)
+
+    async def cancelled():
+        raise asyncio.CancelledError()
+
+    world.broker.account = cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await tb.execute(world.session_id, "get_account", {}, turn_id="turn-3")
+
+    async def slow():
+        await asyncio.sleep(30)
+
+    world.broker.account = slow
+    with pytest.raises(TimeoutError):  # how the agent cancels a tool at the turn's time budget
+        await asyncio.wait_for(tb.execute(world.session_id, "get_account", {}, turn_id="turn-4"), 0.01)
+
+    payloads = [row["payload"] for row in audit(world, "tool_call")]
+    assert [p["turn_id"] for p in payloads] == ["turn-3", "turn-4"]
+    for payload in payloads:
+        assert payload["tool"] == "get_account"
+        assert payload["is_error"] is True and payload["cancelled"] is True
+        assert "result_sha256" not in payload
+        assert payload["args_sha256"] == sha("{}")
+        assert payload["evidence_ids"] == []
+
+
+async def test_no_argument_or_result_text_reaches_the_ledger(world):
+    tb = world.toolbox(ledger=world.ledger)
+    world.registry.result = ToolResult(f"- [v_etf_gl] id=SMH | {OUT_SENTINEL} VanEck Semiconductor ETF")
+    out = await tb.execute(world.session_id, "search_products", {"query": f"chips {ARG_SENTINEL}"}, turn_id="t")
+    assert not out.is_error and OUT_SENTINEL in out.text
+    # error paths echo parts of the call back to the model; none of that is stored either
+    out = await tb.execute(world.session_id, f"tool_{ARG_SENTINEL}", {"q": ARG_SENTINEL}, turn_id="t")
+    assert out.is_error
+    out = await tb.execute(world.session_id, "get_quotes", {"symbols": ["AAPL"], ARG_SENTINEL: 1}, turn_id="t")
+    assert out.is_error and ARG_SENTINEL in out.text
+    out = await tb.execute(world.session_id, "get_quotes", {"symbols": [f"{ARG_SENTINEL}!"]}, turn_id="t")
+    assert ARG_SENTINEL in out.text  # a successful output that repeats the argument
+    e1 = world.add_evidence()
+    args = proposal([aapl_leg()], [e1])
+    args["thesis"] = f"{ARG_SENTINEL} thesis"
+    args["risks"] = f"{ARG_SENTINEL} risks"
+    args["invalidation"] = f"{ARG_SENTINEL} invalidation"
+    out = await tb.execute(world.session_id, "propose_trades", args, turn_id="t")
+    assert not out.is_error, out.text
+    assert len(audit(world, "tool_call")) == 5 and len(audit(world, "proposal")) == 1
+    stored = stored_ledger_text(world)
+    assert ARG_SENTINEL not in stored and OUT_SENTINEL not in stored
+    assert "VanEck" not in stored and "chips" not in stored
+
+
+class BrokenLedger:
+    def __init__(self):
+        self.calls = 0
+
+    def append(self, session_id, kind, payload):
+        self.calls += 1
+        raise RuntimeError(f"disk full {FAKE_SECRET}")
+
+
+async def test_a_failing_ledger_never_breaks_a_tool_call(world, caplog):
+    caplog.set_level(logging.DEBUG)
+    broken = BrokenLedger()
+    tb = world.toolbox(ledger=broken)
+    out = await world.run("get_quotes", {"symbols": ["AAPL"]}, toolbox=tb)
+    assert not out.is_error and "AAPL" in out.text
+    e1 = world.add_evidence()
+    out = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
+    assert not out.is_error, out.text
+    assert world.tickets.active(world.session_id) is not None
+    out = await world.run("propose_trades", proposal([REJECTED_LEG], [e1]), toolbox=tb, turn="turn-2")
+    assert not out.is_error and "every leg was rejected" in out.text.lower()
+    assert broken.calls == 5  # tool_call, proposal, tool_call, proposal_rejected, tool_call
+    assert "RuntimeError" in caplog.text  # the failure is logged by type ...
+    assert FAKE_SECRET not in caplog.text and "disk full" not in caplog.text  # ... never by message
+
+
+async def test_without_a_ledger_nothing_is_recorded(world):
+    e1 = world.add_evidence()
+    assert not (await world.run("get_quotes", {"symbols": ["AAPL"]})).is_error
+    assert not (await world.run("propose_trades", proposal([aapl_leg()], [e1]))).is_error
+    assert (await world.run("no_such_tool")).is_error
+    assert world.db.query("SELECT COUNT(*) AS n FROM ledger")[0]["n"] == 0
+
+
+async def test_proposal_is_ledgered_as_shown(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    args = proposal([aapl_leg(), REJECTED_LEG], [e1])
+    out = await world.run("propose_trades", args, toolbox=tb, turn="turn-9")
+    assert not out.is_error, out.text
+    ticket = world.tickets.active(world.session_id)
+    shown = ticket.model_dump(mode="json")
+    assert [row["kind"] for row in audit(world)] == ["proposal", "tool_call"]
+    payload = audit(world, "proposal")[0]["payload"]
+    assert payload["turn_id"] == "turn-9" and payload["source"] == "chat"
+    assert payload["ticket_id"] == ticket.id and payload["hash"] == ticket.hash
+    assert payload["status"] == "proposed" and payload["mandate_version"] == ticket.mandate_version == 1
+    for name in ("quote_as_of", "created_at", "expires_at"):
+        assert payload[name] == shown[name]
+    assert payload["evidence_ids"] == [e1]
+    # the executable legs, money as strings
+    assert payload["legs"] == shown["legs"] and len(payload["legs"]) == 1
+    assert payload["legs"][0]["qty"] == "10" and payload["legs"][0]["limit_price"] == "200.00"
+    # every decision, rejects included: codes and numbers, never the message text
+    accepted, rejected = payload["decisions"]
+    assert accepted == {
+        "index": 0, "symbol": "AAPL", "side": "buy", "verdict": "accept",
+        "reasons": [r.code for r in ticket.decisions[0].reasons],
+        "est_price": shown["decisions"][0]["est_price"],
+        "est_cost_usd": shown["decisions"][0]["est_cost_usd"],
+    }
+    assert isinstance(accepted["est_cost_usd"], str) and D(accepted["est_cost_usd"]) == D("2000")
+    assert rejected["symbol"] == "ZZZZ" and rejected["verdict"] == "reject"
+    assert rejected["reasons"] == [r.code for r in ticket.decisions[1].reasons] and rejected["reasons"]
+    # model-authored free text: hash and length only
+    for name in ("thesis", "risks", "invalidation"):
+        text = getattr(ticket, name)
+        assert payload[f"{name}_sha256"] == sha(text) and payload[f"{name}_len"] == len(text)
+        assert name not in payload
+    stored = stored_ledger_text(world)
+    for text in ("Services growth", "Regulatory pressure", "Services revenue growth below"):
+        assert text not in stored
+    for decision in ticket.decisions:
+        for reason in decision.reasons:
+            assert reason.message not in stored
+    assert audit(world, "tool_call")[0]["payload"]["turn_id"] == "turn-9"
+
+
+async def test_all_rejected_proposal_is_ledgered_as_proposal_rejected(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    out = await world.run("propose_trades", proposal([REJECTED_LEG], [e1]), toolbox=tb, turn="turn-5")
+    assert not out.is_error and world.tickets.active(world.session_id) is None
+    assert [row["kind"] for row in audit(world)] == ["proposal_rejected", "tool_call"]
+    payload = audit(world, "proposal_rejected")[0]["payload"]
+    assert payload["turn_id"] == "turn-5" and payload["reason"] == "all_legs_rejected"
+    assert "ticket_id" not in payload and "hash" not in payload
+    assert payload["mandate_version"] == 1 and payload["evidence_ids"] == [e1]
+    [decision] = payload["decisions"]
+    assert decision["symbol"] == "ZZZZ" and decision["side"] == "buy" and decision["verdict"] == "reject"
+    assert decision["reasons"] and all(re.fullmatch(r"[a-z_]+", code) for code in decision["reasons"])
+    assert "Services growth" not in stored_ledger_text(world)
+
+
+def test_every_risk_reason_code_survives_the_ledger_redaction(world):
+    """`reasons` is a list of codes, and in a list the ledger redacts the item after anything that
+    looks like a credential header name. No risk code may look like one (a code containing "api",
+    "token" or "secret" would blank its neighbour in the audit record)."""
+    import ast
+    import inspect
+
+    from finagent.trading import risk
+
+    codes: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(risk))):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name in ("block", "warn", "_shrink", "RiskReason"):
+            for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+                        and re.fullmatch(r"[a-z][a-z0-9_]*", arg.value):
+                    codes.add(arg.value)
+    assert {"denied_symbol", "max_position_pct", "asset_not_tradable", "price_band"} <= codes
+    ordered = sorted(codes)
+    world.ledger.append(world.session_id, "proposal_rejected", {"decisions": [{"reasons": ordered}]})
+    world.ledger.append(world.session_id, "proposal_rejected", {"decisions": [{"reasons": ordered[::-1]}]})
+    stored = [row["payload"]["decisions"][0]["reasons"] for row in audit(world, "proposal_rejected")]
+    assert stored == [ordered, ordered[::-1]]
+
+
+async def test_refused_proposals_are_ledgered_with_a_reason(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    # propose_trades' own argument validation (here: an evidence id this session never produced)
+    bad = await world.run("propose_trades", proposal([aapl_leg()], ["E99"]), toolbox=tb, turn="t1")
+    assert bad.is_error
+    # the ticket store refuses the ticket
+    real_create = world.tickets.create
+
+    def failing(*args, **kwargs):
+        raise ValueError(f"decisions[0] failed round-trip validation: {FAKE_SECRET}")
+
+    world.tickets.create = failing
+    refused = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb, turn="t1")
+    assert refused.is_error and "could not be created" in refused.text
+    world.tickets.create = real_create
+    # the one-proposal-per-turn rule
+    ok = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb, turn="t1")
+    assert not ok.is_error, ok.text
+    again = await world.run("propose_trades", proposal([aapl_leg(qty="5")], [e1]), toolbox=tb, turn="t1")
+    assert again.is_error
+    rejected = [row["payload"] for row in audit(world, "proposal_rejected")]
+    assert [p["reason"] for p in rejected] == [
+        "invalid_arguments", "ticket_validation_failed", "one_proposal_per_turn",
+    ]
+    assert all("ticket_id" not in p for p in rejected)
+    assert len(audit(world, "proposal")) == 1 and len(audit(world, "tool_call")) == 4
+    stored = stored_ledger_text(world)
+    assert FAKE_SECRET not in stored and "decisions[0]" not in stored and "E99" not in stored
+
+
+async def test_a_broker_failure_during_a_proposal_is_only_a_failed_tool_call(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    world.broker.account_error = BrokerError(500, None, f"upstream failure {FAKE_SECRET}")
+    out = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
+    assert out.is_error
+    assert [row["kind"] for row in audit(world)] == ["tool_call"]
+    assert audit(world)[0]["payload"]["is_error"] is True
+    assert FAKE_SECRET not in stored_ledger_text(world)

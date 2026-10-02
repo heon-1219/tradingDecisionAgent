@@ -20,12 +20,16 @@ Rules every tool follows:
   from our own data (quotes, bar metrics, account, product DB) are not wrapped.
 - Research tools register `SourceRecord`s in the session's `EvidenceStore` and cite them as `[E#]`;
   `propose_trades` only accepts evidence ids that exist in that session.
+- With a `ledger`, every call appends a `tool_call` audit entry (hashes only), every created ticket
+  a `proposal` entry and every refused proposal a `proposal_rejected` entry (see `chat/audit.py`).
+  An audit write that fails is logged by type and never breaks the call.
 """
 from __future__ import annotations
 
 import copy
 import logging
 import re
+import time
 import traceback
 from collections import OrderedDict
 from collections.abc import Callable
@@ -50,6 +54,7 @@ from ..trading.broker import BrokerError
 from ..trading.metrics import summarize
 from ..trading.models import Mandate, OrderLeg, RiskDecision, normalize_symbol
 from ..trading.risk import evaluate, overall
+from .audit import ToolAudit
 
 log = logging.getLogger("finagent.chat.toolbox")
 
@@ -851,6 +856,7 @@ class ChatToolbox:
         settings,
         now: Callable[[], datetime] | None = None,
         turn_slots: OrderedDict[tuple[str, str], str] | None = None,
+        ledger=None,
     ):
         self._registry = registry
         self._orchestrator = orchestrator
@@ -872,6 +878,7 @@ class ChatToolbox:
         self._proposal_turns: OrderedDict[tuple[str, str], str] = (
             turn_slots if turn_slots is not None else OrderedDict()
         )
+        self._audit = ToolAudit(ledger, _TOOLS_BY_NAME)  # ledger None: nothing is recorded
 
     # --- specs ---------------------------------------------------------------------------------
 
@@ -907,6 +914,19 @@ class ChatToolbox:
     # --- dispatch ------------------------------------------------------------------------------
 
     async def execute(self, session_id: str, name: str, args: dict | None, *, turn_id: str) -> ToolOutput:
+        """Run one tool call (`_dispatch`), then append its `tool_call` audit entry."""
+        started = time.perf_counter()
+        try:
+            out = await self._dispatch(session_id, name, args, turn_id)
+        except BaseException as exc:
+            # Cancellation (`_dispatch` turns every Exception into a ToolOutput): record it and
+            # let it propagate - never swallow it.
+            self._audit.tool_call(session_id, turn_id, name, args, started, raised=exc)
+            raise
+        self._audit.tool_call(session_id, turn_id, name, args, started, out)
+        return out
+
+    async def _dispatch(self, session_id: str, name: str, args: dict | None, turn_id: str) -> ToolOutput:
         tool = _TOOLS_BY_NAME.get(name) if isinstance(name, str) else None
         if tool is None or not self._available(tool):
             available = ", ".join(s.name for s in self.specs())
@@ -1449,10 +1469,18 @@ class ChatToolbox:
     # --- trade proposals -----------------------------------------------------------------------
 
     async def _t_propose_trades(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
+        try:
+            return await self._propose(session_id, args, turn_id)
+        except _ArgError:
+            self._audit.proposal_rejected(session_id, turn_id, "invalid_arguments")
+            raise
+
+    async def _propose(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
         slot = (session_id, turn_id)
         if slot in self._proposal_turns:
             existing = self._proposal_turns[slot]
             already = f" (ticket {existing})" if existing else ""
+            self._audit.proposal_rejected(session_id, turn_id, "one_proposal_per_turn")
             return ToolOutput(
                 "Only one trade proposal per turn is allowed, and this turn already produced one"
                 f"{already}. Ask the user to review it in the UI; you cannot place orders.",
@@ -1484,7 +1512,9 @@ class ChatToolbox:
             mandate = self._sessions.get_mandate(session_id) or Mandate()
             decisions = evaluate(legs, ctx, mandate)
             report = _risk_report(decisions)
+            refused = dict(decisions=decisions, mandate_version=mandate.version, evidence_ids=evidence_ids)
             if all(d.verdict == "reject" for d in decisions):
+                self._audit.proposal_rejected(session_id, turn_id, "all_legs_rejected", **refused)
                 return self._all_rejected(report)
             # The ticket is only as fresh as its stalest leg quote; the store clock is the fallback
             # when no leg quote carries a timestamp.
@@ -1506,7 +1536,9 @@ class ChatToolbox:
                 )
             except ValueError as exc:
                 if str(exc).startswith("no executable legs"):
+                    self._audit.proposal_rejected(session_id, turn_id, "all_legs_rejected", **refused)
                     return self._all_rejected(report)
+                self._audit.proposal_rejected(session_id, turn_id, "ticket_validation_failed", **refused)
                 log.warning("ticket creation refused: %s", type(exc).__name__)
                 return ToolOutput("The ticket could not be created (a leg failed validation); adjust the legs and try again.",
                                   is_error=True)
@@ -1515,6 +1547,7 @@ class ChatToolbox:
         finally:
             if not created:
                 self._proposal_turns.pop(slot, None)
+        self._audit.proposal(session_id, turn_id, ticket)
 
         executable = [d for d in decisions if d.verdict != "reject"]
         buy_cost = sum((d.est_cost_usd for d in executable if d.leg.side == "buy" and d.est_cost_usd is not None), Decimal(0))

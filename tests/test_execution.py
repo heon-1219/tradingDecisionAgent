@@ -1396,3 +1396,55 @@ async def test_executor_reject_and_reject_ticket_agree(world):
     assert (via_executor.status, via_executor.message) == (via_function.status, via_function.message)
     assert via_executor.ticket.status == via_function.ticket.status == TicketStatus.rejected_by_user
     assert world.ledger_kinds()[-1] == world.ledger_kinds("sess-2")[-1] == "reject"
+
+
+# --- Task 3.6: a re-quoted ticket is ledgered as shown ----------------------------------------
+
+
+def _proposal_entries(world: World) -> list[dict]:
+    return [entry["payload"] for entry in world.ledger_entries() if entry["kind"] == "proposal"]
+
+
+async def test_a_refreshed_ticket_is_ledgered_as_a_proposal(world):
+    ticket = await world.propose([key_market()])
+    world.data.set_price("KEY", "15.50")
+
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    new = result.new_ticket
+    shown = new.model_dump(mode="json")
+    assert world.ledger_kinds() == ["proposal", "refresh"]
+    [payload] = _proposal_entries(world)
+    assert payload["source"] == "requote" and payload["supersedes"] == ticket.id
+    assert "turn_id" not in payload  # no chat turn made this ticket
+    assert payload["ticket_id"] == new.id and payload["hash"] == new.hash
+    assert payload["status"] == "proposed" and payload["mandate_version"] == new.mandate_version
+    assert payload["quote_as_of"] == shown["quote_as_of"] and payload["expires_at"] == shown["expires_at"]
+    assert payload["legs"] == shown["legs"] and payload["legs"][0]["symbol"] == "KEY"
+    assert payload["decisions"][0]["symbol"] == "KEY"
+    assert payload["decisions"][0]["est_price"] == shown["decisions"][0]["est_price"]
+    assert payload["evidence_ids"] == ["E1"]
+    assert "thesis" not in payload and payload["thesis_len"] == len("thesis")
+
+
+async def test_a_ticket_requoted_on_confirm_is_ledgered_as_a_proposal(world):
+    ticket = await world.propose([key_market()])
+    world.data.set_price("KEY", "15.30")  # est. price moves ~2%
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert result.status == "requote"
+    assert world.ledger_kinds() == ["confirm_request", "claim", "proposal", "requote", "result"]
+    [payload] = _proposal_entries(world)
+    assert payload["ticket_id"] == result.new_ticket.id and payload["hash"] == result.new_ticket.hash
+    assert payload["source"] == "requote" and payload["supersedes"] == ticket.id
+
+
+async def test_a_requote_with_nothing_executable_ledgers_no_proposal(world):
+    ticket = await world.propose([aapl()])
+    world.broker.account_snapshot = make_account(trading_blocked=True)
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert result.status == "rejected" and result.new_ticket is None
+    assert _proposal_entries(world) == []

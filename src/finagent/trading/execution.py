@@ -100,8 +100,11 @@ changed status updates the local row and writes an `order_status` ledger entry.
 **Ledger.** Kinds: `confirm_request`, `claim`, `requote`, `submit`, `broker_response`,
 `reconcile`, `order_status`, `result` (confirm); `reject`; `refresh`; `recover` and `reconcile`
 (startup recovery, `source: "startup"`); `order_status` (`source: "poll"`); `kill_switch` (under
-the session id `SYSTEM_SESSION`). Payloads carry symbols as *values*, never as dict keys: the ledger
-redacts the value of any dict key that looks secret-like, and "KEY" (KeyCorp) is a real ticker.
+the session id `SYSTEM_SESSION`); and `proposal` (`source: "requote"`, with `supersedes`) for the
+new ticket a confirm-time re-quote or a refresh creates - the ticket as shown, like the entry the
+chat toolbox writes for a ticket the model proposed. Payloads carry symbols as *values*, never as
+dict keys: the ledger redacts the value of any dict key that looks secret-like, and "KEY"
+(KeyCorp) is a real ticker.
 They carry client order ids, leg indexes, statuses and short sanitized messages - never headers,
 raw HTTP bodies or credentials. Every broker message shown to a user or stored goes through
 `Ledger.redact_text` first (the ledger's known-secret scrub plus its free-text passes).
@@ -137,7 +140,7 @@ from finagent.trading.models import (
     TicketStatus,
     normalize_symbol,
 )
-from finagent.trading.proposals import TicketStateError, TicketStore
+from finagent.trading.proposals import TicketStateError, TicketStore, ticket_audit_payload
 from finagent.trading.risk import evaluate
 
 logger = logging.getLogger(__name__)
@@ -652,7 +655,9 @@ class Executor:
         )
 
     def _new_ticket(self, ticket: Ticket, decisions: list[RiskDecision], mandate: Mandate) -> Ticket:
-        return self._tickets.create(
+        """The re-quoted copy of `ticket`, recorded in the ledger as shown (a `proposal` entry,
+        like the one the chat toolbox writes for a ticket the model proposed)."""
+        new_ticket = self._tickets.create(
             ticket.session_id,
             decisions=decisions,
             thesis=ticket.thesis,
@@ -663,6 +668,18 @@ class Executor:
             quote_as_of=self._now(),
             ttl_sec=int(getattr(self._settings, "ticket_ttl_sec", _DEFAULT_TTL_SEC)),
         )
+        try:
+            shown = ticket_audit_payload(new_ticket)
+        except Exception as exc:  # noqa: BLE001 - an audit entry must never abort a re-quote
+            logger.warning(
+                "proposal ledger entry for ticket %s not built (%s)",
+                new_ticket.id, type(exc).__name__,
+            )
+        else:
+            self._log(new_ticket.session_id, "proposal", {
+                "source": "requote", "supersedes": ticket.id, **shown,
+            })
+        return new_ticket
 
     # --- submission -----------------------------------------------------------------------------
 

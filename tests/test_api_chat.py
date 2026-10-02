@@ -1275,3 +1275,60 @@ async def test_guard_rejects_websockets_on_the_api_and_passes_others():
     assert called == ["websocket"]
     called, _ = await _guard({"type": "lifespan"})
     assert called == ["lifespan"]
+
+
+# --- Task 3.6: audit-ledger coverage -------------------------------------------------------------------------
+
+
+def test_ledger_export_has_the_tool_call_and_the_proposal_and_no_secret(world):
+    with world.client() as client:
+        sid = new_session(client)
+        world.add_evidence(sid)
+        events = chat(client, sid)
+        turn_id = events[0]["messageId"]
+        ticket = next(e for e in events if e["type"] == "data-trade-proposal")["ticket"]
+        r = client.get(f"/api/ledger/{sid}.jsonl")
+        assert r.status_code == 200
+        lines = [json.loads(line) for line in r.text.splitlines() if line]
+        assert [line["kind"] for line in lines] == ["proposal", "tool_call"]
+        proposal, tool_call = (line["payload"] for line in lines)
+        assert proposal["ticket_id"] == ticket["id"] and proposal["hash"] == ticket["hash"]
+        assert proposal["turn_id"] == tool_call["turn_id"] == turn_id
+        assert proposal["legs"] == ticket["legs"] and proposal["evidence_ids"] == ["E1"]
+        assert proposal["decisions"][0]["verdict"] == "accept"
+        assert tool_call["tool"] == "propose_trades" and tool_call["is_error"] is False
+        assert len(tool_call["args_sha256"]) == len(tool_call["result_sha256"]) == 64
+        # neither the model's free text nor a key is in the export
+        assert "Services growth" not in r.text and "Regulatory pressure" not in r.text
+        assert_no_secrets(r)
+
+
+def test_tool_calls_reach_the_new_ledger_after_a_settings_rebuild(world):
+    with world.client() as client:
+        sid = new_session(client)
+        old_ledger, old_toolbox = world.runtime.ledger, world.runtime.toolbox
+        r = client.put("/api/settings", json={"alpaca_key_id": NEW_ID, "alpaca_secret": NEW_SECRET})
+        assert r.status_code == 200
+        new_ledger = world.runtime.ledger
+        assert new_ledger is not old_ledger and world.runtime.toolbox is not old_toolbox
+        seen: dict[str, list[str]] = {"old": [], "new": []}
+
+        def record(label, ledger):
+            real = ledger.append
+
+            def recording(session_id, kind, payload):
+                seen[label].append(kind)
+                return real(session_id, kind, payload)
+
+            ledger.append = recording
+
+        record("old", old_ledger)
+        record("new", new_ledger)
+        ticket = propose(client, world, sid)
+        assert seen == {"old": [], "new": ["proposal", "tool_call"]}
+        r = client.get(f"/api/ledger/{sid}.jsonl")
+        lines = [json.loads(line) for line in r.text.splitlines() if line]
+        assert [line["kind"] for line in lines] == ["proposal", "tool_call"]
+        assert lines[0]["payload"]["ticket_id"] == ticket["id"]
+        assert_no_secrets(r)
+

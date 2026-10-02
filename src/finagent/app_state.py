@@ -9,7 +9,8 @@ stack behind `/api/*`; `AppState.load` builds it last, and a failure there only 
 exactly one `ChatAgent` (its per-session turn locks must be unique). The rest is *rebuildable*
 from the current settings by `rebuild()`: the HTTP client, the ledger (its known-secret list), the
 connectors, the Alpaca broker and market data (only when both keys are set), the executor (only
-with a broker) and the toolbox. The agent reaches the current toolbox through `_ToolboxHandle`, so
+with a broker) and the toolbox (which writes its `tool_call` and `proposal` audit entries to that
+ledger). The agent reaches the current toolbox through `_ToolboxHandle`, so
 a rebuild takes effect at the next tool call; the toolbox's one-proposal-per-turn slots
 (`turn_slots`) are owned by the runtime and shared by every toolbox it builds, so a rebuild in the
 middle of a turn cannot reset them. Every component shares the *same* mutable `settings` object,
@@ -230,7 +231,7 @@ class ChatRuntime:
                 registry=self.registry, orchestrator=self.orchestrator, broker=broker, data=data,
                 edgar=edgar, web=web, grounded=grounded, evidence=self.evidence,
                 sessions=self.sessions, tickets=self.tickets, executor=executor, settings=s,
-                turn_slots=self.turn_slots,
+                turn_slots=self.turn_slots, ledger=ledger,
             )
         except BaseException:
             self._retire(made)
