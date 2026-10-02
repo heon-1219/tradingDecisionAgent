@@ -331,9 +331,9 @@ def _free_text_secret_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _redact_free_text(text: str) -> str:
+def _redact_free_text(text: str, placeholder: str = _REDACTED) -> str:
     """Truncate `text` to `_MAX_LEAF_LEN`, then replace each maximal run of overlapping or
-    adjacent secret spans with a single `[REDACTED]`."""
+    adjacent secret spans with a single `[REDACTED]` (or `placeholder`)."""
     text = _truncate_leaf(text)
     merged: list[list[int]] = []
     for start, end in sorted(_free_text_secret_spans(text)):
@@ -349,10 +349,18 @@ def _redact_free_text(text: str) -> str:
     pos = 0
     for start, end in merged:
         pieces.append(text[pos:start])
-        pieces.append(_REDACTED)
+        pieces.append(placeholder)
         pos = end
     pieces.append(text[pos:])
     return "".join(pieces)
+
+
+def redact_free_text(text: str, placeholder: str = _REDACTED) -> str:
+    """The level-3 free-text passes (see the module docstring) for one string, with no known-secret
+    scrub: credential-shaped values (`APCA-API-SECRET-KEY: ...`, `Authorization: ...`,
+    `Bearer ...`, `?key=...`, `api_key=...`) become `placeholder`, names stay visible. Linear in
+    `len(text)`. Used by `finagent.logsafe` for log records."""
+    return _redact_free_text(text, placeholder)
 
 
 def _stringify_key(key: Any) -> str:

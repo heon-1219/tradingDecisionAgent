@@ -29,6 +29,10 @@ environment-only settings (`config.env_fallbacks`), expires stale tickets, settl
 `submitting` (`Executor.recover_stuck`; without a broker it only logs how many there are) and
 checks the Alpaca keys. Nothing here logs a secret or an exception message: failures are logged by
 type.
+
+**Log scrubbing.** The runtime installs `logsafe`'s process-wide scrub at construction and, on
+every build, gives it the same accumulated known-secret list the ledger gets (current and replaced
+keys), so a traceback logged anywhere under `finagent.*` cannot show a key.
 """
 from __future__ import annotations
 
@@ -58,6 +62,7 @@ from .kb.lexicon import Lexicon
 from .kb.rdb import RDB
 from .kb.search import SearchIndex
 from .kb.vector import VectorIndex, make_openai_embed_fn
+from .logsafe import install_log_scrubber, set_log_secrets
 from .ontology.loader import FallbackValidators, Ontology
 from .paths import ROOT
 from .research.edgar import Edgar
@@ -76,7 +81,7 @@ from .trading.proposals import TicketStore
 log = logging.getLogger("finagent.app")
 
 CLOSE_GRACE_SEC = 120.0
-# Settings fields whose secret values the ledger scrubs verbatim.
+# Settings fields whose secret values the ledger and the log scrubber remove verbatim.
 SECRET_FIELDS = (
     "alpaca_api_key_id", "alpaca_api_secret_key", "gemini_api_key", "tavily_api_key",
     "anthropic_api_key", "openai_api_key",
@@ -150,6 +155,7 @@ class ChatRuntime:
         sleep: Callable[[float], Any] | None = None,
         close_grace_sec: float = CLOSE_GRACE_SEC,
     ):
+        install_log_scrubber()  # before anything here can log; the secret values follow in _build
         self.settings = settings
         self.llm = llm
         self.registry = registry
@@ -200,8 +206,9 @@ class ChatRuntime:
 
     def _build(self, overrides: dict[str, Any] | None = None) -> "_Built":
         """Construct the rebuildable components for the settings as they would be with `overrides`
-        (key fields -> new value) applied, touching nothing shared. On failure the clients made so
-        far are retired and the exception propagates."""
+        (key fields -> new value) applied, touching nothing shared (except the log scrubber's
+        secret list, which only grows). On failure the clients made so far are retired and the
+        exception propagates."""
         s = self.settings
 
         def value(name: str) -> Any:
@@ -213,7 +220,11 @@ class ChatRuntime:
         try:
             http = self._http_factory()
             made.append(http)
-            ledger = Ledger(self.db, known_secrets=self._known_secrets(key_id, secret, tavily_key))
+            # One accumulated list for both scrubs. The log scrubber is process-wide, so it gets
+            # the list now, even if this build fails: it only ever grows.
+            known_secrets = self._known_secrets(key_id, secret, tavily_key)
+            set_log_secrets(known_secrets)
+            ledger = Ledger(self.db, known_secrets=known_secrets)
             edgar = Edgar(http, self.evidence, sec_user_agent) if sec_user_agent else None
             web = WebSearch(http, self.evidence, tavily_key)
             grounded = None
@@ -428,6 +439,10 @@ class AppState:
     @classmethod
     def load(cls, settings: Settings, llm: LLMClient | None = None, build_graph: bool = True) -> "AppState":
         t0 = time.time()
+        # Scrub finagent log records from the first line on (ChatRuntime, built last, keeps the
+        # secret list current after that).
+        install_log_scrubber()
+        set_log_secrets([getattr(settings, name, None) for name in SECRET_FIELDS])
         rdb = RDB(settings.store_path, row_limit=settings.sql_row_limit, timeout_sec=settings.sql_timeout_sec)
         lexicon = Lexicon.load(settings.enrichment_dir)
         ontology: Ontology | None = None

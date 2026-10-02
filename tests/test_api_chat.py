@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -1332,3 +1334,59 @@ def test_tool_calls_reach_the_new_ledger_after_a_settings_rebuild(world):
         assert lines[0]["payload"]["ticket_id"] == ticket["id"]
         assert_no_secrets(r)
 
+
+# --- Task 3.6: log scrubbing ----------------------------------------------------------------------------------
+
+
+async def test_the_runtime_installs_the_log_scrubber_with_its_known_secrets(tmp_path, caplog):
+    world = ApiWorld(tmp_path)
+    probe = logging.getLogger("finagent.probe")
+    probe.warning("before %s", ALPACA_SECRET)
+    assert f"before {ALPACA_SECRET}" in caplog.text  # the control: nothing is installed yet
+    caplog.clear()
+    runtime = world.state().chat
+    try:
+        probe.warning("after %s %s %s %s", ALPACA_ID, ALPACA_SECRET, TAVILY, GEMINI)
+        assert "after [redacted] [redacted] [redacted] [redacted]" in caplog.text
+        logging.getLogger("thirdparty").warning("not ours %s", ALPACA_ID)
+        assert f"not ours {ALPACA_ID}" in caplog.text
+    finally:
+        await runtime.shutdown()
+
+
+def test_replaced_keys_stay_scrubbed_in_logs_after_a_rebuild(world, caplog):
+    with world.client() as client:
+        r = client.put("/api/settings", json={"alpaca_key_id": NEW_ID, "alpaca_secret": NEW_SECRET})
+        assert r.status_code == 200
+        logging.getLogger("finagent.probe").warning(
+            "old %s %s new %s %s", ALPACA_ID, ALPACA_SECRET, NEW_ID, NEW_SECRET)
+    assert "old [redacted] [redacted] new [redacted] [redacted]" in caplog.text
+    for secret in SECRETS:
+        assert secret not in caplog.text
+
+
+def test_a_traceback_logged_during_confirm_never_shows_a_secret(world, caplog):
+    with caplog.at_level("DEBUG"), world.client() as client:
+        sid = new_session(client)
+        ticket = propose(client, world, sid)
+        # The re-check fails with a broker error that carries the secret, and writing that failure
+        # to the ticket fails too: the second error escapes into the executor's `logger.exception`
+        # with the broker error chained to it.
+        world.broker.account_error = BrokerError(503, None, f"service unavailable {ALPACA_SECRET}")
+        real = world.runtime.tickets.transition
+
+        def failing(ticket_id, expect, to, **fields):
+            if to in (TicketStatus.submitted, TicketStatus.failed):
+                raise sqlite3.OperationalError("database is locked")
+            return real(ticket_id, expect, to, **fields)
+
+        world.runtime.tickets.transition = failing
+        r = confirm(client, ticket, sid)
+        assert r.json()["status"] == "error"
+        assert_no_secrets(r)
+        assert world.total_submits() == 0
+    assert "confirm of ticket" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "BrokerError: Alpaca broker error 503: service unavailable [redacted]" in caplog.text
+    for secret in SECRETS:
+        assert secret not in caplog.text
