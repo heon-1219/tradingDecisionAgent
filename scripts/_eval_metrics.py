@@ -345,6 +345,8 @@ def summary_table(rows: list[dict]) -> str:
         legs = f"{m.get('legs_accepted', 0)}/{m.get('legs_clamped', 0)}/{m.get('legs_rejected', 0)}"
         seconds = f"{(m.get('elapsed_ms') or 0) / 1000:.1f}"
         verdict = "PASS" if m.get("expect_pass") else "FAIL: " + "; ".join(m.get("expect_failures") or [])
+        if row.get("budget_exhausted"):
+            verdict += " (ended on its budget)"
         if row.get("status") != "ok":
             retries = retries_text(row)
             verdict = f"({row.get('error_kind') or row.get('status')}{'; retries: ' + retries if retries else ''})"

@@ -31,8 +31,9 @@ the turn mode when the backend reports one): a run replaces the lines it re-ran 
 and keeps all others, so partial runs add up and a `--live-broker` or `--real-products` run never
 overwrites or skips fake-world lines. The summary shows the lines of the current configuration only.
 A scenario whose turn ended in a model error (a free-tier 429 or 503 shows up as an `error` event)
-is recorded with status `llm_error`, left out of the averages and retried by `--resume`; one that
-ran out of the turn budget is `budget_exhausted` and treated the same way. The 429s and 5xx that the
+is recorded with status `llm_error`, left out of the averages and retried by `--resume`; one whose
+turn budget ran out before the model wrote anything is `budget_exhausted` and treated the same way
+(a turn that was cut at its budget but still got an answer is `ok`, with `"budget_exhausted": true`). The 429s and 5xx that the
 model client retried inside a step are counted per line as `provider_retries`. The demo model's
 token counts are character-based estimates and are marked `"estimated": true`. A live scenario costs
 roughly 4-8 model requests; the Gemini free tier allows about 20 a day and 5 a minute, so run a few
@@ -43,7 +44,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
-import json
 import logging
 import os
 import pathlib
@@ -64,7 +64,18 @@ if str(ROOT / "src") not in sys.path:
 sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.curdir)) != _HERE] + [_HERE]
 
 from _eval_metrics import retries_text, scenario_metrics, summary_table, ticket_summary  # noqa: E402
-from _eval_support import CountingLLM, ProviderRetryLog, ReadOnlyBroker, error_kind  # noqa: E402,F401
+from _eval_support import (  # noqa: E402,F401 - re-exported: the runner's helpers under one name
+    CountingLLM,
+    ProviderRetryLog,
+    ReadOnlyBroker,
+    config_key,
+    error_kind,
+    load_results,
+    load_scenarios,
+    merge_results,
+    same_config,
+    write_results,
+)
 from _fakeworld import DemoLLM, FakeBroker, build_fake_world, build_products, release_sqlite  # noqa: E402
 from finagent.agent.llm import make_llm  # noqa: E402
 from finagent.app_state import ChatRuntime  # noqa: E402
@@ -79,9 +90,20 @@ DEFAULT_SCENARIOS = ROOT / "data" / "eval" / "scenarios.jsonl"
 DEFAULT_OUT = {"live": ROOT / "data" / "eval" / "scenario_results.jsonl",
                "demo": ROOT / "data" / "eval" / "scenario_results_demo.jsonl"}
 LIVE_REQUESTS_PER_SCENARIO = (4, 8)
-_SCENARIO_KEYS = {"id", "lang", "message", "category", "expect"}
-# The agent's fallback answer when the turn budget ran out and the model gave no text.
-_BUDGET_PREFIXES = tuple(fallback_text(lang, []).split(".")[0] for lang in ("en", "ko"))
+
+
+def _fallback_prefixes() -> tuple[str, ...]:
+    """How the agent's own fallback answers begin (the turn budget ran out and the model gave no
+    text): one per language, and per mode on a backend that has modes."""
+    texts = [fallback_text(lang, []) for lang in ("en", "ko")]
+    try:
+        texts += [fallback_text(lang, [], "shallow") for lang in ("en", "ko")]
+    except TypeError:  # the older backend: one fallback text
+        pass
+    return tuple(dict.fromkeys(text.split(".")[0] for text in texts))
+
+
+_BUDGET_PREFIXES = _fallback_prefixes()
 _LLM_KEY_FIELDS = {"gemini": ("gemini_api_key", "GEMINI_API_KEY"), "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
                    "openai": ("openai_api_key", "OPENAI_API_KEY")}
 # Non-secret settings that decide a turn's limits; a live run copies those that exist into the fake world.
@@ -205,63 +227,6 @@ async def read_account(world) -> dict | None:
     return {"equity": str(account.equity), "positions": {s: str(p.qty_available) for s, p in positions.items()}}
 
 
-# --- files ------------------------------------------------------------------------------------------------
-
-
-def load_scenarios(path: Path | str) -> list[dict]:
-    rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-    seen: set[str] = set()
-    for row in rows:
-        missing = _SCENARIO_KEYS - set(row)
-        if missing:
-            raise ValueError(f"scenario {row.get('id', '?')!r} lacks {', '.join(sorted(missing))}")
-        if row["id"] in seen:
-            raise ValueError(f"duplicate scenario id {row['id']!r}")
-        seen.add(row["id"])
-    return rows
-
-
-def load_results(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
-def config_key(row: dict) -> tuple:
-    """What identifies a result line: the scenario and the configuration it ran under. A line
-    written before a field existed counts as fake broker, fake products, unknown budget, no mode."""
-    return (row.get("id"), row.get("llm"), row.get("model"), row.get("broker", "fake"), row.get("products", "fake"),
-            row.get("time_budget_sec"), row.get("mode"))
-
-
-def same_config(row: dict, labels: dict) -> bool:
-    """Did this line run under the configuration `labels` describes? The mode is compared only
-    when both sides have one (the old backend reports none)."""
-    if config_key({**row, "id": None, "mode": None}) != config_key({**labels, "id": None, "mode": None}):
-        return False
-    return row.get("mode") is None or labels.get("mode") is None or row["mode"] == labels["mode"]
-
-
-def merge_results(existing: list[dict], new: list[dict], order: list[str]) -> list[dict]:
-    """`existing` with the lines of the same `config_key` replaced by `new`, in scenario order."""
-    fresh = {config_key(r) for r in new}
-    rows = [r for r in existing if config_key(r) not in fresh] + list(new)
-    position = {sid: i for i, sid in enumerate(order)}
-    return sorted(rows, key=lambda r: (position.get(r.get("id"), len(order)), str(config_key(r)[1:])))
-
-
-def write_results(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
-    scratch = path.with_name(path.name + ".tmp")
-    try:
-        scratch.write_text(text, encoding="utf-8", newline="\n")
-        os.replace(scratch, path)
-    except OSError:  # e.g. a sync client holding the file: write in place instead
-        path.write_text(text, encoding="utf-8", newline="\n")
-        scratch.unlink(missing_ok=True)
-
-
 # --- one scenario -----------------------------------------------------------------------------------------
 
 
@@ -297,8 +262,10 @@ async def run_scenario(world, counter: CountingLLM, scenario: dict, labels: dict
         row["time_budget_sec"] = float(finish["time_budget_sec"])
     if any(e.get("type") == "error" for e in events):
         row.update(status="llm_error", error_kind=errors[-1] if errors else "error_event")
-    elif answer.startswith(_BUDGET_PREFIXES):
+    elif answer.startswith(_BUDGET_PREFIXES):  # the agent's fallback: the model never answered
         row.update(status="budget_exhausted", error_kind=errors[-1] if errors else "turn_budget")
+    elif finish.get("budget_exhausted") is True:  # nudged at the budget, but the model wrote an answer: scored
+        row["budget_exhausted"] = True
     if errors:
         row["llm_errors"] = errors
     if retries:
@@ -317,7 +284,7 @@ def _progress(index: int, total: int, row: dict) -> str:
     m = row.get("metrics")
     if not m:
         return f"[{index}/{total}] {row['id']}: {row['status']} ({row.get('note', '')})"
-    verdict = "PASS" if m["expect_pass"] else "FAIL"
+    verdict = ("PASS" if m["expect_pass"] else "FAIL") + (" (ended on its budget)" if row.get("budget_exhausted") else "")
     if row["status"] != "ok":
         verdict = row.get("error_kind") or row["status"]
         if retries_text(row):

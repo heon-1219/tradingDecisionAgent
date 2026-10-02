@@ -100,15 +100,15 @@ def test_live_runs_carry_the_real_limit_settings_into_the_fake_world(tmp_path):
 class _StubWorld:
     """Just enough of a world for `run_scenario`: a session store and an agent that emits events."""
 
-    def __init__(self, finish: dict):
-        self.finish = finish
+    def __init__(self, finish: dict, answer: str = "I can't help with options; they are not supported."):
+        self.finish, self.answer = finish, answer
         self.sessions = types.SimpleNamespace(create=lambda title, lang: {"id": "S1"})
         self.agent = types.SimpleNamespace(run_turn=self.run_turn)
 
     async def run_turn(self, session_id, message, emit):
         emit({"type": "start", "messageId": "m"})
         emit({"type": "finish", "usage": {"input": 3, "output": 1}, "elapsed_ms": 5, **self.finish})
-        return "I can't help with options; they are not supported."
+        return self.answer
 
 
 async def test_mode_and_max_rounds_come_from_the_finish_event_when_present():
@@ -127,6 +127,33 @@ async def test_mode_and_max_rounds_come_from_the_finish_event_when_present():
     assert ev.same_config(new, {**labels, "time_budget_sec": 150.0, "mode": "shallow"}) is True
     assert ev.same_config(new, {**labels, "time_budget_sec": 150.0, "mode": "deep"}) is False
     assert ev.same_config(old, {**labels, "mode": "deep"}) is True  # a line without a mode fits any mode
+
+
+async def test_a_turn_that_ended_on_its_budget_is_ok_if_the_model_answered_and_not_ok_on_the_fallback():
+    from finagent.chat.agent import fallback_text
+
+    labels = {"llm": "live", "provider": "gemini", "model": "m", "broker": "fake", "products": "fake",
+              "time_budget_sec": 150.0, "max_rounds": 4, "mode": "shallow"}
+    scenario = {"id": "s", "lang": "en", "category": "out_of_scope", "message": "Buy SPY calls.",
+                "expect": {"ticket": False}}
+    counter = ev.CountingLLM(fw.DemoLLM())
+    # nudged, but the model wrote an answer: a result to score, flagged
+    nudged = await ev.run_scenario(_StubWorld({"mode": "shallow", "max_rounds": 4, "budget_exhausted": True}),
+                                   counter, scenario, labels)
+    assert nudged["status"] == "ok" and nudged["budget_exhausted"] is True
+    plain = await ev.run_scenario(_StubWorld({"mode": "shallow", "max_rounds": 4, "budget_exhausted": False}),
+                                  counter, scenario, labels)
+    assert plain["status"] == "ok" and "budget_exhausted" not in plain
+    # the agent's own fallback text (no model answer): not ok, in either mode and language
+    texts = [fallback_text("en", ["get_quotes"]), fallback_text("ko", [])]
+    try:
+        texts += [fallback_text("en", ["get_quotes"], "shallow"), fallback_text("ko", [], "shallow")]
+    except TypeError:  # the older backend has one fallback only
+        pass
+    for text in texts:
+        row = await ev.run_scenario(_StubWorld({"budget_exhausted": True}, answer=text), counter, scenario, labels)
+        assert row["status"] == "budget_exhausted", text
+    assert "ended on its budget" in ev._progress(1, 1, nudged)
 
 
 # --- hygiene ---------------------------------------------------------------------------------------------
