@@ -21,18 +21,20 @@ Rules every tool follows:
 - Research tools register `SourceRecord`s in the session's `EvidenceStore` and cite them as `[E#]`;
   `propose_trades` only accepts evidence ids that exist in that session.
 - With a `ledger`, every call appends a `tool_call` audit entry (hashes only), every created ticket
-  a `proposal` entry and every refused proposal a `proposal_rejected` entry (see `chat/audit.py`).
-  An audit write that fails is logged by type and never breaks the call.
+  a `proposal` entry and every `propose_trades` call that ends without a ticket, whatever the cause,
+  a `proposal_rejected` entry (see `chat/audit.py`). An audit write that fails is logged by type and
+  never breaks the call.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import re
 import time
 import traceback
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -51,10 +53,11 @@ from ..research.evidence import (
 )
 from ..research.http import HttpError
 from ..trading.broker import BrokerError
+from ..trading.ledger import MIN_KNOWN_SECRET_LEN
 from ..trading.metrics import summarize
 from ..trading.models import Mandate, OrderLeg, RiskDecision, normalize_symbol
 from ..trading.risk import evaluate, overall
-from .audit import ToolAudit
+from .audit import ProposalOutcome, ToolAudit
 
 log = logging.getLogger("finagent.chat.toolbox")
 
@@ -857,6 +860,7 @@ class ChatToolbox:
         now: Callable[[], datetime] | None = None,
         turn_slots: OrderedDict[tuple[str, str], str] | None = None,
         ledger=None,
+        known_secrets: Iterable[str] = (),
     ):
         self._registry = registry
         self._orchestrator = orchestrator
@@ -879,6 +883,9 @@ class ChatToolbox:
             turn_slots if turn_slots is not None else OrderedDict()
         )
         self._audit = ToolAudit(ledger, _TOOLS_BY_NAME)  # ledger None: nothing is recorded
+        # Secret values to blank out of broker messages besides the current settings' keys: the
+        # owner's accumulated list, so a key that was replaced is still scrubbed.
+        self._known_secrets = tuple(known_secrets)
 
     # --- specs ---------------------------------------------------------------------------------
 
@@ -914,38 +921,54 @@ class ChatToolbox:
     # --- dispatch ------------------------------------------------------------------------------
 
     async def execute(self, session_id: str, name: str, args: dict | None, *, turn_id: str) -> ToolOutput:
-        """Run one tool call (`_dispatch`), then append its `tool_call` audit entry."""
+        """Run one tool call (`_dispatch`), then append its `tool_call` audit entry. The latency
+        recorded is the tool's own: it is read as soon as `_dispatch` returns or raises, before the
+        entry is built."""
         started = time.perf_counter()
+
+        def elapsed_ms() -> int:
+            return max(0, int((time.perf_counter() - started) * 1000))
+
         try:
             out = await self._dispatch(session_id, name, args, turn_id)
-        except BaseException as exc:
-            # Cancellation (`_dispatch` turns every Exception into a ToolOutput): record it and
-            # let it propagate - never swallow it.
-            self._audit.tool_call(session_id, turn_id, name, args, started, raised=exc)
+        except (asyncio.CancelledError, Exception) as exc:
+            # A cancellation, or an exception `_dispatch` did not turn into a ToolOutput: record
+            # it and let it propagate - never swallow it. Any other BaseException
+            # (KeyboardInterrupt, GeneratorExit, SystemExit) propagates without a ledger write.
+            self._audit.tool_call(session_id, turn_id, name, args, elapsed_ms(), raised=exc)
             raise
-        self._audit.tool_call(session_id, turn_id, name, args, started, out)
+        self._audit.tool_call(session_id, turn_id, name, args, elapsed_ms(), out)
         return out
+
+    def _refused(self, session_id: str, turn_id: str, name: Any, text: str) -> ToolOutput:
+        """A call refused before its handler ran. For `propose_trades` that is a proposal that
+        ended without a ticket, so it is audited as one."""
+        if name == "propose_trades":
+            self._audit.proposal_rejected(session_id, turn_id, "dispatch_error")
+        return ToolOutput(text, is_error=True)
 
     async def _dispatch(self, session_id: str, name: str, args: dict | None, turn_id: str) -> ToolOutput:
         tool = _TOOLS_BY_NAME.get(name) if isinstance(name, str) else None
         if tool is None or not self._available(tool):
             available = ", ".join(s.name for s in self.specs())
-            return ToolOutput(f"Unknown tool: {_token(name, 60)}. Available tools: {available}.", is_error=True)
+            return self._refused(session_id, turn_id, name,
+                                 f"Unknown tool: {_token(name, 60)}. Available tools: {available}.")
         if args is None:
             args = {}
         if not isinstance(args, dict):
-            return ToolOutput("Invalid arguments: expected a JSON object.", is_error=True)
+            return self._refused(session_id, turn_id, name, "Invalid arguments: expected a JSON object.")
         props = tool.schema.get("properties", {})
         unknown = [k for k in args if k not in props]
         if unknown:
             allowed = ", ".join(props) or "none"
-            return ToolOutput(
+            return self._refused(
+                session_id, turn_id, name,
                 f"Invalid arguments: unknown argument(s) {', '.join(_token(k, 40) for k in unknown)}. Allowed: {allowed}.",
-                is_error=True,
             )
         missing = [k for k in tool.schema.get("required", []) if args.get(k) is None]
         if missing:
-            return ToolOutput(f"Invalid arguments: missing required argument(s) {', '.join(missing)}.", is_error=True)
+            return self._refused(session_id, turn_id, name,
+                                 f"Invalid arguments: missing required argument(s) {', '.join(missing)}.")
         handler = getattr(self, f"_t_{tool.name}")
         try:
             return await handler(session_id, args, turn_id)
@@ -964,11 +987,16 @@ class ChatToolbox:
             return ToolOutput(f"Tool error ({type(exc).__name__})", is_error=True)
 
     def _scrub(self, text: str) -> str:
-        for attr in ("alpaca_api_key_id", "alpaca_api_secret_key", "tavily_api_key", "gemini_api_key",
-                     "anthropic_api_key", "openai_api_key"):
-            secret = getattr(self._settings, attr, None)
-            if isinstance(secret, str) and len(secret) >= 6:
-                text = text.replace(secret, "[redacted]")
+        """`text` without any key this app uses or has used (the settings' current keys and the
+        owner's accumulated `known_secrets`), longest first; values under the 8-character floor
+        the ledger and the log scrubber use are ignored."""
+        current = (getattr(self._settings, attr, None) for attr in (
+            "alpaca_api_key_id", "alpaca_api_secret_key", "tavily_api_key", "gemini_api_key",
+            "anthropic_api_key", "openai_api_key"))
+        secrets = {value.strip() for value in (*current, *self._known_secrets)
+                   if isinstance(value, str) and len(value.strip()) >= MIN_KNOWN_SECRET_LEN}
+        for secret in sorted(secrets, key=lambda s: (-len(s), s)):
+            text = text.replace(secret, "[redacted]")
         return text
 
     def _broker_error_text(self, exc: BrokerError) -> str:
@@ -1469,18 +1497,33 @@ class ChatToolbox:
     # --- trade proposals -----------------------------------------------------------------------
 
     async def _t_propose_trades(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
+        """`_propose`, plus the audit catch-all: a call that ends without a ticket for any reason
+        leaves one `proposal_rejected` entry. A cancellation is not caught here (it leaves only
+        its cancelled `tool_call`). Every exception is re-raised for `_dispatch` to report."""
+        outcome = self._audit.proposal_outcome(session_id, turn_id)
         try:
-            return await self._propose(session_id, args, turn_id)
+            out = await self._propose(session_id, args, turn_id, outcome)
         except _ArgError:
-            self._audit.proposal_rejected(session_id, turn_id, "invalid_arguments")
+            outcome.rejected("invalid_arguments")
             raise
+        except BrokerError:
+            outcome.rejected("broker_error")
+            raise
+        except HttpError:
+            outcome.rejected("upstream_error")
+            raise
+        except Exception:
+            outcome.rejected("unexpected_error")
+            raise
+        outcome.rejected("unexpected_error")  # a no-op unless `_propose` returned without recording
+        return out
 
-    async def _propose(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
+    async def _propose(self, session_id: str, args: dict, turn_id: str, outcome: ProposalOutcome) -> ToolOutput:
         slot = (session_id, turn_id)
         if slot in self._proposal_turns:
             existing = self._proposal_turns[slot]
             already = f" (ticket {existing})" if existing else ""
-            self._audit.proposal_rejected(session_id, turn_id, "one_proposal_per_turn")
+            outcome.rejected("one_proposal_per_turn")
             return ToolOutput(
                 "Only one trade proposal per turn is allowed, and this turn already produced one"
                 f"{already}. Ask the user to review it in the UI; you cannot place orders.",
@@ -1514,7 +1557,7 @@ class ChatToolbox:
             report = _risk_report(decisions)
             refused = dict(decisions=decisions, mandate_version=mandate.version, evidence_ids=evidence_ids)
             if all(d.verdict == "reject" for d in decisions):
-                self._audit.proposal_rejected(session_id, turn_id, "all_legs_rejected", **refused)
+                outcome.rejected("all_legs_rejected", **refused)
                 return self._all_rejected(report)
             # The ticket is only as fresh as its stalest leg quote; the store clock is the fallback
             # when no leg quote carries a timestamp.
@@ -1536,9 +1579,9 @@ class ChatToolbox:
                 )
             except ValueError as exc:
                 if str(exc).startswith("no executable legs"):
-                    self._audit.proposal_rejected(session_id, turn_id, "all_legs_rejected", **refused)
+                    outcome.rejected("all_legs_rejected", **refused)
                     return self._all_rejected(report)
-                self._audit.proposal_rejected(session_id, turn_id, "ticket_validation_failed", **refused)
+                outcome.rejected("ticket_validation_failed", **refused)
                 log.warning("ticket creation refused: %s", type(exc).__name__)
                 return ToolOutput("The ticket could not be created (a leg failed validation); adjust the legs and try again.",
                                   is_error=True)
@@ -1547,7 +1590,7 @@ class ChatToolbox:
         finally:
             if not created:
                 self._proposal_turns.pop(slot, None)
-        self._audit.proposal(session_id, turn_id, ticket)
+        outcome.created(ticket)
 
         executable = [d for d in decisions if d.verdict != "reject"]
         buy_cost = sum((d.est_cost_usd for d in executable if d.leg.side == "buy" and d.est_cost_usd is not None), Decimal(0))

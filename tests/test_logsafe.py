@@ -216,10 +216,19 @@ def test_set_log_secrets_replaces_the_previous_set(scrubbed, caplog):
 
 
 def test_short_and_empty_values_are_ignored(scrubbed, caplog):
-    set_log_secrets(["", "   ", "abc", "12345", None, 123456789, "abcdef", f"  {SECRET}\n"])
-    log.warning("abc 12345 123456789 abcdef %s", SECRET)
-    assert "abc 12345 123456789 [redacted] [redacted]" in caplog.text
-    assert logsafe.MIN_SECRET_LEN == 6
+    set_log_secrets(["", "   ", "abc", "12345", None, 123456789, "abcdefg", "abcdefgh", f"  {SECRET}\n"])
+    log.warning("abc 12345 123456789 abcdefg-x abcdefgh %s", SECRET)
+    assert "abc 12345 123456789 abcdefg-x [redacted] [redacted]" in caplog.text
+
+
+def test_the_ledger_and_the_log_scrubber_share_one_floor_of_eight_characters():
+    from finagent.trading import ledger
+
+    assert logsafe.MIN_SECRET_LEN == ledger.MIN_KNOWN_SECRET_LEN == 8
+    book = Ledger(AppDB(":memory:"), known_secrets=["seven77", "eight888"])
+    assert book.redact_text("a seven77 b eight888 c") == "a seven77 b [REDACTED] c"
+    set_log_secrets(["seven77", "eight888"])
+    assert scrub_text("a seven77 b eight888 c") == "a seven77 b [redacted] c"
 
 
 def test_a_secret_containing_another_is_replaced_as_one_unit(scrubbed, caplog):
@@ -268,6 +277,110 @@ def test_ordinary_log_lines_are_left_alone(scrubbed, caplog):
     for line in lines:
         assert line in caplog.text
     assert "[redacted]" not in caplog.text
+
+
+# --- token counts are not credentials (the log pass only) ------------------------------------------
+
+# The real templates of `finagent.agent.llm` that log provider error text; each provider message is
+# the shape that provider sends. `test_the_llm_log_templates_are_the_real_ones` keeps them honest.
+LLM_ERROR_TEMPLATES = (
+    "anthropic error: %s",
+    "openai-compatible error: %s",
+    "effort/thinking unsupported for %s, retrying plain: %s",
+    "%s rejected reasoning_effort=%s; continuing without it: %s",
+)
+ANTHROPIC_MAX_TOKENS = (
+    "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', 'message': "
+    "'max_tokens: 9000 > 8192, which is the maximum allowed number of output tokens for this model'}}"
+)
+OPENAI_USAGE = (
+    "Error code: 400 - {'error': {'message': 'context too long', 'usage': {'prompt_tokens': 1200, "
+    "'completion_tokens': 30, 'total_tokens': 1230}, 'max_completion_tokens': 8192}}"
+)
+GEMINI_COUNTS = "INVALID_ARGUMENT: thoughts_token_count=512 exceeds the budget; input_tokens: 90210"
+
+
+def test_the_llm_log_templates_are_the_real_ones():
+    import inspect
+
+    from finagent.agent import llm as llm_module
+
+    source = inspect.getsource(llm_module)
+    for template in LLM_ERROR_TEMPLATES:
+        assert f'"{template}"' in source, template
+
+
+def test_token_counts_stay_readable_in_llm_error_logs(scrubbed, caplog):
+    llm_log = logging.getLogger("finagent.llm")
+    llm_log.error("anthropic error: %s", ANTHROPIC_MAX_TOKENS)
+    llm_log.error("openai-compatible error: %s", OPENAI_USAGE)
+    llm_log.warning("effort/thinking unsupported for %s, retrying plain: %s", "claude-x", ANTHROPIC_MAX_TOKENS)
+    llm_log.warning("%s rejected reasoning_effort=%s; continuing without it: %s", "gemini-x", "high", GEMINI_COUNTS)
+    text = caplog.text
+    assert "[redacted]" not in text
+    for visible in ("max_tokens: 9000 > 8192", "'prompt_tokens': 1200", "'completion_tokens': 30",
+                    "'total_tokens': 1230", "'max_completion_tokens': 8192", "thoughts_token_count=512",
+                    "input_tokens: 90210"):
+        assert visible in text, visible
+
+
+@pytest.mark.parametrize("text, hidden", [
+    ("access_token=shapeToken0101", "shapeToken0101"),
+    ("refresh_token: shapeToken0102", "shapeToken0102"),
+    ("X-Auth-Token: shapeToken0103", "shapeToken0103"),
+    ("api_token='shapeToken0104'", "shapeToken0104"),
+    ("GET https://example.com/v1?token=shapeToken0105", "shapeToken0105"),
+    ("token_secret: shapeToken0106", "shapeToken0106"),
+])
+def test_real_token_credentials_are_still_masked(scrubbed, caplog, text, hidden):
+    logging.getLogger("finagent.llm").error("openai-compatible error: %s", text)
+    assert hidden not in caplog.text and "[redacted]" in caplog.text
+
+
+def test_a_known_secret_next_to_a_token_count_name_is_still_scrubbed(scrubbed, caplog):
+    logging.getLogger("finagent.llm").error("anthropic error: %s", f"max_tokens: {SECRET} prompt_tokens={SECRET}")
+    assert SECRET not in caplog.text
+    assert "max_tokens: [redacted] prompt_tokens=[redacted]" in caplog.text
+
+
+def test_the_ledger_pass_still_masks_token_count_names():
+    """The exemption is for logs only: the ledger keeps its broader rule."""
+    book = Ledger(AppDB(":memory:"))
+    assert book.redact_text("max_tokens: 9000") == "max_tokens: [REDACTED]"
+    book.append("sess-1", "note", {"text": "prompt_tokens=1200"})
+    assert "1200" not in book._db.query("SELECT payload FROM ledger")[0]["payload"]
+
+
+# --- AppState.load installs the scrubber before anything else can log -------------------------------
+
+
+def test_app_state_load_installs_the_scrubber_with_the_settings_secrets_first(monkeypatch, caplog):
+    """`AppState.load` is heavy (it reads the product store), so this stops it at its first real
+    step and checks what it did before that: the factory is installed and knows every key."""
+    import finagent.app_state as app_state
+    from finagent.config import Settings
+
+    class Stop(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        logging.getLogger("finagent.app").warning("opening the store with %s", "gm-key-0123456789")
+        raise Stop()
+
+    monkeypatch.setattr(app_state, "RDB", stop)
+    settings = Settings(
+        _env_file=None, llm_provider="stub", gemini_api_key="gm-key-0123456789",
+        openai_api_key="sk-openai-0123456789", anthropic_api_key="sk-ant-0123456789",
+        alpaca_api_key_id=FAKE_KEY_ID, alpaca_api_secret_key=FAKE_SECRET, tavily_api_key=OTHER,
+    )
+    before = logging.getLogRecordFactory()
+    with pytest.raises(Stop):
+        app_state.AppState.load(settings)
+    assert logging.getLogRecordFactory() is not before
+    assert "opening the store with [redacted]" in caplog.text
+    log.warning("keys %s %s %s %s %s %s", "gm-key-0123456789", "sk-openai-0123456789", "sk-ant-0123456789",
+                FAKE_KEY_ID, FAKE_SECRET, OTHER)
+    assert "keys [redacted] [redacted] [redacted] [redacted] [redacted] [redacted]" in caplog.text
 
 
 def test_scrubbing_is_linear_time_on_a_hostile_message(scrubbed):

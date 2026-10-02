@@ -21,8 +21,11 @@ user's `basicConfig`. For a `finagent` record the wrapper:
    no handler can render the raw exception again;
 3. scrubs `stack_info`.
 
-Records of every other logger pass through untouched (not even rendered). Values passed through
-`extra=` are not covered.
+Records of every other logger pass through untouched (not even rendered).
+
+**Limits.** Values passed through `extra=` are not covered (they are attributes a custom formatter
+may print), and neither is the logger's *name*. A text longer than 100,000 characters is cut there
+before it is scrubbed.
 
 **What is scrubbed.** (a) Every exact occurrence of a known secret value (`set_log_secrets`),
 longest first; (b) credential shapes, with the ledger's linear-time free-text passes
@@ -30,8 +33,11 @@ longest first; (b) credential shapes, with the ledger's linear-time free-text pa
 secret-named `name: value` / `name=value` pairs, `Authorization: ...`, `Bearer ...`, and
 `key=` / `api_key=` / `token=` query parameters. Both become `[redacted]`; names stay visible. The
 price of (b) is that a traceback's *source line* such as `token = load()` is shown as
-`token = [redacted]`. Each scrubbed text is also capped at 100,000 characters (the ledger's leaf
-cap), so no pattern ever runs on an unbounded string.
+`token = [redacted]`. One exemption, in this log pass only (the ledger keeps the broad rule): a
+pair whose name ends in `tokens` or `token_count` (`max_tokens: 9000`, `'prompt_tokens': 1200`)
+is a count, not a credential, and stays readable; a known secret value is still removed from it by
+(a). Each scrubbed text is also capped at 100,000 characters (the ledger's leaf cap), so no pattern
+ever runs on an unbounded string.
 
 If scrubbing itself fails, the record's text is replaced by a fixed notice: fail safe, never leak.
 """
@@ -42,12 +48,12 @@ import threading
 from collections.abc import Iterable
 from typing import Any
 
-from .trading.ledger import redact_free_text
+from .trading.ledger import MIN_KNOWN_SECRET_LEN, redact_free_text
 
 REDACTED = "[redacted]"
 # A shorter value is ignored: blanking a common substring out of every log line would destroy the
-# logs while protecting nothing (real keys are far longer).
-MIN_SECRET_LEN = 6
+# logs while protecting nothing (real keys are far longer). One floor (8) for the ledger and the logs.
+MIN_SECRET_LEN = MIN_KNOWN_SECRET_LEN
 
 _ROOT = "finagent"
 _PREFIX = _ROOT + "."
@@ -80,7 +86,7 @@ def scrub_text(text: str) -> str:
     for secret in _secrets:
         if secret in text:
             text = text.replace(secret, REDACTED)
-    return redact_free_text(text, REDACTED)
+    return redact_free_text(text, REDACTED, allow_token_counts=True)
 
 
 def _scrub_record(record: logging.LogRecord) -> None:

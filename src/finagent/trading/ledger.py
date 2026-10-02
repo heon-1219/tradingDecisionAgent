@@ -76,7 +76,7 @@ happens to use today, and works at several levels:
    ledger is given the actual secret values (the Alpaca key id and secret, say), every verbatim
    occurrence of each one is replaced with `[REDACTED]` in every string leaf *and* every dict key,
    as a pre-pass that runs before levels 1-3 ever see the payload. Each value is stripped of
-   surrounding whitespace first, and anything shorter than `_MIN_KNOWN_SECRET_LEN` characters (or
+   surrounding whitespace first, and anything shorter than `MIN_KNOWN_SECRET_LEN` (8) characters (or
    blank, or not a string - an unset setting is `None`) is ignored, so a short word can never be
    blanked out everywhere. Values are applied longest first, so a secret that contains another is
    replaced as one unit. This is `str.replace` per secret per leaf: linear in the payload size
@@ -287,7 +287,16 @@ def _secret_value_span(text: str, sep: int, covered_end: int) -> tuple[int, int]
     return (start, end) if end > start else None
 
 
-def _pair_value_spans(text: str) -> list[tuple[int, int]]:
+def _is_token_count_name(name: str) -> bool:
+    """`max_tokens`, `prompt_tokens`, `x-ratelimit-remaining-tokens`, `thoughts_token_count`: the
+    (last dotted component of the) name ends in `tokens` or `token_count`. These name counts, not
+    credentials. Only the log pass exempts them (`redact_free_text(allow_token_counts=True)`); a
+    singular `..._token` is never exempt."""
+    last = name.rpartition(".")[2].lower()
+    return last.endswith("tokens") or last.endswith("token_count")
+
+
+def _pair_value_spans(text: str, *, allow_token_counts: bool = False) -> list[tuple[int, int]]:
     """The spans of every `<name><sep><value>` value in `text` (`sep` is `:` or `=`, optionally
     spaced) whose name is secret-like (`_is_secret_like_free_text_name`). Names and separators are
     never part of a span, so they stay visible. It is driven by separators, not by a name-matching
@@ -314,6 +323,8 @@ def _pair_value_spans(text: str) -> list[tuple[int, int]]:
         name = _name_before_separator(text, sep, floor)
         floor = sep + 1
         if name and _is_secret_like_free_text_name(name):
+            if allow_token_counts and _is_token_count_name(name):
+                continue
             span = _secret_value_span(text, sep, covered_end)
             if span is not None:
                 spans.append(span)
@@ -321,22 +332,22 @@ def _pair_value_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _free_text_secret_spans(text: str) -> list[tuple[int, int]]:
+def _free_text_secret_spans(text: str, *, allow_token_counts: bool = False) -> list[tuple[int, int]]:
     """Every span any free-text pass wants hidden, all computed against the same `text` - see the
     free-text patterns section for why no pass runs on another pass's output."""
     spans = [m.span(3) for m in _QUERY_PARAM_RE.finditer(text)]
     spans += [(m.end(1), m.end()) for m in _AUTH_HEADER_RE.finditer(text)]
     spans += [m.span(2) for m in _BEARER_RE.finditer(text)]
-    spans += _pair_value_spans(text)
+    spans += _pair_value_spans(text, allow_token_counts=allow_token_counts)
     return spans
 
 
-def _redact_free_text(text: str, placeholder: str = _REDACTED) -> str:
+def _redact_free_text(text: str, placeholder: str = _REDACTED, *, allow_token_counts: bool = False) -> str:
     """Truncate `text` to `_MAX_LEAF_LEN`, then replace each maximal run of overlapping or
     adjacent secret spans with a single `[REDACTED]` (or `placeholder`)."""
     text = _truncate_leaf(text)
     merged: list[list[int]] = []
-    for start, end in sorted(_free_text_secret_spans(text)):
+    for start, end in sorted(_free_text_secret_spans(text, allow_token_counts=allow_token_counts)):
         if end <= start:
             continue
         if merged and start <= merged[-1][1]:
@@ -355,12 +366,14 @@ def _redact_free_text(text: str, placeholder: str = _REDACTED) -> str:
     return "".join(pieces)
 
 
-def redact_free_text(text: str, placeholder: str = _REDACTED) -> str:
+def redact_free_text(text: str, placeholder: str = _REDACTED, *, allow_token_counts: bool = False) -> str:
     """The level-3 free-text passes (see the module docstring) for one string, with no known-secret
     scrub: credential-shaped values (`APCA-API-SECRET-KEY: ...`, `Authorization: ...`,
     `Bearer ...`, `?key=...`, `api_key=...`) become `placeholder`, names stay visible. Linear in
-    `len(text)`. Used by `finagent.logsafe` for log records."""
-    return _redact_free_text(text, placeholder)
+    `len(text)`. Used by `finagent.logsafe` for log records, which passes `allow_token_counts=True`:
+    a `name: value` / `name=value` pair whose name ends in `tokens` or `token_count` (`max_tokens:
+    9000`, `'prompt_tokens': 1200`) is a count and stays readable. The ledger never passes it."""
+    return _redact_free_text(text, placeholder, allow_token_counts=allow_token_counts)
 
 
 def _stringify_key(key: Any) -> str:
@@ -458,8 +471,8 @@ def _redact(value: Any) -> Any:
 
 # A configured secret shorter than this is ignored: blanking a short common word out of every
 # ledger string would destroy the audit trail while protecting nothing real (Alpaca key ids and
-# secrets are far longer).
-_MIN_KNOWN_SECRET_LEN = 8
+# secrets are far longer). The log scrubber (`finagent.logsafe`) and the toolbox use the same floor.
+MIN_KNOWN_SECRET_LEN = 8
 
 _PLACEHOLDER = {"_ledger_error": "payload could not be serialized"}
 
@@ -469,7 +482,7 @@ def _normalize_known_secrets(values: Iterable[Any]) -> tuple[str, ...]:
     kept = {
         value.strip()
         for value in values
-        if isinstance(value, str) and len(value.strip()) >= _MIN_KNOWN_SECRET_LEN
+        if isinstance(value, str) and len(value.strip()) >= MIN_KNOWN_SECRET_LEN
     }
     return tuple(sorted(kept, key=lambda s: (-len(s), s)))
 

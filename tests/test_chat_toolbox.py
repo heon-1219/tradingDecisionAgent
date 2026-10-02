@@ -1565,12 +1565,191 @@ async def test_refused_proposals_are_ledgered_with_a_reason(world):
     assert FAKE_SECRET not in stored and "decisions[0]" not in stored and "E99" not in stored
 
 
-async def test_a_broker_failure_during_a_proposal_is_only_a_failed_tool_call(world):
+async def test_a_broker_failure_during_a_proposal_is_ledgered_as_a_rejected_proposal(world):
     tb = world.toolbox(ledger=world.ledger)
     e1 = world.add_evidence()
     world.broker.account_error = BrokerError(500, None, f"upstream failure {FAKE_SECRET}")
     out = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
     assert out.is_error
-    assert [row["kind"] for row in audit(world)] == ["tool_call"]
-    assert audit(world)[0]["payload"]["is_error"] is True
+    assert [row["kind"] for row in audit(world)] == ["proposal_rejected", "tool_call"]
+    rejected = audit(world, "proposal_rejected")[0]["payload"]
+    assert rejected == {"turn_id": "turn-1", "reason": "broker_error"}
+    assert audit(world, "tool_call")[0]["payload"]["is_error"] is True
     assert FAKE_SECRET not in stored_ledger_text(world)
+    assert world.tickets.active(world.session_id) is None
+
+
+# --- Task 3.8, part C: the audit catch-all and the tool_call edge cases ---------------------------
+
+
+@pytest.mark.parametrize("failure, reason", [
+    (HttpError(503, "upstream down"), "upstream_error"),
+    (RuntimeError(f"boom {FAKE_SECRET}"), "unexpected_error"),
+])
+async def test_any_failure_inside_a_proposal_writes_one_proposal_rejected(world, failure, reason):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+
+    async def failing(symbols):
+        raise failure
+
+    world.executor.build_context = failing
+    out = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
+    assert out.is_error
+    assert [row["kind"] for row in audit(world)] == ["proposal_rejected", "tool_call"]
+    assert audit(world, "proposal_rejected")[0]["payload"] == {"turn_id": "turn-1", "reason": reason}
+    assert FAKE_SECRET not in stored_ledger_text(world)
+    del world.executor.build_context  # the slot was released: the same turn may propose again
+    ok = await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
+    assert not ok.is_error, ok.text
+
+
+async def test_dispatch_level_refusals_of_a_proposal_are_ledgered(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    good = proposal([aapl_leg()], [e1])
+    calls = [
+        {**good, "bogus": 1},                                   # an unknown argument
+        {k: v for k, v in good.items() if k != "thesis"},       # a missing required argument
+        "not an object",                                        # the arguments are not an object
+    ]
+    for args in calls:
+        out = await tb.execute(world.session_id, "propose_trades", args, turn_id="turn-1")
+        assert out.is_error and out.text.startswith("Invalid arguments")
+    no_executor = world.toolbox(executor=None, ledger=world.ledger)  # the tool is not offered at all
+    out = await no_executor.execute(world.session_id, "propose_trades", good, turn_id="turn-1")
+    assert out.is_error and "Unknown tool" in out.text
+    rejected = [row["payload"] for row in audit(world, "proposal_rejected")]
+    assert rejected == [{"turn_id": "turn-1", "reason": "dispatch_error"}] * 4
+    assert len(audit(world, "tool_call")) == 4 and audit(world, "proposal") == []
+    # other tools' dispatch errors are not proposals
+    assert (await tb.execute(world.session_id, "get_quotes", {}, turn_id="turn-1")).is_error
+    assert len(audit(world, "proposal_rejected")) == 4
+
+
+async def test_a_cancelled_proposal_writes_only_the_cancelled_tool_call(world):
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+
+    async def cancelled(symbols):
+        raise asyncio.CancelledError()
+
+    world.executor.build_context = cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb)
+    assert [row["kind"] for row in audit(world)] == ["tool_call"]
+    assert audit(world)[0]["payload"]["cancelled"] is True
+
+
+async def test_every_proposal_call_ends_with_exactly_one_proposal_entry(world):
+    """Created, refused by the rules, refused at dispatch or failed: one entry each, never two."""
+    tb = world.toolbox(ledger=world.ledger)
+    e1 = world.add_evidence()
+    await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb, turn="a")       # created
+    await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb, turn="a")       # second in the turn
+    await world.run("propose_trades", proposal([REJECTED_LEG], [e1]), toolbox=tb, turn="b")     # all legs rejected
+    await world.run("propose_trades", proposal([aapl_leg()], ["E99"]), toolbox=tb, turn="c")    # bad evidence id
+    await world.run("propose_trades", {"legs": []}, toolbox=tb, turn="d")                       # missing arguments
+    world.broker.account_error = BrokerError(500, None, "down")
+    await world.run("propose_trades", proposal([aapl_leg()], [e1]), toolbox=tb, turn="e")       # broker failure
+    kinds = [row["kind"] for row in audit(world) if row["kind"] != "tool_call"]
+    reasons = [row["payload"].get("reason") for row in audit(world) if row["kind"] != "tool_call"]
+    assert kinds == ["proposal"] + ["proposal_rejected"] * 5
+    assert reasons == [None, "one_proposal_per_turn", "all_legs_rejected", "invalid_arguments", "dispatch_error",
+                       "broker_error"]
+    assert len(audit(world, "tool_call")) == 6
+
+
+async def test_latency_measures_the_handler_only(world, monkeypatch):
+    import finagent.chat.audit as audit_module
+    import finagent.chat.toolbox as toolbox_module
+
+    clock = SimpleNamespace(t=1000.0)
+    monkeypatch.setattr(toolbox_module, "time", SimpleNamespace(perf_counter=lambda: clock.t))
+    tb = world.toolbox(ledger=world.ledger)
+
+    async def slow_status(session_id, args, turn_id):
+        clock.t += 0.25  # the handler itself takes 250 ms
+        return ToolOutput("US market is OPEN.")
+
+    real_hash = audit_module.args_sha256
+
+    def slow_hash(args):
+        clock.t += 5.0  # building the audit entry is slow: not part of the tool's latency
+        return real_hash(args)
+
+    tb._t_get_market_status = slow_status
+    monkeypatch.setattr(audit_module, "args_sha256", slow_hash)
+    await tb.execute(world.session_id, "get_market_status", {}, turn_id="turn-1")
+    assert audit(world, "tool_call")[0]["payload"]["latency_ms"] == 250
+
+
+async def test_an_exception_escaping_dispatch_is_ledgered_as_raised_and_reraised(world, monkeypatch):
+    tb = world.toolbox(ledger=world.ledger)
+
+    async def broken(session_id, name, args, turn_id):
+        raise RuntimeError(f"dispatch broke {FAKE_SECRET}")
+
+    monkeypatch.setattr(tb, "_dispatch", broken)
+    with pytest.raises(RuntimeError):
+        await tb.execute(world.session_id, "get_account", {"x": 1}, turn_id="turn-6")
+    [entry] = audit(world, "tool_call")
+    payload = entry["payload"]
+    assert payload["raised"] == "RuntimeError" and payload["is_error"] is True
+    assert "cancelled" not in payload and "result_sha256" not in payload
+    assert payload["tool"] == "get_account" and payload["args_sha256"] == sha('{"x":1}')
+    assert payload["evidence_ids"] == [] and isinstance(payload["latency_ms"], int)
+    assert FAKE_SECRET not in stored_ledger_text(world) and "dispatch broke" not in stored_ledger_text(world)
+
+
+class _Halt(BaseException):
+    """Stands in for `GeneratorExit` / `SystemExit`: a BaseException that is not a cancellation."""
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, GeneratorExit, _Halt])
+async def test_only_a_cancellation_is_recorded_as_cancelled(world, monkeypatch, exc_type):
+    tb = world.toolbox(ledger=world.ledger)
+
+    async def interrupted(session_id, name, args, turn_id):
+        raise exc_type()
+
+    monkeypatch.setattr(tb, "_dispatch", interrupted)
+    with pytest.raises(exc_type):
+        await tb.execute(world.session_id, "get_account", {}, turn_id="turn-1")
+    assert audit(world) == []  # propagated without a ledger write
+
+
+@pytest.mark.parametrize("text", [None, 12345, b"bytes", ["a", "list"]])
+async def test_a_malformed_tool_output_is_still_ledgered_without_a_result_hash(world, text):
+    tb = world.toolbox(ledger=world.ledger)
+
+    async def malformed(session_id, args, turn_id):
+        return ToolOutput(text=text)
+
+    tb._t_get_market_status = malformed
+    out = await tb.execute(world.session_id, "get_market_status", {}, turn_id="turn-1")
+    assert out.text is text
+    [entry] = audit(world, "tool_call")
+    payload = entry["payload"]
+    assert set(payload) == TOOL_CALL_KEYS
+    assert payload["result_sha256"] is None and payload["is_error"] is False
+    assert payload["tool"] == "get_market_status" and payload["evidence_ids"] == []
+
+
+def test_the_args_hash_recipe_is_the_documented_one():
+    """docs/architecture.md and docs/api_spec.md state this recipe; an auditor must be able to
+    reproduce a hash from a transcript."""
+    args = {"symbols": ["AAPL"], "note": "삼성전자 – é", "when": FIXED_NOW, "n": D("1.50")}
+    expected = hashlib.sha256(
+        json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+    ).hexdigest()
+    assert args_sha256(args) == expected
+
+
+async def test_replaced_keys_are_still_scrubbed_from_broker_messages(world):
+    old_key = "sk-old-provider-key-0123456789"
+    tb = world.toolbox(known_secrets=[old_key, "short"])
+    world.broker.account_error = BrokerError(500, None, f"upstream echoed {old_key} and {FAKE_SECRET} short")
+    out = await world.run("get_account", toolbox=tb)
+    assert out.is_error and old_key not in out.text and FAKE_SECRET not in out.text
+    assert "short" in out.text  # under the 8-character floor: never blanked
