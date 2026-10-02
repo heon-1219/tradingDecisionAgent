@@ -92,9 +92,9 @@ def test_crlf_line_endings_are_kept(tmp_path):
 
 def test_a_utf8_bom_is_kept_and_the_first_line_still_matches(tmp_path):
     env = tmp_path / ".env"
-    env.write_bytes("﻿TRADING_ENABLED=true\n".encode("utf-8"))
+    env.write_bytes("\ufeffTRADING_ENABLED=true\n".encode("utf-8"))
     update_env_file(env, {"TRADING_ENABLED": "false"})
-    assert env.read_bytes() == "﻿TRADING_ENABLED=false\n".encode("utf-8")
+    assert env.read_bytes() == "\ufeffTRADING_ENABLED=false\n".encode("utf-8")
 
 
 def test_creates_the_file_when_missing(tmp_path):
@@ -178,3 +178,78 @@ def test_settings_read_back_exactly_what_was_written(tmp_path, monkeypatch):
     assert s.tavily_api_key == "tvly-x_y.z"
     assert s.sec_user_agent == "Jane Doe jane@example.com #1 $5 'quoted'"
     assert s.trading_enabled is False
+
+
+# --- fix round 1: Unicode line separators, strict ASCII, symlinks -------------------------------
+
+UNICODE_BREAKERS = ["\x85", "\u2028", "\u2029", "\x0b", "\x0c", "é", "\xa0", "\ufeff"]
+
+
+@pytest.mark.parametrize("ch", UNICODE_BREAKERS)
+def test_only_printable_ascii_values_are_accepted(tmp_path, ch):
+    env = tmp_path / ".env"
+    _write(env, ORIGINAL)
+    value = f"Jane jane@example.com{ch}API_ALLOW_REMOTE=true #"
+    with pytest.raises(EnvFileError) as info:
+        update_env_file(env, {"SEC_USER_AGENT": value})
+    assert value not in str(info.value)
+    assert _read(env) == ORIGINAL
+    with pytest.raises(EnvFileError):
+        check_env_value(ch)
+
+
+def test_a_two_write_round_trip_never_creates_a_new_key(tmp_path, monkeypatch):
+    from dotenv import dotenv_values
+
+    for name in ("API_ALLOW_REMOTE", "SEC_USER_AGENT", "TRADING_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    _write(env, ORIGINAL)
+    value = "Jane jane@example.com API_ALLOW_REMOTE=true #"  # ASCII look-alike of the attack
+    update_env_file(env, {"SEC_USER_AGENT": value})
+    update_env_file(env, {"TRADING_ENABLED": "false"})  # the second write re-reads the file
+    parsed = dotenv_values(env)
+    assert set(parsed) == {"LLM_PROVIDER", "ALPACA_API_KEY_ID", "TRADING_ENABLED", "OTHER", "SEC_USER_AGENT"}
+    assert parsed["SEC_USER_AGENT"] == value
+    s = Settings(_env_file=env)
+    assert s.api_allow_remote is False and s.sec_user_agent == value
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c"])
+def test_a_stray_unicode_separator_already_in_the_file_stays_inside_its_line(tmp_path, sep):
+    env = tmp_path / ".env"
+    text = f'SEC_USER_AGENT="Jane{sep}API_ALLOW_REMOTE=true"\nTRADING_ENABLED=true\n'
+    _write(env, text)
+    update_env_file(env, {"TRADING_ENABLED": "false"})
+    assert _read(env) == f'SEC_USER_AGENT="Jane{sep}API_ALLOW_REMOTE=true"\nTRADING_ENABLED=false\n'
+    # and a line holding one is replaced as a whole, never split into two
+    update_env_file(env, {"SEC_USER_AGENT": "Jane jane@example.com"})
+    assert _read(env) == 'SEC_USER_AGENT="Jane jane@example.com"\nTRADING_ENABLED=false\n'
+
+
+def test_a_lone_carriage_return_still_ends_a_line(tmp_path):
+    env = tmp_path / ".env"
+    _write(env, "A=1\rTRADING_ENABLED=true\r")
+    update_env_file(env, {"TRADING_ENABLED": "false"})
+    assert _read(env) == "A=1\rTRADING_ENABLED=false\r"
+
+
+def _symlink_or_skip(link, target) -> None:
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable here ({type(exc).__name__})")
+
+
+def test_a_symlinked_env_file_updates_the_target_and_keeps_the_link(tmp_path):
+    real_dir = tmp_path / "secrets"
+    real_dir.mkdir()
+    target = real_dir / "real.env"
+    _write(target, ORIGINAL)
+    link = tmp_path / ".env"
+    _symlink_or_skip(link, target)
+    update_env_file(link, {"TRADING_ENABLED": "false"})
+    assert link.is_symlink()
+    assert "TRADING_ENABLED=false\n" in _read(target)
+    assert sorted(p.name for p in real_dir.iterdir()) == ["real.env"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env", "secrets"]

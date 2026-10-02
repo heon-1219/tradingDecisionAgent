@@ -6,10 +6,14 @@
   the file ends up with exactly one. A missing name is appended at the end. `None` removes it.
 - Every other line (comments, blank lines, unrelated keys) is kept byte for byte, along with the
   line-ending style (`\\r\\n` if the file uses it) and a UTF-8 BOM.
-- Values are checked first (`check_env_value`): newlines, control characters, `"`, `\\` and `${`
-  are refused, so a value can never break out of its line, escape its quotes, or be expanded by
-  python-dotenv's `${VAR}` interpolation. A value made only of `[A-Za-z0-9_./:@+-]` is written bare;
-  anything else is double-quoted. Nothing is written if any value or name is refused.
+- Values are checked first (`check_env_value`): only printable ASCII (0x20-0x7E) is accepted, and
+  `"`, `\\` and `${` are refused too, so a value can never break out of its line (no `\\n`, and no
+  Unicode separator such as `\\u2028`), escape its quotes, or be expanded by python-dotenv's `${VAR}`
+  interpolation. A value made only of `[A-Za-z0-9_./:@+-]` is written bare; anything else is
+  double-quoted. Nothing is written if any value or name is refused.
+- The file is split into lines only at `\\r\\n`, `\\n` and `\\r`, as python-dotenv does, so a stray
+  Unicode separator already in the file stays inside its line.
+- A symlinked path is resolved first: the target is updated and the link is kept.
 - The write is atomic: a temp file in the same directory, flushed and fsynced, then `os.replace`.
   An existing file's permission bits are copied to it; a new file keeps `mkstemp`'s owner-only mode.
 - Values are never logged and never appear in an exception message.
@@ -25,7 +29,11 @@ from pathlib import Path
 _NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 _BARE_VALUE_RE = re.compile(r"[A-Za-z0-9_./:@+\-]+")
 _LINE_KEY_RE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
-_BOM = "﻿"
+# Lines end only at \r\n, \n or \r - exactly where python-dotenv ends them. `str.splitlines` would
+# also split at \x85, \x0b, \x0c, \x1c-\x1e, \u2028 and \u2029, so a stray one inside a value would
+# turn its tail into a line of its own on the next write.
+_LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+\Z")
+_BOM = "\ufeff"
 
 
 class EnvFileError(ValueError):
@@ -37,8 +45,11 @@ def check_env_value(value: str) -> None:
     """Raise `EnvFileError` unless `value` can be written as one safe `.env` value."""
     if not isinstance(value, str):
         raise EnvFileError("the value must be text")
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        raise EnvFileError("the value contains a line break or another control character")
+    if any(not 0x20 <= ord(ch) <= 0x7E for ch in value):
+        # Printable ASCII only: this also keeps out every Unicode line separator (\x85, \u2028,
+        # \u2029, \x0b, \x0c, ...) that a line splitter might honour.
+        raise EnvFileError("the value may only contain printable ASCII characters (no line breaks, "
+                           "control characters or non-ASCII letters)")
     if '"' in value or "\\" in value:
         raise EnvFileError('the value contains a double quote (") or a backslash (\\)')
     if "${" in value:
@@ -53,7 +64,7 @@ def _format(name: str, value: str) -> str:
 
 def update_env_file(path: Path | str, updates: Mapping[str, str | None]) -> None:
     """Apply `updates` to the env file at `path` (created if missing). See the module docstring."""
-    path = Path(path)
+    path = Path(os.path.realpath(path))  # a symlinked .env: update its target, keep the link
     for name, value in updates.items():
         if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
             raise EnvFileError("invalid variable name")
@@ -65,7 +76,7 @@ def update_env_file(path: Path | str, updates: Mapping[str, str | None]) -> None
     if bom:
         text = text[len(_BOM):]
     newline = "\r\n" if "\r\n" in text else "\n"
-    lines = text.splitlines(keepends=True)
+    lines = _LINE_RE.findall(text)  # not str.splitlines(): see _LINE_RE
 
     wanted = {name.upper(): name for name in updates}
     done: set[str] = set()
