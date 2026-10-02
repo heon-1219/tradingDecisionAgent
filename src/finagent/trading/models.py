@@ -85,6 +85,10 @@ class AccountSnapshot(_AlpacaSnapshot):
     account_blocked: bool
     trade_suspended_by_user: bool
     shorting_enabled: bool
+    # Whether Alpaca says this is a paper account: True/False when the response carried an account
+    # number (paper numbers start with "PA"), None when it did not. Set by `AlpacaPaper.account()`
+    # from the number, which is NOT kept anywhere - not here, not in logs, not in any output.
+    paper: bool | None = None
 
 
 class PositionSnapshot(_AlpacaSnapshot):

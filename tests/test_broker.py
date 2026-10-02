@@ -84,6 +84,64 @@ async def test_account_parses_decimal_strings():
     assert calls
 
 
+PAPER_NUMBER = "PA3DISTINCTIVE77"
+LIVE_NUMBER = "692837451"
+
+
+async def _account_with(extra: dict, caplog=None):
+    payload = {**ACCOUNT_PAYLOAD, **extra}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    b, _ = _broker(handler)
+    return await b.account()
+
+
+async def test_account_paper_is_none_when_the_response_has_no_account_number():
+    account = await _account_with({})
+    assert account.paper is None
+
+
+async def test_account_paper_true_for_a_PA_prefixed_number():
+    account = await _account_with({"account_number": PAPER_NUMBER})
+    assert account.paper is True
+
+
+async def test_account_paper_false_for_a_number_without_the_PA_prefix():
+    for number in (LIVE_NUMBER, "pa3lowercase", "XPA123"):
+        account = await _account_with({"account_number": number})
+        assert account.paper is False, number
+
+
+async def test_account_paper_is_none_when_the_number_is_unusable():
+    for number in (None, "", 12345, ["PA1"], {"n": "PA1"}):
+        account = await _account_with({"account_number": number})
+        assert account.paper is None, number
+
+
+async def test_a_paper_field_in_the_response_cannot_spoof_the_check():
+    assert (await _account_with({"paper": True})).paper is None
+    assert (await _account_with({"paper": True, "account_number": LIVE_NUMBER})).paper is False
+    assert (await _account_with({"paper": False, "account_number": PAPER_NUMBER})).paper is True
+
+
+async def test_the_account_number_itself_is_never_kept_or_logged(caplog):
+    with caplog.at_level(logging.DEBUG):
+        account = await _account_with({"account_number": PAPER_NUMBER})
+    dumped = account.model_dump_json() + repr(account) + str(account.model_dump())
+    assert PAPER_NUMBER not in dumped and "account_number" not in dumped
+    assert PAPER_NUMBER not in caplog.text
+    assert "paper" in account.model_dump(mode="json") and account.model_dump(mode="json")["paper"] is True
+
+
+def test_the_account_snapshot_defaults_paper_to_none():
+    from finagent.trading.models import AccountSnapshot
+
+    fields = {k: v for k, v in ACCOUNT_PAYLOAD.items()}
+    assert AccountSnapshot(**fields).paper is None
+
+
 async def test_account_ignores_unknown_fields_including_removed_pdt_fields():
     payload = dict(ACCOUNT_PAYLOAD)
     payload["pattern_day_trader"] = False

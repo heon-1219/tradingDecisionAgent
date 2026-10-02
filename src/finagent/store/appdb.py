@@ -105,6 +105,12 @@ class AppDB:
             self._con.executescript(_SCHEMA)
             self._con.commit()
 
+    def close(self) -> None:
+        """Close the connection (idempotent). Afterwards every other method raises
+        `sqlite3.ProgrammingError`. Needed to delete a DB file on Windows, where an open handle blocks it."""
+        with self._lock:
+            self._con.close()  # closing an already-closed sqlite3 connection is a no-op
+
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         """Run one write/DDL statement. Serialized; commits before returning."""
         with self._lock:

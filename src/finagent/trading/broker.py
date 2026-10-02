@@ -92,6 +92,9 @@ PAPER_BASE = "https://paper-api.alpaca.markets"
 _PAPER_HOST = "paper-api.alpaca.markets"
 _PAPER_SCHEME = "https"
 _PAPER_PORTS = (None, 443)  # None = default https port (not written out in the URL)
+# Alpaca paper account numbers start with "PA" (live ones do not). Used only to set
+# `AccountSnapshot.paper`; the number itself is never stored or logged.
+_PAPER_ACCOUNT_PREFIX = "PA"
 
 # Alpaca order ids are UUIDs (canonical, dashed, lower/upper hex); client_order_id is our own
 # caller-chosen token. Both are validated (via re.fullmatch - see _validate_order_id/
@@ -275,6 +278,13 @@ class AlpacaPaper:
     async def account(self) -> AccountSnapshot:
         resp = await self._request("GET", "/v2/account")
         data = self._parse_json(resp, uncertain_on_failure=False)
+        if isinstance(data, dict):
+            # `paper` comes only from the account number's prefix: it is always assigned here, so a `paper`
+            # key in the response itself can never vouch for the account. The number is consumed here and
+            # never reaches the snapshot (or any log).
+            number = data.get("account_number")
+            data = {k: v for k, v in data.items() if k != "account_number"}
+            data["paper"] = number.startswith(_PAPER_ACCOUNT_PREFIX) if isinstance(number, str) and number else None
         return self._validate_model(AccountSnapshot, data, resp, uncertain_on_failure=False)
 
     async def positions(self) -> dict[str, PositionSnapshot]:

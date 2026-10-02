@@ -7,8 +7,10 @@ HTTP or DNS call fail loudly instead of reaching the network.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import pathlib
+import re
 import socket
 import sys
 from decimal import Decimal
@@ -17,7 +19,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from fakes_trading import FakeBroker, FakeData, make_account, make_quote
+from fakes_trading import FakeBroker, FakeData, make_account, make_clock, make_quote
 from finagent.research.evidence import EvidenceStore, ResearchResult
 from finagent.research.grounding import GroundedAnswer, GroundedWeb
 from finagent.research.http import HttpError
@@ -42,10 +44,15 @@ def _load(name: str):
 
 check_alpaca = _load("check_alpaca")
 check_research = _load("check_research")
+checkio = sys.modules["_checkio"]  # the shared output module both scripts import
 
 KEY_ID = "PKTESTKEYID0000AAAA"
 SECRET = "sEcReTvAlUe-0123456789-zzzz"
 CONFIRM_URL = "https://app.alpaca.markets/paper/dashboard/overview"
+LATENCY_OK_RE = re.compile(r"✓ \d+\.\d{2}s")
+# ESC (CSI/OSC), BEL, C1 (0x80-0x9f, e.g. 0x9b = CSI) and DEL: nothing a terminal would act on
+TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+HOSTILE = "\x1b[2J\x1b]0;pwned\x07 visible-text \x9b31m end"
 
 
 @pytest.fixture(autouse=True)
@@ -155,7 +162,7 @@ def test_readonly_flow_prints_the_four_sections_and_exits_zero(capsys):
     assert "<script>" not in out and "<b>" not in out and "\x1b" not in out
     assert "H" * 150 not in out  # headline truncated
     assert out.count("✓") == 4 and "✗" not in out
-    assert "s" in out  # latency printed like "0.00s"
+    assert len(LATENCY_OK_RE.findall(out)) == 4  # every step prints its latency, e.g. "✓ 0.00s"
     # strictly read-only: only reads reached the broker, nothing was submitted or cancelled
     assert set(broker.calls) == {"account", "clock"}
     assert broker.submits == 0 and broker.cancelled == []
@@ -172,18 +179,28 @@ def test_readonly_snapshot_shows_bid_ask_last_and_timestamp(capsys):
     assert "2026-09-28T14:00:00Z" in out
 
 
-async def test_each_step_reports_latency():
-    # latency is in seconds with two decimals, e.g. "0.00s"
-    import io
-    from contextlib import redirect_stdout
-
-    buf = io.StringIO()
+async def test_each_step_reports_its_measured_latency(monkeypatch, capsys):
+    ticks = iter(x * 0.25 for x in range(1000))  # every perf-counter read advances 0.25 s
+    monkeypatch.setattr(checkio, "perf", lambda: next(ticks))
     rep = check_alpaca.Reporter()
-    with redirect_stdout(buf):
-        ok = await check_alpaca.run_readonly(FakeBroker(), NewsData(), rep, EvidenceStore(AppDB(":memory:")))
+    ok = await check_alpaca.run_readonly(FakeBroker(), NewsData(), rep, EvidenceStore(AppDB(":memory:")))
+    out = capsys.readouterr().out
     assert ok is True
-    lines = [ln for ln in buf.getvalue().splitlines() if "✓" in ln]
-    assert len(lines) == 4 and all("s" in ln and "." in ln for ln in lines)
+    ok_lines = [ln for ln in out.splitlines() if "✓" in ln]
+    assert len(ok_lines) == 4
+    assert all(re.fullmatch(r"\s+✓ 0\.25s  \S.*", ln) for ln in ok_lines), ok_lines
+
+
+async def test_a_failed_step_reports_its_latency_and_reason(monkeypatch, capsys):
+    ticks = iter(x * 0.5 for x in range(1000))
+    monkeypatch.setattr(checkio, "perf", lambda: next(ticks))
+    broker = FakeBroker()
+    broker.account_error = BrokerError(500, None, "server exploded")
+    rep = check_alpaca.Reporter()
+    ok = await check_alpaca.run_readonly(broker, NewsData(), rep, EvidenceStore(AppDB(":memory:")))
+    out = capsys.readouterr().out
+    assert ok is False
+    assert re.search(r"✗ 0\.50s  BrokerError: .*server exploded", out)
 
 
 def test_a_failing_step_shows_a_cross_and_exit_one_but_later_steps_still_run(capsys):
@@ -360,7 +377,11 @@ def test_non_interactive_stdin_refuses_without_the_flag(capsys):
     rc = run_main(broker, order_data(), ["--place-test-order"], interactive=False)  # prompting would assert
     out = capsys.readouterr().out
     assert rc == 3 and broker.submits == 0
-    assert "--yes-i-am-sure" in out and "terminal" in out.lower()
+    assert "terminal" in out.lower() and "--yes-i-am-sure" in out
+    # Git Bash/mintty reports no TTY for native Python: the fix comes first, the flag is the last resort
+    assert "PowerShell" in out and "winpty" in out and "Git Bash" in out
+    assert out.index("PowerShell") < out.index("winpty") < out.index("--yes-i-am-sure")
+    assert "last resort" in out.lower()
 
 
 def test_non_interactive_stdin_with_the_flag_places_one_order(capsys):
@@ -386,13 +407,40 @@ def test_refuses_when_the_broker_host_constant_is_not_paper(monkeypatch, capsys)
     assert "paper" in out.lower() and "refus" in out.lower()
 
 
-@pytest.mark.parametrize("marker", [{"is_live": True}, {"account_type": "live"}, {"environment": "production"}])
-def test_refuses_when_the_account_looks_live(marker, capsys):
-    broker = FakeBroker()
-    broker.account_snapshot = SimpleNamespace(**make_account().model_dump(), **marker)
+def test_refuses_when_alpaca_says_the_account_is_not_paper(capsys):
+    broker = FakeBroker(account=make_account(paper=False))
     rc, prompts = place(broker, order_data())
+    out = capsys.readouterr().out
     assert rc == 3 and broker.submits == 0 and prompts == []
-    assert "live" in capsys.readouterr().out.lower()
+    assert "not a paper account" in out
+
+
+def test_paper_status_unknown_continues_relying_on_the_paper_host(capsys):
+    broker = FakeBroker(account=make_account())  # paper=None: the account number was not reported
+    broker.submit_actions = [cancelling(broker)]
+    rc, prompts = place(broker, order_data())
+    out = capsys.readouterr().out
+    assert rc == 0 and broker.submits == 1 and len(prompts) == 1
+    assert "paper status unknown; relying on the paper host" in out
+    assert "PAPER (verified)" not in out
+
+
+def test_a_verified_paper_account_is_stated_in_the_plan(capsys):
+    broker = FakeBroker(account=make_account(paper=True))
+    broker.submit_actions = [cancelling(broker)]
+    rc, _ = place(broker, order_data())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Account: PAPER (verified)" in out and "unknown" not in out
+
+
+def test_the_readonly_account_step_shows_the_paper_flag(capsys):
+    for account, expected, rc in ((make_account(paper=True), "verified", 0),
+                                  (make_account(), "unknown", 0),
+                                  (make_account(paper=False), "NOT", 1)):
+        assert run_main(FakeBroker(account=account), NewsData()) == rc
+        out = capsys.readouterr().out
+        assert re.search(rf"paper account\s+.*{expected}", out), out
 
 
 @pytest.mark.parametrize("over", [{"status": "ACCOUNT_UPDATED"}, {"trading_blocked": True},
@@ -522,6 +570,164 @@ def test_readonly_failure_still_lets_the_order_flow_refuse_safely(capsys):
     assert rc == 1 and broker.submits == 0 and prompts == []
 
 
+# --------------------------------------------------------------------------- fix round 1: check_alpaca
+
+
+@pytest.mark.parametrize("argv", [
+    ["--p", "--y"],
+    ["--place", "--yes"],
+    ["--place-test", "--yes-i-am-sure"],
+    ["--place-test-order", "--yes"],
+])
+def test_abbreviated_flags_are_argument_errors_and_place_nothing(argv, capsys):
+    broker = FakeBroker()
+    with pytest.raises(SystemExit) as exc:
+        run_main(broker, order_data(), argv, interactive=False)
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+    assert broker.calls == [] and broker.submits == 0  # not even a read: the parse failed first
+
+
+def test_a_secret_straddling_the_truncation_limit_is_still_blanked(capsys):
+    broker = FakeBroker()
+    # "BrokerError: Alpaca broker error 500: " is 38 characters, so the secret starts at ~208 and
+    # crosses the 220-character cut: truncating before scrubbing would leave a readable fragment.
+    broker.account_error = BrokerError(500, None, "x" * 170 + SECRET + " tail")
+    rc = run_main(broker, NewsData())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert SECRET[:8] not in out and SECRET[-8:] not in out and KEY_ID[:8] not in out
+    assert "***" in out
+
+
+def test_control_characters_in_statuses_and_clock_never_reach_the_terminal(capsys):
+    broker = FakeBroker(account=make_account(status="ACTIVE" + HOSTILE),
+                        clock=make_clock().model_copy(update={"timestamp": HOSTILE, "next_open": HOSTILE,
+                                                              "next_close": HOSTILE}))
+    run_main(broker, NewsData())
+    out = capsys.readouterr().out
+    assert TERMINAL_CONTROL_RE.search(out) is None
+    assert "visible-text" in out  # the readable part survives
+
+
+def test_control_characters_in_an_order_status_never_reach_the_terminal(capsys):
+    broker = FakeBroker()
+
+    def hostile_status(b, leg, cid):
+        order = b.place(leg, cid, status="accepted" + HOSTILE)
+        b.status_script[order.id] = ["canceled"]
+        return order
+
+    broker.submit_actions = [hostile_status]
+    rc, _ = place(broker, order_data())
+    out = capsys.readouterr().out
+    assert rc == 0 and TERMINAL_CONTROL_RE.search(out) is None and "visible-text" in out
+
+
+def test_control_characters_in_an_error_message_never_reach_the_terminal(capsys):
+    broker = FakeBroker()
+    broker.account_error = BrokerError(502, None, "bad gateway " + HOSTILE)
+    run_main(broker, NewsData())
+    out = capsys.readouterr().out
+    assert TERMINAL_CONTROL_RE.search(out) is None and "bad gateway" in out and "visible-text" in out
+
+
+def test_yes_i_am_sure_on_a_terminal_still_requires_the_typed_word(capsys):
+    broker = FakeBroker()
+    rc, prompts = place(broker, order_data(), typed="yes", extra=["--yes-i-am-sure"], interactive=True)
+    out = capsys.readouterr().out
+    assert rc == 3 and len(prompts) == 1 and broker.submits == 0
+    assert "nothing was placed" in out.lower()
+
+
+def test_yes_i_am_sure_on_a_terminal_with_the_word_places_one_order(capsys):
+    broker = FakeBroker()
+    broker.submit_actions = [cancelling(broker)]
+    rc, prompts = place(broker, order_data(), typed="PLACE", extra=["--yes-i-am-sure"], interactive=True)
+    assert rc == 0 and len(prompts) == 1 and broker.submits == 1
+
+
+def test_ctrl_c_at_the_confirmation_prompt_places_nothing(capsys):
+    broker = FakeBroker()
+
+    def interrupted(prompt=""):
+        raise KeyboardInterrupt
+
+    rc = run_main(broker, order_data(), ["--place-test-order"], read_line=interrupted, interactive=True)
+    assert rc == 3 and broker.submits == 0
+    assert "nothing was placed" in capsys.readouterr().out.lower()
+
+
+def test_ctrl_c_after_the_submit_says_an_open_order_may_remain_and_re_raises(capsys):
+    broker = FakeBroker()
+    holder = {}
+
+    def action(b, leg, cid):
+        order = b.place(leg, cid)
+        holder["id"] = order.id
+        return order
+
+    broker.submit_actions = [action]
+    broker.get_order_error = KeyboardInterrupt()  # the user hits Ctrl-C while the cancel is being polled
+    with pytest.raises(KeyboardInterrupt):
+        place(broker, order_data())
+    out = capsys.readouterr().out
+    assert "an open order may remain" in out
+    assert holder["id"] in out and broker.submitted[0][1] in out and CONFIRM_URL in out
+    assert broker.submits == 1
+
+
+async def test_task_cancellation_after_the_submit_is_handled_the_same_way(capsys):
+    broker = FakeBroker()
+    holder = {}
+
+    def action(b, leg, cid):
+        order = b.place(leg, cid)
+        holder["id"] = order.id
+        return order
+
+    broker.submit_actions = [action]
+    broker.get_order_error = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await check_alpaca.place_test_order(broker, order_data(), check_alpaca.Reporter(), interactive=True,
+                                            assume_yes=False, read_line=lambda p="": "PLACE")
+    out = capsys.readouterr().out
+    assert "an open order may remain" in out and holder["id"] in out and CONFIRM_URL in out
+
+
+def test_ctrl_c_while_the_submit_is_in_flight_names_the_client_order_id(capsys):
+    broker = FakeBroker()
+    broker.submit_actions = [KeyboardInterrupt()]
+    with pytest.raises(KeyboardInterrupt):
+        place(broker, order_data())
+    out = capsys.readouterr().out
+    assert "an open order may remain" in out and broker.submitted[0][1] in out and CONFIRM_URL in out
+    assert broker.submits == 1
+
+
+def test_a_reconciled_order_that_filled_is_flagged_as_loudly_as_a_normal_fill(capsys):
+    broker = FakeBroker()
+
+    def filled_then_lost(b, leg, cid):
+        b.place(leg, cid, status="filled")
+        raise OrderUncertain(0, None, "ReadTimeout: timed out")
+
+    broker.submit_actions = [filled_then_lost]
+    rc, _ = place(broker, order_data())
+    out = capsys.readouterr().out
+    order_id = next(iter(broker.orders_by_id))
+    assert rc == 1 and broker.submits == 1 and broker.cancelled == []
+    assert "the test order FILLED: the paper account now holds 1 share of SPY" in out
+    assert order_id in out and CONFIRM_URL in out
+    assert out.count("✗") == 2  # the uncertain submit and the fill
+
+    # the same wording as the normal path (cancel poll sees "filled")
+    normal = FakeBroker()
+    normal.submit_actions = [cancelling(normal, ("filled",))]
+    place(normal, order_data())
+    assert "the test order FILLED: the paper account now holds 1 share of SPY" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- check_research
 
 
@@ -542,14 +748,14 @@ class FakeEdgar:
 
 
 class FakeWeb:
-    def __init__(self, evidence, *, kind, error=None, long=False):
-        self.evidence, self.kind, self.error, self.long = evidence, kind, error, long
+    def __init__(self, evidence, *, kind, error=None, long=False, body=None):
+        self.evidence, self.kind, self.error, self.long, self.body = evidence, kind, error, long, body
         self.calls: list[tuple] = []
 
     def _result(self, session_id, url, n):
         sources, lines = [], []
         for i in range(n):
-            body = ("x" * 400) if self.long else f"snippet {i} " + "ab" * 10
+            body = self.body or (("x" * 400) if self.long else f"snippet {i} " + "ab" * 10)
             src = self.evidence.add(session_id, connector="websearch", title=f"t{i}", url=f"{url}/{i}",
                                     publisher="example.com", tier=3, published_at=None, snippet=body,
                                     untrusted=True)
@@ -571,13 +777,15 @@ class FakeWeb:
 
 
 class FakeGrounded:
-    def __init__(self, *, error=None):
-        self.error, self.questions = error, []
+    def __init__(self, *, error=None, text=None, queries=None):
+        self.error, self.questions, self.text, self.queries = error, [], text, queries
 
     async def answer(self, question):
         self.questions.append(question)
-        return GroundedAnswer(text="Apple's ticker is AAPL. " * 20, sources=[{"title": "t", "uri": "https://g.example"}],
-                              search_suggestions_html=None, queries=["apple ticker"], error=self.error)
+        return GroundedAnswer(text=self.text or "Apple's ticker is AAPL. " * 20,
+                              sources=[{"title": "t", "uri": "https://g.example"}],
+                              search_suggestions_html=None, queries=self.queries or ["apple ticker"],
+                              error=self.error)
 
 
 def research_settings(**over):
@@ -718,6 +926,138 @@ def test_no_secret_reaches_the_output(capsys, tmp_path):
     assert "***" in out
 
 
+@pytest.mark.parametrize("argv", [["--ground"], ["--groundin"], ["--g"]])
+def test_research_abbreviated_flags_are_argument_errors(argv, capsys, tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        run_research(lambda ev, g: conns(ev), argv, tmp_root=tmp_path)
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []  # it failed before any temp DB was made
+
+
+def test_terminal_escapes_in_search_and_fetch_previews_are_stripped(capsys, tmp_path):
+    def make(ev, g):
+        return conns(ev, tavily=FakeWeb(ev, kind="tavily", body=HOSTILE), jina=FakeWeb(ev, kind="jina", body=HOSTILE))
+
+    rc, _ = run_research(make, tmp_root=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert TERMINAL_CONTROL_RE.search(out) is None
+    assert out.count("visible-text") == 4  # 3 search results + 1 fetch: the readable part survives
+
+
+def test_terminal_escapes_in_the_grounding_preview_and_queries_are_stripped(capsys, tmp_path):
+    def make(ev, g):
+        return conns(ev, grounded=FakeGrounded(text=HOSTILE, queries=[HOSTILE, "second " + HOSTILE]))
+
+    rc, _ = run_research(make, ["--grounding"], tmp_root=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0 and TERMINAL_CONTROL_RE.search(out) is None
+    assert out.count("visible-text") >= 3  # the answer preview and both queries
+
+
+def test_terminal_escapes_in_error_messages_and_edgar_text_are_stripped(capsys, tmp_path):
+    def make(ev, g):
+        edgar = FakeEdgar(ev)
+        return conns(ev, edgar=edgar, tavily=FakeWeb(ev, kind="tavily", error=HttpError(500, HOSTILE)),
+                     grounded=FakeGrounded(error=HOSTILE))
+
+    rc, _ = run_research(make, ["--grounding"], tmp_root=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1 and TERMINAL_CONTROL_RE.search(out) is None and out.count("visible-text") == 2
+
+
+def test_research_secret_straddling_the_truncation_limit_is_still_blanked(capsys, tmp_path):
+    key = "tvly-SECRET-abcdef123456"
+    # "RuntimeError: " is 14 characters; the key starts at ~199 and crosses the 220-character cut
+    # (an HttpError would not do: it cuts its own body at 200 characters, before we ever see it)
+    err = RuntimeError("y" * 185 + key + " tail")
+
+    def make(ev, g):
+        return conns(ev, tavily=FakeWeb(ev, kind="tavily", error=err))
+
+    rc, _ = run_research(make, settings=research_settings(tavily_api_key=key), tmp_root=tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 1 and key[:8] not in out and key[-8:] not in out and "***" in out
+
+
+# --- the real build_connectors through main(): grounding gating --------------------------------------
+
+GEMINI_KEY = "AIzaSy-FAKE-gemini-key-0000"
+GROUNDED_PAYLOAD = {"candidates": [{
+    "content": {"parts": [{"text": "Apple trades as AAPL on Nasdaq. " + HOSTILE}]},
+    "groundingMetadata": {"groundingChunks": [{"web": {"uri": "https://g.example/a", "title": "A"}}],
+                          "webSearchQueries": ["apple ticker " + HOSTILE]},
+}]}
+
+
+class StubResearchHttp:
+    """Replaces `HttpClient` inside `check_research.main`: records every request, no network."""
+
+    def __init__(self, post_error=None):
+        self.gets: list[str] = []
+        self.posts: list[tuple[str, dict, dict]] = []
+        self.post_error = post_error
+        self.closed = False
+
+    async def get_text(self, url, *, params=None, headers=None, timeout=20.0):
+        self.gets.append(url)
+        return "# Example Domain\n\nThis domain is for illustrative examples. " + HOSTILE
+
+    async def post_json(self, url, *, json=None, headers=None, timeout=20.0):
+        self.posts.append((url, json, headers))
+        if self.post_error is not None:
+            raise self.post_error
+        return GROUNDED_PAYLOAD
+
+    async def aclose(self):
+        self.closed = True
+
+
+def run_real_main(monkeypatch, argv, tmp_path, *, gemini_key=GEMINI_KEY, post_error=None):
+    stub = StubResearchHttp(post_error=post_error)
+    monkeypatch.setattr(check_research, "HttpClient", lambda: stub)
+    rc = check_research.main(list(argv), settings=research_settings(gemini_api_key=gemini_key), tmp_root=tmp_path)
+    return rc, stub
+
+
+def test_grounding_is_not_called_without_the_flag_even_with_a_gemini_key(monkeypatch, capsys, tmp_path):
+    rc, stub = run_real_main(monkeypatch, [], tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert stub.posts == []  # no Gemini request, no quota spent
+    assert stub.gets == ["https://r.jina.ai/https://example.com/"]
+    assert "Gemini grounding" in out and "--grounding" in out and out.count("SKIPPED") == 3
+    assert stub.closed is True and list(tmp_path.iterdir()) == []
+
+
+def test_grounding_with_the_flag_makes_exactly_one_gemini_request(monkeypatch, capsys, tmp_path):
+    rc, stub = run_real_main(monkeypatch, ["--grounding"], tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0 and len(stub.posts) == 1
+    url, body, headers = stub.posts[0]
+    assert url.startswith("https://generativelanguage.googleapis.com/") and "gemini-test" in url
+    assert body["tools"] == [{"google_search": {}}] and headers == {"x-goog-api-key": GEMINI_KEY}
+    assert "1 source" in out and "apple ticker" in out
+    assert GEMINI_KEY not in out and TERMINAL_CONTROL_RE.search(out) is None
+    assert out.count("SKIPPED") == 2  # EDGAR and Tavily only
+
+
+def test_grounding_flag_without_a_gemini_key_is_skipped_not_called(monkeypatch, capsys, tmp_path):
+    rc, stub = run_real_main(monkeypatch, ["--grounding"], tmp_path, gemini_key=None)
+    out = capsys.readouterr().out
+    assert rc == 0 and stub.posts == []
+    assert "GEMINI_API_KEY" in out and out.count("SKIPPED") == 3
+
+
+def test_a_grounding_http_error_is_a_failed_step_with_the_friendly_message(monkeypatch, capsys, tmp_path):
+    rc, stub = run_real_main(monkeypatch, ["--grounding"], tmp_path, post_error=HttpError(429, "quota " + GEMINI_KEY))
+    out = capsys.readouterr().out
+    assert rc == 1 and len(stub.posts) == 1
+    assert "billing" in out and "429" in out and GEMINI_KEY not in out
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- build_connectors: the real classes, wired offline -------------------------------------------
 
 
@@ -778,8 +1118,10 @@ async def test_the_fetch_step_uses_jina_even_when_a_tavily_key_is_configured():
 
 
 def test_scripts_document_the_safety_flags():
-    assert "--yes-i-am-sure" in (check_alpaca.__doc__ or "")
-    assert "never" in (check_alpaca.__doc__ or "").lower()
+    doc = (check_alpaca.__doc__ or "")
+    assert "--yes-i-am-sure" in doc and "never" in doc.lower()
+    # the rule: on a terminal PLACE is always required; the flag only matters without a terminal
+    assert "even with --yes-i-am-sure" in " ".join(doc.split())
     assert check_alpaca.CONFIRM_WORD == "PLACE"
 
 

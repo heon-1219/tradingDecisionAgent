@@ -1,4 +1,8 @@
 import asyncio
+import shutil
+import sqlite3
+
+import pytest
 
 from finagent.store.appdb import AppDB
 
@@ -18,6 +22,28 @@ def test_schema_created_twice_without_error(tmp_path):
     path = tmp_path / "store" / "app.db"
     AppDB(path)
     AppDB(path)  # re-opening the same file must not raise
+
+
+def test_close_is_idempotent_and_releases_the_file(tmp_path):
+    path = tmp_path / "store" / "app.db"
+    db = AppDB(path)
+    db.execute("INSERT INTO sessions (id, title, lang, created_at) VALUES (?,?,?,?)", ("s1", "t", "en", "x"))
+    db.close()
+    db.close()  # a second close is a no-op, not an error
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.query("SELECT 1")  # a closed DB is unusable
+    # nothing holds the file any more (on Windows an open handle would make this raise), data was kept
+    reopened = AppDB(path)
+    assert reopened.query("SELECT id FROM sessions") == [{"id": "s1"}]
+    reopened.close()
+    shutil.rmtree(path.parent)
+    assert not path.parent.exists()
+
+
+def test_close_works_on_a_memory_db():
+    db = AppDB(":memory:")
+    db.close()
+    db.close()
 
 
 def test_memory_db_creates_all_tables():

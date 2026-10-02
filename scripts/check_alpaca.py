@@ -4,8 +4,9 @@
   python scripts/check_alpaca.py --place-test-order  # ALSO places and cancels one tiny paper order
 
 Default mode never writes anything. It runs four independent steps, each with its latency and a
-checkmark or cross: the account (status, equity, buying power), the market clock, one IEX snapshot for
-SPY (bid, ask, last, timestamp) and the latest 3 news items. A failing step does not stop the others.
+checkmark or cross: the account (status, equity, buying power, and whether Alpaca says it is a paper
+account), the market clock, one IEX snapshot for SPY (bid, ask, last, timestamp) and the latest 3 news
+items. A failing step does not stop the others.
 
 Exit codes
   0  every step passed
@@ -15,33 +16,36 @@ Exit codes
 
 --place-test-order submits a 1-share DAY limit BUY of SPY at 50% of the last price (rounded down to
 cents, so it cannot fill), prints its status, cancels it, and polls up to ~10 s for the final status.
-  * You must type PLACE exactly at the prompt. If stdin is not a terminal the script refuses, unless
-    --yes-i-am-sure is also passed (which skips the prompt). The controlling agent never passes
-    --yes-i-am-sure without the user's explicit go-ahead.
-  * It refuses unless the broker's host constant is the paper host and the account does not look
-    live or blocked.
+  * Confirmation rule: on a terminal you must type PLACE exactly, always - even with --yes-i-am-sure,
+    which changes nothing there. If stdin is NOT a terminal the script refuses, unless --yes-i-am-sure
+    is passed, which then stands in for the typed word. (Git Bash/mintty reports no terminal for native
+    Python: use PowerShell, cmd or winpty instead.) The controlling agent never passes --yes-i-am-sure
+    without the user's explicit go-ahead.
+  * It refuses unless the broker's host constant is the paper host and the account can trade. If Alpaca
+    says the account is not a paper account (its number lacks the "PA" prefix) it refuses; if that is
+    unknown it says so and relies on the paper host.
   * If the submit's outcome is uncertain (timeout, 5xx, unreadable reply) it NEVER resubmits: it looks
     the order up by client_order_id, reports, and cancels it if it turns out to be live.
+  * Ctrl-C after the submit prints where the possibly open order is, then exits.
 
-Keys are never printed (only "set (...last4)"), and any key value that shows up inside an error message
-is replaced by ***.
+Everything printed has control characters stripped, keys are never printed (only "set (...last4)"), and
+any key value that shows up inside an error message is replaced by ***.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import pathlib
-import re
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:  # noqa: BLE001
@@ -49,6 +53,8 @@ except Exception:  # noqa: BLE001
 
 import httpx  # noqa: E402
 
+import _checkio  # noqa: E402
+from _checkio import Outcome, Reporter, strip_controls  # noqa: E402
 from finagent.config import get_settings  # noqa: E402
 from finagent.research.evidence import EvidenceStore, sanitize_untrusted  # noqa: E402
 from finagent.research.http import HttpClient  # noqa: E402
@@ -72,56 +78,9 @@ EXIT_OK, EXIT_STEP_FAILED, EXIT_NO_KEYS, EXIT_REFUSED = 0, 1, 2, 3
 
 _CENT = Decimal("0.01")
 _HALF = Decimal("0.5")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 # --------------------------------------------------------------------------------- output helpers
-
-
-class Reporter:
-    """Everything the script prints goes through `say`, which blanks any known secret first."""
-
-    def __init__(self, secrets: Iterable[str | None] = ()):
-        self._secrets = sorted({s for s in secrets if s and len(s) >= 4}, key=len, reverse=True)
-        self.step = 0
-        self.passed = 0
-        self.failed = 0
-
-    def scrub(self, text: str) -> str:
-        for secret in self._secrets:
-            text = text.replace(secret, "***")
-        return text
-
-    def say(self, text: str = "") -> None:
-        print(self.scrub(str(text)))
-
-    def begin(self, label: str) -> None:
-        self.step += 1
-        self.say(f"[{self.step}] {label}")
-
-    def detail(self, line: str) -> None:
-        self.say(f"    {line}")
-
-    def ok(self, seconds: float, summary: str = "") -> None:
-        self.passed += 1
-        self.say(f"    ✓ {seconds:.2f}s  {summary}".rstrip())
-
-    def fail(self, seconds: float, reason: str, hint: str | None = None) -> None:
-        self.failed += 1
-        self.say(f"    ✗ {seconds:.2f}s  {reason}")
-        if hint:
-            self.say(f"      -> {hint}")
-
-
-@dataclass
-class Outcome:
-    ok: bool
-    summary: str
-    lines: list[str] = field(default_factory=list)
-
-
-def describe(exc: BaseException, limit: int = 220) -> str:
-    return " ".join(f"{type(exc).__name__}: {exc}".split())[:limit]
 
 
 def hint_for(exc: BaseException) -> str | None:
@@ -137,26 +96,12 @@ def hint_for(exc: BaseException) -> str | None:
 
 
 def clean(text: Any, limit: int) -> str:
-    """Terminal-safe, truncated copy of externally sourced text."""
-    return _CONTROL_RE.sub("", sanitize_untrusted(str(text or ""), max_chars=limit))
+    """Terminal-safe, truncated copy of externally sourced text (headlines and the like)."""
+    return strip_controls(sanitize_untrusted(str(text or ""), max_chars=limit))
 
 
 async def run_step(rep: Reporter, label: str, fn: Callable[[], Awaitable[Outcome]]) -> bool:
-    rep.begin(label)
-    t0 = time.perf_counter()
-    try:
-        outcome = await fn()
-    except Exception as exc:  # noqa: BLE001 - one failing step must never stop the others
-        rep.fail(time.perf_counter() - t0, describe(exc), hint_for(exc))
-        return False
-    seconds = time.perf_counter() - t0
-    for line in outcome.lines:
-        rep.detail(line)
-    if outcome.ok:
-        rep.ok(seconds, outcome.summary)
-    else:
-        rep.fail(seconds, outcome.summary)
-    return outcome.ok
+    return await _checkio.run_step(rep, label, fn, hint_for)
 
 
 # --------------------------------------------------------------------------------- read-only steps
@@ -166,17 +111,23 @@ async def check_account(broker) -> Outcome:
     acct = await broker.account()
     problems = [name for name in ("trading_blocked", "account_blocked", "trade_suspended_by_user")
                 if getattr(acct, name, False)]
+    paper = getattr(acct, "paper", None)
     lines = [
         f"status        {acct.status}",
         f"equity        {acct.equity}",
         f"buying power  {acct.buying_power}",
         f"cash          {acct.cash}",
+        "paper account  " + ("verified (Alpaca reports a paper account)" if paper is True else
+                             "NOT a paper account" if paper is False else
+                             "unknown (Alpaca reported no account number)"),
     ]
+    if paper is False:
+        return Outcome(False, "Alpaca says this is NOT a paper account", lines)
     if problems:
         return Outcome(False, f"account is {acct.status} but flagged: {', '.join(problems)}", lines)
     if str(acct.status).upper() != "ACTIVE":
         return Outcome(False, f"account status is {acct.status}, expected ACTIVE", lines)
-    return Outcome(True, acct.status, lines)
+    return Outcome(True, str(acct.status), lines)
 
 
 async def check_clock(broker) -> Outcome:
@@ -253,16 +204,11 @@ def host_refusal() -> str | None:
 
 
 def account_refusal(account: Any) -> str | None:
-    """A reason not to trade on this account, or None. `AccountSnapshot` carries no paper/live marker today
-    (Alpaca's own account number is dropped by `extra="ignore"`), so a live marker is only honoured if a
-    future model version adds one; the paper guarantee itself comes from the hard-coded host."""
-    for name in ("is_live", "live"):
-        if getattr(account, name, False) is True:
-            return f"the account says {name}=True (a live account)"
-    for name in ("account_type", "environment", "mode", "trading_mode"):
-        value = getattr(account, name, None)
-        if isinstance(value, str) and value.strip().lower() in {"live", "real", "production", "prod"}:
-            return f"the account says {name}={value!r} (a live account)"
+    """A reason not to trade on this account, or None. `paper` is Alpaca's own answer (from the account
+    number's "PA" prefix, set by `AlpacaPaper.account()`): False refuses, None is handled by the caller
+    (it says so and relies on the paper host)."""
+    if getattr(account, "paper", None) is False:
+        return "Alpaca says this is not a paper account (its number lacks the paper prefix)"
     if getattr(account, "trading_blocked", False) or getattr(account, "account_blocked", False):
         return "the account is blocked from trading"
     if getattr(account, "trade_suspended_by_user", False):
@@ -272,10 +218,17 @@ def account_refusal(account: Any) -> str | None:
     return None
 
 
-def refuse(rep: Reporter, reason: str) -> int:
+def refuse(rep: Reporter, reason: str, *more: str) -> int:
     rep.say(f"    REFUSED: {reason}")
+    for line in more:
+        rep.say(f"    {line}")
     rep.say("    Nothing was placed.")
     return EXIT_REFUSED
+
+
+def report_fill(rep: Reporter, seconds: float, order_id: str) -> None:
+    rep.fail(seconds, "the test order FILLED: the paper account now holds 1 share of SPY",
+             f"order id {order_id}. Sell it from {PAPER_KEYS_URL} if you do not want it.")
 
 
 async def cancel_and_confirm(
@@ -284,13 +237,13 @@ async def cancel_and_confirm(
     """Cancel, then poll `get_order` until the status is final or the budget is spent. True only for a
     confirmed cancel."""
     rep.begin("Cancel the test order and confirm its final status")
-    t0 = time.perf_counter()
+    t0 = _checkio.perf()
     cancel_error: BaseException | None = None
     try:
         await broker.cancel_order(order_id)
     except Exception as exc:  # noqa: BLE001 - never crash with a live order outstanding
         cancel_error = exc
-        rep.detail(f"cancel request failed: {describe(exc)}")
+        rep.detail(f"cancel request failed: {rep.describe(exc)}")
 
     status: str | None = None
     poll_error: BaseException | None = None
@@ -301,31 +254,30 @@ async def cancel_and_confirm(
             status, poll_error = snap.status, None
         except Exception as exc:  # noqa: BLE001
             poll_error = exc
-        if status is not None and status.lower() in TERMINAL_STATUSES:
+        if status is not None and strip_controls(status).lower() in TERMINAL_STATUSES:
             break
         if clock() >= deadline:
             break
         await sleep(interval)
 
-    seconds = time.perf_counter() - t0
+    seconds = _checkio.perf() - t0
     if poll_error is not None and status is None:
-        rep.fail(seconds, f"could not read the order's status: {describe(poll_error)}",
+        rep.fail(seconds, f"could not read the order's status: {rep.describe(poll_error)}",
                  f"order id {order_id}: check {PAPER_KEYS_URL} and cancel it by hand if it is still open.")
         return False
-    final = (status or "").lower()
+    final = strip_controls(status or "").lower()
     if final in {"canceled", "cancelled"}:
         rep.ok(seconds, f"final status: {status}")
         return True
     if final == "filled":
-        rep.fail(seconds, "the test order FILLED: the paper account now holds 1 share of SPY",
-                 f"order id {order_id}. Sell it from {PAPER_KEYS_URL} if you do not want it.")
+        report_fill(rep, seconds, order_id)
         return False
     if final in TERMINAL_STATUSES:
         rep.fail(seconds, f"the order ended as {status}, not canceled", f"order id {order_id}")
         return False
     reason = f"cancel not confirmed within {timeout:.0f}s; last status {status}"
     if cancel_error is not None:
-        reason += f" (cancel request error: {describe(cancel_error, 120)})"
+        reason += f" (cancel request error: {rep.describe(cancel_error, 120)})"
     rep.fail(seconds, reason, f"order id {order_id}: cancel it at {PAPER_KEYS_URL} if it is still open.")
     return False
 
@@ -344,13 +296,22 @@ async def place_test_order(
     poll_interval: float = POLL_INTERVAL_SEC,
     make_client_order_id: Callable[[], str] = new_client_order_id,
 ) -> int:
-    """The only write path in this script. Returns an exit code (0 ok, 1 failed/uncertain, 3 refused)."""
+    """The only write path in this script. Returns an exit code (0 ok, 1 failed/uncertain, 3 refused).
+
+    Confirmation: on a terminal (`interactive`) the typed word is always required, `assume_yes` or not;
+    without a terminal the order is placed only when `assume_yes` is set."""
     rep.say()
     rep.say(f"== Test order: BUY 1 {SYMBOL}, DAY limit at 50% of the last price (PAPER; cancelled right away) ==")
 
     if not interactive and not assume_yes:
-        return refuse(rep, "stdin is not a terminal, so the confirmation cannot be typed. Run it from a terminal, "
-                           "or pass --yes-i-am-sure (only with the user's go-ahead).")
+        return refuse(
+            rep, "stdin is not a terminal, so the confirmation word cannot be typed.",
+            "In Git Bash (mintty) native Python reports no terminal even though you can type: run this from "
+            "PowerShell or cmd,",
+            "or prefix the command with winpty (winpty python scripts/check_alpaca.py --place-test-order).",
+            "Last resort, only with the user's explicit go-ahead: --yes-i-am-sure replaces the typed word "
+            "when there is no terminal.",
+        )
     reason = host_refusal()
     if reason:
         return refuse(rep, reason)
@@ -358,7 +319,7 @@ async def place_test_order(
     try:
         account = await broker.account()
     except Exception as exc:  # noqa: BLE001
-        rep.say(f"    ✗ could not read the account, so no order was placed: {describe(exc)}")
+        rep.say(f"    ✗ could not read the account, so no order was placed: {rep.describe(exc)}")
         hint = hint_for(exc)
         if hint:
             rep.say(f"      -> {hint}")
@@ -371,7 +332,7 @@ async def place_test_order(
     try:
         quote = (await data.snapshots([SYMBOL])).get(SYMBOL)
     except Exception as exc:  # noqa: BLE001
-        rep.say(f"    ✗ could not read the {SYMBOL} price, so no order was placed: {describe(exc)}")
+        rep.say(f"    ✗ could not read the {SYMBOL} price, so no order was placed: {rep.describe(exc)}")
         rep.failed += 1
         return EXIT_STEP_FAILED
     last = quote.last if quote is not None else None
@@ -383,8 +344,13 @@ async def place_test_order(
     leg = OrderLeg(symbol=SYMBOL, side="buy", qty=Decimal(1), type="limit", time_in_force="day", limit_price=limit)
 
     rep.say(f"    Plan: BUY 1 {SYMBOL}  limit {limit}  (50% of last {last}, rounded down to cents)  DAY")
-    rep.say(f"    Account: PAPER, equity {account.equity}, buying power {account.buying_power}")
-    if not assume_yes:
+    sizes = f"equity {account.equity}, buying power {account.buying_power}"
+    if getattr(account, "paper", None) is True:
+        rep.say(f"    Account: PAPER (verified), {sizes}")
+    else:
+        rep.say(f"    Account: {sizes}")
+        rep.say("    Note: paper status unknown; relying on the paper host")
+    if interactive:
         try:
             typed = read_line(f"    Type {CONFIRM_WORD} to submit this paper order (anything else cancels): ")
         except (EOFError, KeyboardInterrupt):
@@ -392,37 +358,45 @@ async def place_test_order(
         if typed != CONFIRM_WORD:
             return refuse(rep, f"{CONFIRM_WORD} was not typed exactly")
     else:
-        rep.say("    --yes-i-am-sure: skipping the typed confirmation")
+        rep.say("    stdin is not a terminal: --yes-i-am-sure given, so the typed confirmation is skipped")
 
     cid = make_client_order_id()
-    rep.begin(f"Submit the test order (client_order_id {cid})")
-    t0 = time.perf_counter()
+    order = None
     try:
-        order = await broker.submit_order(leg, cid)
-    except OrderUncertain as exc:
-        rep.fail(time.perf_counter() - t0, f"submit outcome is UNCERTAIN: {describe(exc)}")
-        await reconcile_uncertain(broker, rep, cid, sleep=sleep, clock=clock,
-                                  timeout=poll_timeout, interval=poll_interval)
-        return EXIT_STEP_FAILED  # an uncertain outcome is never reported as a pass
-    except BrokerError as exc:
-        rep.fail(time.perf_counter() - t0, f"Alpaca rejected the order: {describe(exc)}", hint_for(exc))
-        return EXIT_STEP_FAILED
-    rep.detail(f"order id {order.id}")
-    rep.ok(time.perf_counter() - t0, f"status: {order.status}  ({order.side} {order.qty} {order.symbol} "
+        rep.begin(f"Submit the test order (client_order_id {cid})")
+        t0 = _checkio.perf()
+        try:
+            order = await broker.submit_order(leg, cid)
+        except OrderUncertain as exc:
+            rep.fail(_checkio.perf() - t0, f"submit outcome is UNCERTAIN: {rep.describe(exc)}")
+            await reconcile_uncertain(broker, rep, cid, sleep=sleep, clock=clock,
+                                      timeout=poll_timeout, interval=poll_interval)
+            return EXIT_STEP_FAILED  # an uncertain outcome is never reported as a pass
+        except BrokerError as exc:
+            rep.fail(_checkio.perf() - t0, f"Alpaca rejected the order: {rep.describe(exc)}", hint_for(exc))
+            return EXIT_STEP_FAILED
+        rep.detail(f"order id {order.id}")
+        rep.ok(_checkio.perf() - t0, f"status: {order.status}  ({order.side} {order.qty} {order.symbol} "
                                       f"{order.type} {order.limit_price} {order.time_in_force})")
 
-    cancelled = await cancel_and_confirm(broker, rep, order.id, sleep=sleep, clock=clock,
-                                         timeout=poll_timeout, interval=poll_interval)
-    return EXIT_OK if cancelled else EXIT_STEP_FAILED
+        cancelled = await cancel_and_confirm(broker, rep, order.id, sleep=sleep, clock=clock,
+                                             timeout=poll_timeout, interval=poll_interval)
+        return EXIT_OK if cancelled else EXIT_STEP_FAILED
+    except BaseException:  # Ctrl-C, task cancellation, anything: say where an order may still be, then go on
+        where = (f"id {order.id}, client_order_id {cid}" if order is not None
+                 else f"client_order_id {cid} (the submit was in flight)")
+        rep.say(f"    Interrupted: an open order may remain: {where}. Cancel it at {PAPER_KEYS_URL}")
+        raise
 
 
 async def reconcile_uncertain(broker, rep: Reporter, cid: str, *, sleep, clock, timeout: float, interval: float) -> None:
     """After an uncertain submit: look the order up by client_order_id. Never resubmits."""
     rep.detail("NOT resubmitting. Looking the order up by its client_order_id instead.")
+    t0 = _checkio.perf()
     try:
         found = await broker.get_order_by_client_id(cid)
     except BrokerError as exc:
-        rep.detail(f"The lookup failed too ({describe(exc)}), so the state is unknown. "
+        rep.detail(f"The lookup failed too ({rep.describe(exc)}), so the state is unknown. "
                    f"Check {PAPER_KEYS_URL} for an order with client_order_id {cid} and cancel it if it is open.")
         return
     if found is None:
@@ -430,7 +404,11 @@ async def reconcile_uncertain(broker, rep: Reporter, cid: str, *, sleep, clock, 
                    f"If one shows up later, cancel it at {PAPER_KEYS_URL}.")
         return
     rep.detail(f"Found it: id {found.id}, status {found.status}")
-    if found.status.lower() in TERMINAL_STATUSES:
+    status = strip_controls(found.status).lower()
+    if status == "filled":
+        report_fill(rep, _checkio.perf() - t0, found.id)
+        return
+    if status in TERMINAL_STATUSES:
         return
     await cancel_and_confirm(broker, rep, found.id, sleep=sleep, clock=clock, timeout=timeout, interval=interval)
 
@@ -495,13 +473,16 @@ def main(
     sleep=asyncio.sleep,
     clock=time.monotonic,
 ) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # allow_abbrev=False: "--p --y" must be an argument error, never a silent --place-test-order --yes-i-am-sure.
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 allow_abbrev=False)
     ap.add_argument("--place-test-order", action="store_true",
                     help="after the read-only checks, place a 1-share SPY limit buy at 50%% of the last price "
-                         "on the PAPER account, then cancel it (asks you to type PLACE)")
+                         "on the PAPER account, then cancel it (on a terminal you must type PLACE)")
     ap.add_argument("--yes-i-am-sure", action="store_true",
-                    help="skip the typed PLACE prompt so --place-test-order works without a terminal; the "
-                         "controller never passes this without the user's go-ahead")
+                    help="lets --place-test-order run when stdin is NOT a terminal (it stands in for the typed "
+                         "PLACE); on a terminal PLACE is still required. The controller never passes this "
+                         "without the user's go-ahead")
     a = ap.parse_args(argv)
 
     s = settings if settings is not None else get_settings()

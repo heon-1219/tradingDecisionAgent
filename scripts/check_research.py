@@ -14,8 +14,9 @@ One call per connector, each with its latency and the number of records it retur
 
 The evidence store is a temporary database in a temporary directory that is deleted at the end; the
 app's own data/store/app.db is never opened. For each step it prints the evidence ids created and the
-first 120 characters of each wrapped result. Keys are never printed (and any key value found inside an
-error message is replaced by ***).
+first 120 characters of each wrapped result. Everything printed has control characters stripped (a
+fetched page or model answer cannot send terminal escape sequences), keys are never printed, and any key
+value found inside an error message is replaced by ***.
 
 Exit code: 0 if no attempted step failed (SKIPPED is not a failure), otherwise 1.
 """
@@ -27,12 +28,12 @@ import pathlib
 import shutil
 import sys
 import tempfile
-import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:  # noqa: BLE001
@@ -40,6 +41,8 @@ except Exception:  # noqa: BLE001
 
 import httpx  # noqa: E402
 
+import _checkio  # noqa: E402
+from _checkio import Outcome, Reporter, strip_controls  # noqa: E402
 from finagent.config import get_settings  # noqa: E402
 from finagent.research.edgar import Edgar  # noqa: E402
 from finagent.research.evidence import EvidenceStore, ResearchResult  # noqa: E402
@@ -62,59 +65,6 @@ MAX_PREVIEWS = 5
 # --------------------------------------------------------------------------------- output helpers
 
 
-class Reporter:
-    """Everything printed goes through `say`, which blanks any known secret first."""
-
-    def __init__(self, secrets: Iterable[str | None] = ()):
-        self._secrets = sorted({s for s in secrets if s and len(s) >= 4}, key=len, reverse=True)
-        self.step = 0
-        self.passed = 0
-        self.failed = 0
-        self.skipped = 0
-
-    def scrub(self, text: str) -> str:
-        for secret in self._secrets:
-            text = text.replace(secret, "***")
-        return text
-
-    def say(self, text: str = "") -> None:
-        print(self.scrub(str(text)))
-
-    def begin(self, label: str) -> None:
-        self.step += 1
-        self.say(f"[{self.step}] {label}")
-
-    def detail(self, line: str) -> None:
-        self.say(f"    {line}")
-
-    def ok(self, seconds: float, summary: str = "") -> None:
-        self.passed += 1
-        self.say(f"    ✓ {seconds:.2f}s  {summary}".rstrip())
-
-    def fail(self, seconds: float, reason: str, hint: str | None = None) -> None:
-        self.failed += 1
-        self.say(f"    ✗ {seconds:.2f}s  {reason}")
-        if hint:
-            self.say(f"      -> {hint}")
-
-    def skip(self, label: str, reason: str) -> None:
-        self.step += 1
-        self.skipped += 1
-        self.say(f"[{self.step}] {label}")
-        self.say(f"    - SKIPPED: {reason}")
-
-
-@dataclass
-class Outcome:
-    ok: bool
-    summary: str
-    lines: list[str] = field(default_factory=list)
-
-
-def describe(exc: BaseException, limit: int = 220) -> str:
-    return " ".join(f"{type(exc).__name__}: {exc}".split())[:limit]
-
-
 def hint_for(exc: BaseException) -> str | None:
     status = getattr(exc, "status", None)
     if status in (401, 403):
@@ -127,25 +77,12 @@ def hint_for(exc: BaseException) -> str | None:
 
 
 def preview(line: str) -> str:
-    return " ".join(line.split())[:PREVIEW_CHARS]
+    """The first 120 characters of a result line, as one terminal-safe line (controls stripped first)."""
+    return " ".join(strip_controls(line).split())[:PREVIEW_CHARS]
 
 
 async def run_step(rep: Reporter, label: str, fn: Callable[[], Awaitable[Outcome]]) -> bool:
-    rep.begin(label)
-    t0 = time.perf_counter()
-    try:
-        outcome = await fn()
-    except Exception as exc:  # noqa: BLE001 - one failing connector must never stop the others
-        rep.fail(time.perf_counter() - t0, describe(exc), hint_for(exc))
-        return False
-    seconds = time.perf_counter() - t0
-    for line in outcome.lines:
-        rep.detail(line)
-    if outcome.ok:
-        rep.ok(seconds, outcome.summary)
-    else:
-        rep.fail(seconds, outcome.summary)
-    return outcome.ok
+    return await _checkio.run_step(rep, label, fn, hint_for)
 
 
 def plural(n: int, word: str) -> str:
@@ -157,7 +94,7 @@ def research_outcome(result: ResearchResult) -> Outcome:
     of each wrapped result line. It passes only if it is not an error and has at least one record."""
     n = len(result.sources)
     if result.is_error:
-        return Outcome(False, " ".join(result.text.split())[:200] or "connector reported an error")
+        return Outcome(False, result.text or "connector reported an error")
     lines = []
     if result.sources:
         lines.append("evidence: " + ", ".join(s.id for s in result.sources))
@@ -285,12 +222,11 @@ async def run_checks(conns: Connectors, rep: Reporter) -> int:
 
 
 def dispose_temp_db(db: AppDB | None, directory: pathlib.Path, rep: Reporter) -> None:
-    """Close the temp DB's connection (AppDB has no close(); an open handle blocks deletion on Windows),
-    then delete the whole temp directory."""
-    con = getattr(db, "_con", None)
-    if con is not None:
+    """Close the temp DB (an open handle blocks deleting the file on Windows), then delete the whole
+    temp directory."""
+    if db is not None:
         try:
-            con.close()
+            db.close()
         except Exception:  # noqa: BLE001
             pass
     shutil.rmtree(directory, ignore_errors=True)
@@ -318,7 +254,8 @@ def main(
     connectors_factory=build_connectors,
     tmp_root: pathlib.Path | str | None = None,
 ) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 allow_abbrev=False)
     ap.add_argument("--grounding", action="store_true",
                     help="also make one Gemini grounding call (spends free-tier quota: about 20 requests/day)")
     a = ap.parse_args(argv)
