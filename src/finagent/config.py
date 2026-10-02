@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     # GEMINI_API_KEY (preferred) or GOOGLE_API_KEY; create one at https://aistudio.google.com/apikey
     gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("gemini_api_key", "google_api_key"))
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    # The user's statement that the Gemini key is on a paid plan. A free and a paid Gemini key cannot
+    # be told apart reliably from the outside, so this is an explicit switch: false (the default)
+    # keeps the chat agent in shallow mode while the provider is gemini (see `chat_limits`).
+    gemini_paid: bool = False
     # Free-tier keys have low per-minute limits, so 429s are common. Without retries the whole question fails.
     rate_limit_retries: int = 4
     request_min_interval_sec: float = 0.0  # optional minimum spacing between calls
@@ -120,11 +125,15 @@ class Settings(BaseSettings):
 
     # Chat turn budget - separate from the QA agent's time_budget_sec/max_tool_rounds above, since
     # the chat agent's tool loop (research + trading) has different latency characteristics.
-    # 150 s: a propose turn is 4-6 model calls, and a free-tier key (about 5 calls a minute) spends
-    # tens of seconds in 429 backoff. At 90 s both live evaluation scenarios ran out of time
-    # (2026-10-02) before they could propose.
-    chat_time_budget_sec: float = 150.0
-    chat_max_rounds: int = 8
+    # Two modes, resolved in exactly one place, `chat_limits()` below; nothing else reads these four.
+    # Deep (a paid key: OpenAI, Anthropic, or Gemini with GEMINI_PAID=true): room for real research.
+    chat_time_budget_sec: float = 300.0
+    chat_max_rounds: int = 12
+    # Shallow (Gemini without GEMINI_PAID): a free-tier key allows about 5 model calls a minute and
+    # 20 a day, so a turn gets few rounds. 150 s still leaves room for a 429 backoff or two: at
+    # 90 s both live evaluation scenarios ran out of time (2026-10-02) before they could propose.
+    shallow_time_budget_sec: float = 150.0
+    shallow_max_rounds: int = 4
     # How long a proposed ticket stays confirmable before it expires and must be regenerated.
     ticket_ttl_sec: int = 300
     # /api/* (chat, tickets, settings, kill switch) answers loopback clients only. True lets any
@@ -138,6 +147,49 @@ def get_settings() -> Settings:
     return Settings()
 
 
+# --- research depth: shallow and deep ----------------------------------------------------------------
+
+ChatMode = Literal["shallow", "deep"]
+# Used only when a settings object lacks a field or holds something unusable (tests pass bare
+# namespaces); `Settings` carries the same numbers as its defaults.
+_DEEP_LIMITS = (12, 300.0)
+_SHALLOW_LIMITS = (4, 150.0)
+
+
+@dataclass(frozen=True)
+class ChatLimits:
+    """What one chat turn may use: the mode, the tool rounds and the seconds."""
+
+    mode: ChatMode
+    max_rounds: int
+    time_budget_sec: float
+
+
+def chat_mode(settings: object) -> ChatMode:
+    """`shallow` when the provider is gemini and the key is not declared paid (`gemini_paid`);
+    `deep` otherwise: OpenAI and Anthropic keys are always paid, and the `stub` provider (tests)
+    counts as deep."""
+    if getattr(settings, "llm_provider", None) == "gemini" and getattr(settings, "gemini_paid", False) is not True:
+        return "shallow"
+    return "deep"
+
+
+def chat_limits(settings: object) -> ChatLimits:
+    """The ONE place that resolves a chat turn's limits. `ChatAgent` (rounds, time budget), the
+    chat system prompt (its Budget section) and `GET /api/settings` all read through it."""
+    mode = chat_mode(settings)
+    prefix, (rounds, seconds) = ("shallow", _SHALLOW_LIMITS) if mode == "shallow" else ("chat", _DEEP_LIMITS)
+    try:
+        rounds = max(1, int(getattr(settings, f"{prefix}_max_rounds", rounds)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        seconds = float(getattr(settings, f"{prefix}_time_budget_sec", seconds))
+    except (TypeError, ValueError):
+        pass
+    return ChatLimits(mode, rounds, seconds)
+
+
 # Settings field -> .env name, for the fields the app itself writes (PUT /api/settings and the
 # kill switch).
 ENV_NAMES = {
@@ -146,6 +198,13 @@ ENV_NAMES = {
     "tavily_api_key": "TAVILY_API_KEY",
     "sec_user_agent": "SEC_USER_AGENT",
     "trading_enabled": "TRADING_ENABLED",
+    "llm_provider": "LLM_PROVIDER",
+    "llm_model": "LLM_MODEL",
+    "llm_effort": "LLM_EFFORT",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "openai_api_key": "OPENAI_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "gemini_paid": "GEMINI_PAID",
 }
 
 

@@ -15,22 +15,29 @@ Events (Vercel AI SDK stream-protocol names, see the design spec §7), in order:
     data-grounding-flags {numbers}                numbers in the answer that no tool output supports
     text-delta {delta}                            the final text in ~200-character chunks
     error {message}                               generic and language-appropriate, never provider text
-    finish {usage, elapsed_ms}                    always last, also after an error
+    finish {usage, elapsed_ms, mode, max_rounds, budget_exhausted}
+                                                  always last, also after an error
 A request refused before the turn starts (unknown session, empty or over-long message, a reply
 already in progress for the session) emits only `error` and `finish`.
 
-Budgets: at most `settings.chat_max_rounds` model rounds and `settings.chat_time_budget_sec`
+Budgets: the turn's limits are resolved once, when it starts, by `config.chat_limits(settings)`:
+the mode (`shallow` for a Gemini key not declared paid, else `deep`), the model rounds and the
 seconds from the start of `run_turn`. A tool still running when time runs out is cancelled (the
 toolbox releases its one-ticket-per-turn slot on `CancelledError`), and every call of that round
 without a result gets an error result, so the provider history stays valid. Then the model is
 nudged once to answer without tools (a short grace step allowed past the budget); if it still gives
-no text, a fallback lists the tools that ran.
+no text, a fallback lists the tools that ran. `finish.budget_exhausted` says the turn ended that
+way. In shallow mode the user is told why: the fallback names the shallow-mode limit, and an
+answer the nudged model did write gets a one-line note appended; both say that a paid API key in
+Settings allows deeper research.
 
-Conversations are cached per session in memory, keyed by the tool-name set. A missing entry (a new
-`ChatAgent`, e.g. after a restart), a changed tool set, or an entry dropped after an error, a
-cancellation, a nudge, an empty reply, `CACHE_MAX_TURNS` served turns or `CACHE_MAX_TOOL_CHARS` of
-tool output is rebuilt from the stored text history, which is always consistent (tool calls never
-reach it) and bounded.
+Conversations are cached per session in memory, keyed by the tool-name set, the limits (they are in
+the system prompt) and the model client in use. A missing entry (a new `ChatAgent`, e.g. after a
+restart; `reset_conversations()` after a provider or model switch), a changed key, or an entry
+dropped after an error, a cancellation, a nudge, an empty reply, `CACHE_MAX_TURNS` served turns or
+`CACHE_MAX_TOOL_CHARS` of tool output is rebuilt from the stored text history, which is always
+consistent (tool calls never reach it), bounded and independent of any provider's message format.
+A turn already running keeps the conversation (and so the model client) it started with.
 
 `run_turn` never raises except `asyncio.CancelledError` (client disconnect), which it re-raises
 after releasing the session lock and dropping the cached conversation. Logs carry ids, counts,
@@ -52,6 +59,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..agent.llm import Conversation, LLMClient, ToolCall, ToolSpec
+from ..config import ChatLimits, chat_limits
 from ..i18n import Lang, detect_lang, language_name, pick
 from .grounding_check import unsupported_numbers
 from .prompts import PROMPT_VERSION, build_chat_system_prompt
@@ -64,6 +72,10 @@ HISTORY_LIMIT = 24  # stored user/assistant rows replayed when a conversation is
 CHUNK_CHARS = 200
 MAX_CACHED_CONVERSATIONS = 64  # sessions whose provider conversation is kept in memory (LRU)
 NUDGE_TEXT = "Budget reached: answer now with what you have. Do not call tools."
+SHALLOW_NUDGE_TEXT = (
+    "Budget reached (shallow mode: the provider's free tier limits model calls per reply): answer now with what "
+    "you have, and say briefly what you could not research. Do not call tools."
+)
 TOOL_CANCELLED_TEXT = "Tool cancelled: the time budget for this reply ran out."
 TOOL_REFUSED_TEXT = "Tool not run: the budget for this reply is spent. Answer with what you have."
 SUMMARY_CONTENT = "turn summary"
@@ -100,6 +112,14 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "The model returned an empty reply. Please try again, or rephrase your question.",
         "모델이 빈 답변을 반환했습니다. 다시 시도하거나 질문을 바꿔 주세요.",
     ),
+    # Appended to an answer the nudged model wrote when a shallow-mode turn ended on its budget.
+    # No digits: the grounding check reads the whole final text.
+    "shallow_note": (
+        "Shallow mode: this reply stopped at the research limit of the Gemini free tier, so some research may "
+        "have been skipped. Add a paid API key in Settings to allow deeper research.",
+        "얕은 리서치 모드: Gemini 무료 등급의 호출 한도 때문에 리서치를 일부 생략하고 답변을 마쳤을 수 있습니다. "
+        "설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+    ),
 }
 
 
@@ -113,9 +133,35 @@ def _msg(key: str, lang: Lang) -> str:
     return pick(lang, en, ko)
 
 
-def fallback_text(lang: Lang, tools: list[str]) -> str:
-    """The answer when the budget ran out and the nudged model still gave no text."""
+def _shallow_fallback_text(lang: Lang, names: str) -> str:
+    if names:
+        return pick(
+            lang,
+            "I reached the shallow-mode limit before finishing (the Gemini free tier allows only a few model calls "
+            f"per reply). Here is what I found so far: I ran {names}, but had no calls left to write up the "
+            "answer. Ask again with a narrower question, or add a paid API key in Settings to allow deeper "
+            "research.",
+            "얕은 리서치 모드의 한도에 도달해 답변을 마치지 못했습니다(Gemini 무료 등급은 답변당 모델 호출 횟수가 "
+            f"적습니다). 지금까지 진행한 내용: {names} 도구를 실행했지만 답변을 정리할 호출이 남지 않았습니다. "
+            "범위를 좁혀 다시 질문하거나, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+        )
+    return pick(
+        lang,
+        "I reached the shallow-mode limit before finishing (the Gemini free tier allows only a few model calls per "
+        "reply). Here is what I found so far: nothing yet, as no tool finished in time. Ask again with a narrower "
+        "question, or add a paid API key in Settings to allow deeper research.",
+        "얕은 리서치 모드의 한도에 도달해 답변을 마치지 못했습니다(Gemini 무료 등급은 답변당 모델 호출 횟수가 "
+        "적습니다). 지금까지 진행한 내용: 제시간에 끝난 도구가 없어 아직 없습니다. 범위를 좁혀 다시 질문하거나, "
+        "설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+    )
+
+
+def fallback_text(lang: Lang, tools: list[str], mode: str = "deep") -> str:
+    """The answer when the budget ran out and the nudged model still gave no text. In shallow mode
+    it says so, and that a paid key allows deeper research."""
     names = ", ".join(dict.fromkeys(t for t in tools if t != UNKNOWN_TOOL))
+    if mode == "shallow":
+        return _shallow_fallback_text(lang, names)
     if names:
         return pick(
             lang,
@@ -164,7 +210,9 @@ def _safe_emit(emit: Callable[[dict], None], event: dict, where: str) -> bool:
 
 @dataclass
 class _CachedConversation:
-    names: frozenset[str]  # the tool names it was built with
+    # What it was built with: the tool names, the limits (both are in its system prompt) and the
+    # model client's generation (`LLMHandle.generation`; a swapped client has another one).
+    key: tuple[frozenset[str], ChatLimits, Any]
     conv: Conversation
     turns: int = 0  # turns served so far
     tool_chars: int = 0  # characters of tool output fed into it so far
@@ -177,9 +225,12 @@ class _StepFailed(Exception):
 class _TurnState:
     """Everything one turn accumulates: usage, tools run, grounding corpus and the event summary."""
 
-    def __init__(self, emit: Callable[[dict], None], session_id: str, turn_id: str, lang: Lang):
+    def __init__(self, emit: Callable[[dict], None], session_id: str, turn_id: str, lang: Lang,
+                 limits: ChatLimits):
         self._emit = emit
         self.session_id, self.turn_id, self.lang = session_id, turn_id, lang
+        self.limits = limits  # resolved once: a settings change mid-turn does not move this turn's budget
+        self.budget_exhausted = False  # the rounds or the time ran out before the model answered
         self.usage: dict[str, int] = {}
         self.known_tools: frozenset[str] = frozenset()  # the current tool set
         self.tools: list[str] = []  # names of the tool calls that ran (not cancelled), in order
@@ -290,15 +341,24 @@ class ChatAgent:
 
     def _refuse(self, emit: Callable[[dict], None], lang: Lang, key: str, t0: float) -> str:
         message = _msg(key, lang)
+        limits = chat_limits(self._settings)
         _safe_emit(emit, {"type": "error", "message": message}, "chat refusal")
-        _safe_emit(emit, {"type": "finish", "usage": {}, "elapsed_ms": self._elapsed_ms(t0)}, "chat refusal")
+        _safe_emit(emit, {"type": "finish", "usage": {}, "elapsed_ms": self._elapsed_ms(t0), "mode": limits.mode,
+                          "max_rounds": limits.max_rounds, "budget_exhausted": False}, "chat refusal")
         return message
+
+    def reset_conversations(self) -> None:
+        """Drop every cached provider conversation (the provider, the model or the mode changed).
+        Provider message formats differ, so nothing is carried over: the next turn of each
+        session rebuilds its conversation from the stored text history. A turn in flight keeps the
+        conversation it holds and does not put it back."""
+        self._convs.clear()
 
     # --- one turn, under the session lock --------------------------------------------------------
 
     async def _run_locked(self, session_id: str, message: str, lang: Lang, emit, t0: float) -> str:
         turn_id = uuid.uuid4().hex
-        st = _TurnState(emit, session_id, turn_id, lang)
+        st = _TurnState(emit, session_id, turn_id, lang, chat_limits(self._settings))
         st.emit({"type": "start", "messageId": turn_id})
         try:
             self._sessions.append(session_id, "user", message, {"turn_id": turn_id, "lang": lang})
@@ -355,12 +415,12 @@ class ChatAgent:
             f"Answer language: {language_name(st.lang)}",
             f"Active mandate: {mandate_json or 'none'}",
         ])
-        entry = self._conversation(st.session_id, message, specs, turn_text)
+        entry = self._conversation(st.session_id, message, specs, turn_text, st.limits)
         conv = entry.conv
         extra_corpus = [message, *([mandate_json] if mandate_json else []), f"Today: {today}"]
 
-        deadline = t0 + self._budget_sec()
-        max_rounds = self._max_rounds()
+        deadline = t0 + st.limits.time_budget_sec
+        max_rounds = st.limits.max_rounds
         final: str | None = None
         while st.rounds < max_rounds:
             remaining = deadline - self._clock()
@@ -388,6 +448,7 @@ class ChatAgent:
 
         cacheable = True
         if final is None:  # rounds or time ran out
+            st.budget_exhausted = True
             final = await self._nudge(st, conv)
             cacheable = False  # the provider history may end oddly; the stored history does not
         if not final.strip():
@@ -399,6 +460,8 @@ class ChatAgent:
             log.info("chat session %s: conversation retired after %d turns, %d tool chars",
                      st.session_id, entry.turns, entry.tool_chars)
             cacheable = False
+        if self._convs.get(st.session_id) is not entry:
+            cacheable = False  # dropped meanwhile (reset_conversations): never put back
         st.corpus.extend(extra_corpus)
         return final, cacheable
 
@@ -457,9 +520,12 @@ class ChatAgent:
         return in_time
 
     async def _nudge(self, st: _TurnState, conv: Conversation) -> str:
-        """One last tool-free step past the budget; the fallback text if it gives nothing."""
-        conv.add_user(NUDGE_TEXT)
-        fallback = fallback_text(st.lang, st.tools)
+        """One last tool-free step past the budget; the fallback text if it gives nothing. In
+        shallow mode the user is told why the reply stopped: the fallback says so, and an answer
+        the model did write gets the shallow-mode note appended."""
+        is_shallow = st.limits.mode == "shallow"
+        conv.add_user(SHALLOW_NUDGE_TEXT if is_shallow else NUDGE_TEXT)
+        fallback = fallback_text(st.lang, st.tools, st.limits.mode)
         try:
             turn = await asyncio.wait_for(conv.step(), timeout=self._grace_sec())
         except TimeoutError:
@@ -476,15 +542,17 @@ class ChatAgent:
             log.info("chat turn %s: the nudged model still called %d tool(s)", st.turn_id, len(turn.tool_calls))
             conv.add_tool_results([(c.id, TOOL_REFUSED_TEXT, True) for c in turn.tool_calls])
         text = turn.text or ""
-        return text if text.strip() else fallback
+        if not text.strip():
+            return fallback
+        return text.rstrip() + "\n\n" + _msg("shallow_note", st.lang) if is_shallow else text
 
     # --- conversation cache --------------------------------------------------------------------
 
     def _conversation(self, session_id: str, message: str, specs: list[ToolSpec],
-                      turn_text: str) -> _CachedConversation:
-        names = frozenset(s.name for s in specs)
+                      turn_text: str, limits: ChatLimits) -> _CachedConversation:
+        key = (frozenset(s.name for s in specs), limits, getattr(self._llm, "generation", None))
         cached = self._convs.get(session_id)
-        if cached is not None and cached.names == names:
+        if cached is not None and cached.key == key:
             self._convs.move_to_end(session_id)
             cached.conv.add_user(turn_text)
             return cached
@@ -500,7 +568,7 @@ class ChatAgent:
                 conv.add_assistant(row["content"])
             else:
                 conv.add_user(row["content"])
-        entry = self._convs[session_id] = _CachedConversation(names, conv)
+        entry = self._convs[session_id] = _CachedConversation(key, conv)
         self._convs.move_to_end(session_id)
         while len(self._convs) > MAX_CACHED_CONVERSATIONS:
             self._convs.popitem(last=False)
@@ -560,6 +628,8 @@ class ChatAgent:
             "tools": list(st.tools),
             "grounding_flags": list(flags),
             "prompt_version": PROMPT_VERSION,
+            "mode": st.limits.mode,
+            "budget_exhausted": st.budget_exhausted,
         }
         if error:
             meta["error"] = True
@@ -575,23 +645,12 @@ class ChatAgent:
 
     def _finish(self, st: _TurnState, t0: float) -> int:
         elapsed = self._elapsed_ms(t0)
-        st.emit({"type": "finish", "usage": dict(st.usage), "elapsed_ms": elapsed})
+        st.emit({"type": "finish", "usage": dict(st.usage), "elapsed_ms": elapsed, "mode": st.limits.mode,
+                 "max_rounds": st.limits.max_rounds, "budget_exhausted": st.budget_exhausted})
         return elapsed
 
     def _elapsed_ms(self, t0: float) -> int:
         return max(0, int((self._clock() - t0) * 1000))
-
-    def _budget_sec(self) -> float:
-        try:
-            return float(getattr(self._settings, "chat_time_budget_sec", 90.0))
-        except (TypeError, ValueError):
-            return 90.0
-
-    def _max_rounds(self) -> int:
-        try:
-            return max(1, int(getattr(self._settings, "chat_max_rounds", 8)))
-        except (TypeError, ValueError):
-            return 8
 
     def _grace_sec(self) -> float:
         try:

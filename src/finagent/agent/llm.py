@@ -3,6 +3,11 @@
 `LLMClient.start()` returns a `Conversation` that owns the provider-specific message history
 (so Anthropic thinking blocks and Gemini thought signatures are echoed back untouched), exposes `step()`
 to get the next assistant turn, and `add_tool_results()` to feed tool outputs back in ONE message.
+
+`LLMHandle` is the one client object the app hands out: the QA orchestrator (`/answer`), the chat
+runtime and the chat agent all hold the same handle, and `swap()` changes the provider client behind
+it for all of them at once (PUT /api/settings). A conversation keeps the client that started it, so
+a turn already running finishes on the old one.
 """
 from __future__ import annotations
 
@@ -48,6 +53,53 @@ class LLMClient(Protocol):
     name: str
 
     def start(self, system: str, tools: list[ToolSpec], user_text: str) -> Conversation: ...
+
+
+class LLMHandle:
+    """A forwarding handle around the current provider client (see the module docstring).
+
+    `name`, `model` and `start()` forward to the client in use, and so does any other attribute.
+    `swap(new_client)` puts another client in service and returns the old one, which the caller
+    retires (closing it only after a grace period: conversations started on it are still running).
+    `generation` changes with every swap, so a cache keyed on it knows its entries are stale."""
+
+    def __init__(self, client: LLMClient):
+        if isinstance(client, LLMHandle):
+            raise TypeError("an LLMHandle wraps a provider client, not another handle")
+        self._client = client
+        self.generation = 0
+
+    @classmethod
+    def wrap(cls, llm: "LLMClient | LLMHandle") -> "LLMHandle":
+        """`llm` itself when it already is a handle, else a new handle around it."""
+        return llm if isinstance(llm, cls) else cls(llm)
+
+    @property
+    def current(self) -> LLMClient:
+        return self._client
+
+    @property
+    def name(self) -> str:
+        return self._client.name
+
+    @property
+    def model(self) -> str | None:
+        return getattr(self._client, "model", None)
+
+    def start(self, system: str, tools: list[ToolSpec], user_text: str) -> Conversation:
+        return self._client.start(system, tools, user_text)
+
+    def swap(self, client: LLMClient) -> LLMClient:
+        if isinstance(client, LLMHandle):
+            raise TypeError("an LLMHandle wraps a provider client, not another handle")
+        old, self._client = self._client, client
+        self.generation += 1
+        return old
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):  # also keeps copy/pickle probes from recursing before __init__ ran
+            raise AttributeError(name)
+        return getattr(self._client, name)
 
 
 # --------------------------------------------------------------------------- stub
@@ -181,6 +233,9 @@ class AnthropicLLM:
 
     def start(self, system, tools, user_text):
         return AnthropicConversation(self.client, self.model, self.effort, self.max_tokens, self.fallbacks, system, tools, user_text)
+
+    async def aclose(self) -> None:
+        await self.client.close()
 
 
 # --------------------------------------------------------------------------- rate limits
@@ -324,10 +379,30 @@ async def call_with_rate_limit_retry(
 
 
 # --------------------------------------------------------------------------- openai-compatible
+# The request field that caps the output. OpenAI's own API takes `max_completion_tokens` (its
+# reasoning models reject `max_tokens`); Gemini's endpoint and most other OpenAI-compatible servers
+# take `max_tokens`. A client starts with the likelier one and swaps once if it is rejected.
+TOKEN_PARAMS = ("max_tokens", "max_completion_tokens")
+_PARAM_REJECTED_WORDS = ("unsupported", "not supported", "unrecognized", "unknown", "extra inputs",
+                         "not permitted", "unexpected", "instead")
+
+
+def other_token_param(param: str) -> str:
+    return TOKEN_PARAMS[1] if param == TOKEN_PARAMS[0] else TOKEN_PARAMS[0]
+
+
+def rejects_token_param(exc: BaseException, param: str) -> bool:
+    """Whether a 400 says the output-cap field `param` itself is not accepted (as opposed to its
+    value being too large, which the other field would not fix)."""
+    text = str(exc).lower()
+    return param in text and any(word in text for word in _PARAM_REJECTED_WORDS)
+
+
 class OpenAIConversation:
     def __init__(self, client, model: str, max_tokens: int, system: str, tools: list[ToolSpec], user_text: str,
-                 rate_limit_retries: int = 4, min_interval: float = 0.0):
+                 rate_limit_retries: int = 4, min_interval: float = 0.0, owner=None):
         self.client, self.model, self.max_tokens = client, model, max_tokens
+        self.owner = owner  # the LLM client object: holds what was learned about the endpoint
         self.rate_limit_retries = rate_limit_retries
         self.min_interval = min_interval
         self.tools = [{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.input_schema}} for t in tools]
@@ -341,16 +416,34 @@ class OpenAIConversation:
     def _tool_call_dict(tc) -> dict:
         return {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
 
+    def _token_param(self) -> str:
+        return getattr(self.owner, "token_param", TOKEN_PARAMS[0])
+
     async def _create(self):
+        import openai
+
         async def _call():
             raw = await self.client.chat.completions.with_raw_response.create(
-                model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens,
-                **self._extra_kwargs(),
+                model=self.model, messages=self.messages, tools=self.tools or None,
+                **{self._token_param(): self.max_tokens}, **self._extra_kwargs(),
             )
             note_rate_headers(getattr(raw, "headers", None))
             return raw.parse()
 
-        return await call_with_rate_limit_retry(_call, retries=self.rate_limit_retries, min_interval=self.min_interval)
+        async def _send():
+            return await call_with_rate_limit_retry(_call, retries=self.rate_limit_retries,
+                                                    min_interval=self.min_interval)
+
+        try:
+            return await _send()
+        except openai.BadRequestError as e:
+            param = self._token_param()
+            if self.owner is None or getattr(self.owner, "token_param_swapped", False) \
+                    or not rejects_token_param(e, param):
+                raise
+            log.warning("%s rejected %s; using %s from now on", self.model, param, other_token_param(param))
+            self.owner.token_param, self.owner.token_param_swapped = other_token_param(param), True
+            return await _send()
 
     async def step(self) -> Turn:
         import openai
@@ -409,11 +502,17 @@ class OpenAILLM:
         self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
         self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
+        # See TOKEN_PARAMS: OpenAI itself, or another OpenAI-compatible server (OPENAI_BASE_URL).
+        self.token_param = TOKEN_PARAMS[0] if settings.openai_base_url else TOKEN_PARAMS[1]
+        self.token_param_swapped = False
 
     def start(self, system, tools, user_text):
         return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text,
                                   rate_limit_retries=self.rate_limit_retries,
-                                  min_interval=getattr(self, "min_interval", 0.0))
+                                  min_interval=getattr(self, "min_interval", 0.0), owner=self)
+
+    async def aclose(self) -> None:
+        await self.client.close()
 
 
 # --------------------------------------------------------------------------- gemini
@@ -433,8 +532,7 @@ class GeminiConversation(OpenAIConversation):
     """
 
     def __init__(self, owner: "GeminiLLM", *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.owner = owner
+        super().__init__(*args, owner=owner, **kwargs)
 
     def _extra_kwargs(self) -> dict:
         effort = self.owner.reasoning_effort
@@ -495,6 +593,7 @@ class GeminiLLM(OpenAILLM):
         self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
         self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
+        self.token_param, self.token_param_swapped = TOKEN_PARAMS[0], False
         self.reasoning_effort: str | None = self.EFFORT.get(settings.llm_effort)
 
     def start(self, system, tools, user_text):

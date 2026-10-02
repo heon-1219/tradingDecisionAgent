@@ -1873,3 +1873,24 @@ async def test_fallback_leaves_plain_text_untouched(tiny_store, tmp_path):
     assert "final_answer argument JSON" not in resp.think_trace
     assert "final_answer not called → using the last text as the answer" in resp.think_trace
     assert "확인할 수 없습니다" in resp.answer
+
+
+# --- Task 3.8: the QA path answers through the swappable model handle --------------------------------
+
+
+async def test_the_orchestrator_answers_with_the_swapped_model(tiny_store, tmp_path):
+    from finagent.agent.llm import LLMHandle
+
+    def final(text):
+        return [Turn("", [ToolCall("c1", "final_answer", {"status": "answered", "answer": text})], "tool_use")]
+
+    first, second = StubLLM(final("Answer from the first model.")), StubLLM(final("Answer from the second model."))
+    handle = LLMHandle(first)
+    s = _state(tiny_store, handle, tmp_path)
+    assert s.orchestrator.llm is handle
+    resp = await s.orchestrator.answer("Q-1", "How many bonds are on sale?")
+    assert "first model" in resp.answer and len(first.started) == 1
+    handle.swap(second)  # what PUT /api/settings does on a provider or model switch
+    resp = await s.orchestrator.answer("Q-2", "How many bonds are on sale?")
+    assert "second model" in resp.answer
+    assert len(first.started) == 1 and len(second.started) == 1

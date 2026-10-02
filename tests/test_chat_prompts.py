@@ -16,7 +16,8 @@ from finagent.chat.toolbox import _TOOLS_BY_NAME, FORBIDDEN_TOOL_NAME_RE
 from finagent.config import Settings
 
 ALL_TOOLS = sorted(_TOOLS_BY_NAME)
-SETTINGS = SimpleNamespace(chat_max_rounds=8)
+SETTINGS = SimpleNamespace(chat_max_rounds=8)  # no provider named: deep mode
+SHALLOW = {"llm_provider": "gemini", "gemini_paid": False, "shallow_max_rounds": 4}
 
 
 def prompt(tools=None, **settings) -> str:
@@ -30,21 +31,23 @@ def flat(text: str) -> str:
 
 
 def test_prompt_version():
-    assert PROMPT_VERSION == "chat-2"
+    assert PROMPT_VERSION == "chat-3"
 
 
-def test_prompt_asks_for_few_rounds_with_batched_tool_calls():
+@pytest.mark.parametrize("mode_settings", [{}, SHALLOW])
+def test_prompt_asks_for_few_rounds_with_batched_tool_calls(mode_settings):
     # Every round is one model call, and free-tier keys allow only a few calls a minute: a turn
     # that spends one round per tool runs out of time before it can propose.
-    text = flat(prompt())
+    text = flat(prompt(**mode_settings))
     assert "every round is one model call" in text
     assert "call all the independent tools you need in the same round" in text
-    assert "three rounds" in text
 
 
-def test_chat_time_budget_leaves_room_for_rate_limited_keys():
+def test_the_time_budgets_leave_room_for_rate_limited_keys():
     # 90 s could not fit a propose turn on a 5-requests-a-minute key once one 429 backoff hit.
-    assert Settings(_env_file=None).chat_time_budget_sec >= 150
+    defaults = Settings(_env_file=None)
+    assert defaults.shallow_time_budget_sec >= 150
+    assert defaults.chat_time_budget_sec >= defaults.shallow_time_budget_sec
 
 
 def test_the_real_toolbox_defines_the_tools_the_prompt_is_gated_on():
@@ -79,18 +82,68 @@ def test_prompt_has_no_date_or_time_of_day():
         assert "Today is" not in text
 
 
-def test_prompt_only_reads_the_round_budget_from_settings():
-    # a bare namespace with nothing on it must still work (default budget), and unrelated fields are ignored
-    assert "8 tool rounds" in flat(build_chat_system_prompt(SimpleNamespace(), ALL_TOOLS))
-    noisy = SimpleNamespace(chat_max_rounds=8, chat_time_budget_sec=12.5, gemini_api_key="k-not-in-prompt")
+def test_prompt_only_reads_the_mode_and_its_round_budget_from_settings():
+    # a bare namespace with nothing on it must still work (the deep default), and unrelated fields are ignored
+    assert "12 tool rounds" in flat(build_chat_system_prompt(SimpleNamespace(), ALL_TOOLS))
+    noisy = SimpleNamespace(chat_max_rounds=8, chat_time_budget_sec=12.5, gemini_api_key="k-not-in-prompt",
+                            shallow_max_rounds=2, shallow_time_budget_sec=33.5, llm_model="model-not-in-prompt")
     text = build_chat_system_prompt(noisy, ALL_TOOLS)
     assert text == build_chat_system_prompt(SETTINGS, ALL_TOOLS)
-    assert "k-not-in-prompt" not in text and "12.5" not in text
+    assert "k-not-in-prompt" not in text and "12.5" not in text and "33.5" not in text
+    assert "model-not-in-prompt" not in text
 
 
-def test_prompt_builds_from_the_real_settings_object():
-    text = build_chat_system_prompt(Settings(_env_file=None), ALL_TOOLS)
-    assert f"{Settings(_env_file=None).chat_max_rounds} tool rounds" in flat(text)
+def test_prompt_builds_from_the_real_settings_object(monkeypatch):
+    for name in ("LLM_PROVIDER", "GEMINI_PAID"):
+        monkeypatch.delenv(name, raising=False)
+    defaults = Settings(_env_file=None)  # gemini, not declared paid: shallow
+    text = flat(build_chat_system_prompt(defaults, ALL_TOOLS))
+    assert f"at most {defaults.shallow_max_rounds} tool rounds" in text and "shallow mode" in text
+    paid = flat(build_chat_system_prompt(defaults.model_copy(update={"gemini_paid": True}), ALL_TOOLS))
+    assert f"up to {defaults.chat_max_rounds} tool rounds" in paid and "shallow mode" not in paid
+
+
+# --------------------------------------------------------------------------- shallow and deep
+
+
+def test_deep_budget_section_keeps_the_batching_guidance_with_the_larger_budget():
+    text = flat(prompt(chat_max_rounds=12))
+    budget = text[text.index("## budget"):]
+    assert "up to 12 tool rounds per turn" in budget
+    assert "every round is one model call" in budget
+    assert "call all the independent tools you need in the same round" in budget
+    assert "three rounds: context, research, then the proposal" in budget
+    assert "shallow" not in text and "free tier" not in text
+
+
+def test_shallow_budget_section_names_the_mode_the_limit_and_the_priorities():
+    text = flat(prompt(**SHALLOW))
+    budget = text[text.index("## budget"):]
+    assert "this is shallow mode" in budget
+    assert "free tier" in budget
+    assert "at most 4 tool rounds per turn" in budget
+    assert "one context round, one research round, then the proposal" in budget
+    assert "say briefly in the answer when deeper research was skipped" in budget
+    assert "stop researching and answer" in budget
+
+
+def test_shallow_round_count_comes_from_the_shallow_setting():
+    assert "at most 3 tool rounds" in flat(prompt(**{**SHALLOW, "shallow_max_rounds": 3}))
+    # the deep setting is not read in shallow mode, and the shallow one is not read in deep mode
+    assert prompt(**SHALLOW, chat_max_rounds=99) == prompt(**SHALLOW)
+    assert prompt(shallow_max_rounds=1) == prompt()
+
+
+def test_the_prompt_differs_by_mode_and_is_byte_stable_in_each():
+    paid = {**SHALLOW, "gemini_paid": True}
+    assert prompt(**SHALLOW) != prompt(**paid)
+    assert "up to 8 tool rounds" in flat(prompt(**paid))
+    for settings in (SHALLOW, paid, {"llm_provider": "anthropic"}, {"llm_provider": "openai"}):
+        a, b = prompt(**settings), prompt(**settings)
+        assert a == b and a.encode("utf-8") == b.encode("utf-8")
+    # only the Budget section depends on the mode
+    cut = lambda text: text[: text.index("## Budget")]  # noqa: E731
+    assert cut(prompt(**SHALLOW)) == cut(prompt(**paid)) == cut(prompt())
 
 
 # --------------------------------------------------------------------------- the round budget

@@ -23,6 +23,7 @@ from finagent.chat.agent import (
     CACHE_MAX_TURNS,
     MAX_MESSAGE_CHARS,
     NUDGE_TEXT,
+    SHALLOW_NUDGE_TEXT,
     TOOL_CANCELLED_TEXT,
     UNKNOWN_TOOL,
     ChatAgent,
@@ -857,3 +858,173 @@ async def test_failing_user_append_emits_error_then_finish(world, monkeypatch, e
     assert "secret" not in text
     assert llm.started == []
     assert world.sessions.messages(world.session_id) == []
+
+
+# --- Task 3.8: research depth (shallow / deep) ----------------------------------------------------
+
+
+def shallow(world: World, **over) -> None:
+    """Opt the world into shallow mode: Gemini, not declared paid."""
+    fields = dict(llm_provider="gemini", gemini_paid=False, shallow_max_rounds=4, shallow_time_budget_sec=150.0,
+                  chat_max_rounds=12, chat_time_budget_sec=300.0)
+    fields.update(over)
+    for name, value in fields.items():
+        setattr(world.settings, name, value)
+
+
+def always_calling_tools(_user_text):
+    """A model that never answers: one tool call per round, and no text when it is nudged."""
+    return [Turn("", [call(f"c{i}", "get_market_status")]) for i in range(1, 40)]
+
+
+async def test_a_shallow_turn_stops_after_shallow_max_rounds(world):
+    shallow(world)
+    events = Events()
+    await world.agent(RecLLM(script_factory=always_calling_tools)).run_turn(world.session_id, "Is it open?", events)
+    assert len(events.of("tool-output-available")) == 4
+    finish = events[-1]
+    assert finish["type"] == "finish"
+    assert (finish["mode"], finish["max_rounds"], finish["budget_exhausted"]) == ("shallow", 4, True)
+
+
+async def test_a_deep_turn_stops_after_chat_max_rounds(world):
+    world.settings.chat_max_rounds = 12
+    world.settings.shallow_max_rounds = 4  # not read in deep mode
+    events = Events()
+    await world.agent(RecLLM(script_factory=always_calling_tools)).run_turn(world.session_id, "Is it open?", events)
+    assert len(events.of("tool-output-available")) == 12
+    finish = events[-1]
+    assert (finish["mode"], finish["max_rounds"], finish["budget_exhausted"]) == ("deep", 12, True)
+
+
+@pytest.mark.parametrize("paid, nudged", [(False, True), (True, False)])
+async def test_the_time_budget_follows_the_mode(world, paid, nudged):
+    shallow(world, gemini_paid=paid)  # shallow: 150 s; paid Gemini is deep: 300 s
+    clock = FakeClock()
+
+    async def slow_status(session_id, args, turn_id):
+        clock.t += 200  # past the shallow budget, inside the deep one
+        return ToolOutput("US market is OPEN.")
+
+    world.toolbox._t_get_market_status = slow_status
+    llm = RecLLM([Turn("", [call("c1", "get_market_status")]), Turn("The market is open.")])
+    events = Events()
+    text = await world.agent(llm, clock=clock).run_turn(world.session_id, "Is the market open?", events)
+    assert text.startswith("The market is open.")
+    sent = [m["content"] for m in llm.convs[0].transcript() if m["role"] == "user" and isinstance(m["content"], str)]
+    assert (SHALLOW_NUDGE_TEXT in sent) is nudged and NUDGE_TEXT not in sent
+    assert events[-1]["budget_exhausted"] is nudged
+    assert events[-1]["mode"] == ("shallow" if nudged else "deep")
+    assert events[-1]["max_rounds"] == (4 if nudged else 12)
+
+
+async def test_finish_carries_the_mode_on_every_ending(world):
+    # a normal answer in deep mode (the settings of this world name no provider)
+    events = Events()
+    await world.agent(RecLLM([Turn("Hello.")])).run_turn(world.session_id, "hello", events)
+    assert events[-1] == {"type": "finish", "usage": {}, "elapsed_ms": events[-1]["elapsed_ms"],
+                          "mode": "deep", "max_rounds": 8, "budget_exhausted": False}
+    # a refusal before the turn starts, and a failed model step, in shallow mode
+    shallow(world)
+    refused = Events()
+    await world.agent(RecLLM([Turn("never")])).run_turn(world.session_id, "   ", refused)
+    assert refused.types() == ["error", "finish"]
+    assert (refused[-1]["mode"], refused[-1]["max_rounds"], refused[-1]["budget_exhausted"]) == ("shallow", 4, False)
+    failed = Events()
+    await world.agent(RecLLM([Turn("LLM call error: x", [], "error")])).run_turn(world.session_id, "hello", failed)
+    assert failed.types() == ["start", "error", "finish"]
+    assert (failed[-1]["mode"], failed[-1]["max_rounds"], failed[-1]["budget_exhausted"]) == ("shallow", 4, False)
+
+
+@pytest.mark.parametrize("message, lang", [("Is the market open?", "en"), (KO_MESSAGE, "ko")])
+async def test_the_shallow_fallback_names_shallow_mode_and_the_paid_key(world, message, lang):
+    shallow(world, shallow_max_rounds=1)
+    events = Events()
+    text = await world.agent(RecLLM(script_factory=always_calling_tools)).run_turn(world.session_id, message, events)
+    assert "get_market_status" in text
+    if lang == "en":
+        assert "shallow-mode limit" in text and "paid API key in Settings" in text
+        assert "ran out of time" not in text and not HANGUL.search(text)
+    else:
+        assert "얕은 리서치 모드" in text and "설정" in text and "유료 API 키" in text
+        assert "shallow" not in text.lower()
+    assert "".join(e["delta"] for e in events.of("text-delta")) == text
+    assert events[-1]["budget_exhausted"] is True
+    meta = world.sessions.messages(world.session_id)[1]["meta"]
+    assert meta["mode"] == "shallow" and meta["budget_exhausted"] is True
+
+
+@pytest.mark.parametrize("message, lang", [("Is the market open?", "en"), (KO_MESSAGE, "ko")])
+async def test_a_nudged_shallow_answer_ends_with_the_shallow_note(world, message, lang):
+    shallow(world, shallow_max_rounds=1)
+    llm = RecLLM([Turn("", [call("c1", "get_market_status")]), Turn("Partial answer from the model.")])
+    events = Events()
+    text = await world.agent(llm).run_turn(world.session_id, message, events)
+    assert text.startswith("Partial answer from the model.\n\n")
+    note = text.split("\n\n", 1)[1]
+    if lang == "en":
+        assert note.startswith("Shallow mode:") and "paid API key in Settings" in note
+    else:
+        assert note.startswith("얕은 리서치 모드:") and "유료 API 키" in note
+    assert not re.search(r"\d", note)  # no number for the grounding check to flag
+    assert not events.of("data-grounding-flags")
+    assert llm.convs[0].transcript()[-2] == {"role": "user", "content": SHALLOW_NUDGE_TEXT}
+    assert world.sessions.messages(world.session_id)[1]["content"] == text
+
+
+async def test_a_deep_budget_ending_does_not_mention_shallow_mode(world):
+    world.settings.chat_max_rounds = 1
+    llm = RecLLM([Turn("", [call("c1", "get_market_status")]), Turn("Partial answer.")])
+    events = Events()
+    text = await world.agent(llm).run_turn(world.session_id, "Is the market open?", events)
+    assert text == "Partial answer."
+    assert llm.convs[0].transcript()[-2] == {"role": "user", "content": NUDGE_TEXT}
+    assert events[-1]["budget_exhausted"] is True and events[-1]["mode"] == "deep"
+
+
+async def test_a_mode_change_rebuilds_the_cached_conversation_with_the_new_prompt(world):
+    llm = RecLLM(script_factory=lambda u: [Turn("ok")])
+    agent = world.agent(llm)
+    await agent.run_turn(world.session_id, "one", Events())
+    await agent.run_turn(world.session_id, "two", Events())
+    assert len(llm.started) == 1  # cached
+    shallow(world)
+    events = Events()
+    await agent.run_turn(world.session_id, "three", events)
+    assert len(llm.started) == 2
+    assert "shallow mode" in llm.started[1][0] and "shallow mode" not in llm.started[0][0]
+    assert events[-1]["mode"] == "shallow"
+    world.settings.gemini_paid = True
+    await agent.run_turn(world.session_id, "four", Events())
+    assert len(llm.started) == 3 and "shallow mode" not in llm.started[2][0]
+
+
+async def test_reset_conversations_drops_the_cache_and_history_rebuilds_it(world):
+    llm = RecLLM(script_factory=lambda u: [Turn("first"), Turn("second")])
+    agent = world.agent(llm)
+    assert await agent.run_turn(world.session_id, "one", Events()) == "first"
+    agent.reset_conversations()
+    assert await agent.run_turn(world.session_id, "two", Events()) == "first"  # a new conversation: its own script
+    assert len(llm.started) == 2
+    transcript = llm.convs[1].transcript()
+    assert [(m["role"], m["content"]) for m in transcript[1:3]] == [("user", "one"), ("assistant", "first")]
+
+
+async def test_a_turn_in_flight_survives_reset_conversations(world):
+    gate, entered = asyncio.Event(), asyncio.Event()
+    llm = RecLLM(script_factory=lambda u: [Turn("done")], conversation_cls=GatedConversation, gate=gate,
+                 entered=entered, gated_steps={0})
+    agent = world.agent(llm)
+    task = asyncio.create_task(agent.run_turn(world.session_id, "first", Events()))
+    await asyncio.wait_for(entered.wait(), 5)
+    agent.reset_conversations()  # e.g. the provider was switched while this reply was running
+    gate.set()
+    assert await asyncio.wait_for(task, 5) == "done"
+    assert world.roles() == ["user", "assistant", "event"]
+    gate.clear()
+    entered.clear()
+    second = asyncio.create_task(agent.run_turn(world.session_id, "second", Events()))
+    await asyncio.wait_for(entered.wait(), 5)
+    gate.set()
+    await asyncio.wait_for(second, 5)
+    assert len(llm.started) == 2  # the finished turn did not put its conversation back

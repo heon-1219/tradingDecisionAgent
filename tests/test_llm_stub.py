@@ -1,13 +1,24 @@
 import json
+from types import SimpleNamespace
 
 import httpx
 import openai
 import pytest
 
-from finagent.agent.llm import AnthropicConversation, StubLLM, ToolCall, ToolSpec, Turn, make_llm
+from finagent.agent.llm import (
+    AnthropicConversation,
+    LLMHandle,
+    StubConversation,
+    StubLLM,
+    ToolCall,
+    ToolSpec,
+    Turn,
+    make_llm,
+)
 from finagent.config import Settings
 
-GEMINI_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_EFFORT")
+GEMINI_KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "LLM_PROVIDER", "LLM_MODEL", "LLM_EFFORT",
+                   "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "LLM_MAX_TOKENS")
 
 
 @pytest.fixture(autouse=True)
@@ -255,3 +266,120 @@ def test_retry_delay_backoff_and_cap():
     assert retry_delay(10) == 30.0            # capped
     assert retry_delay(0, retry_after="7") == 7.0   # the server's Retry-After wins
     assert retry_delay(0, retry_after="bad") == 2.0  # unparseable -> fall back to backoff
+
+
+# --------------------------------------------------------------------------- LLMHandle (Task 3.8)
+def _named_stub(model: str, *turns: Turn) -> StubLLM:
+    llm = StubLLM(list(turns))
+    llm.model = model
+    return llm
+
+
+def test_llm_handle_forwards_name_model_and_start():
+    inner = _named_stub("model-a", Turn("from a"))
+    handle = LLMHandle(inner)
+    assert handle.current is inner and handle.name == "stub" and handle.model == "model-a"
+    conv = handle.start("sys", [], "q")
+    assert inner.started == [("sys", "q")] and isinstance(conv, StubConversation)
+    assert handle.started is inner.started  # anything else is forwarded too
+    assert LLMHandle(StubLLM([])).model is None  # a client without a model name
+    with pytest.raises(AttributeError):
+        handle.no_such_attribute
+
+
+async def test_llm_handle_swap_changes_the_client_for_new_conversations_only():
+    a, b = _named_stub("model-a", Turn("from a")), _named_stub("model-b", Turn("from b"))
+    handle = LLMHandle(a)
+    before = handle.generation
+    in_flight = handle.start("sys", [], "q1")  # a turn already running holds this conversation
+    assert handle.swap(b) is a  # the old client is handed back, to be retired by the caller
+    assert handle.current is b and handle.model == "model-b" and handle.generation != before
+    assert (await in_flight.step()).text == "from a"  # it finishes on the client it started with
+    assert (await handle.start("sys", [], "q2").step()).text == "from b"
+    assert len(a.started) == 1 and len(b.started) == 1
+
+
+def test_llm_handle_wraps_once_and_never_nests():
+    inner = StubLLM([])
+    handle = LLMHandle.wrap(inner)
+    assert isinstance(handle, LLMHandle) and LLMHandle.wrap(handle) is handle
+    with pytest.raises(TypeError):
+        LLMHandle(handle)
+    with pytest.raises(TypeError):
+        handle.swap(LLMHandle(StubLLM([])))
+
+
+async def test_every_holder_of_the_handle_sees_the_swap():
+    """The QA orchestrator, the chat runtime and the chat agent hold the same handle object."""
+    handle = LLMHandle(_named_stub("model-a", Turn("from a")))
+    holders = [SimpleNamespace(llm=handle) for _ in range(3)]
+    handle.swap(_named_stub("model-b", Turn("from b")))
+    for holder in holders:
+        assert holder.llm.model == "model-b"
+        assert (await holder.llm.start("sys", [], "q").step()).text == "from b"
+
+
+# --------------------------------------------------------------------------- closing and the output cap
+async def test_provider_clients_close_their_sdk_client():
+    for llm in (
+        make_llm(Settings(_env_file=None, llm_provider="gemini", gemini_api_key="k")),
+        make_llm(Settings(_env_file=None, llm_provider="openai", openai_api_key="k")),
+        make_llm(Settings(_env_file=None, llm_provider="anthropic", anthropic_api_key="k", llm_model="claude-x")),
+    ):
+        assert not llm.client.is_closed()
+        await llm.aclose()
+        assert llm.client.is_closed()
+    assert not hasattr(StubLLM([]), "aclose")  # nothing to close
+
+
+def _openai_with(fake: FakeGemini, **overrides):
+    llm = make_llm(Settings(_env_file=None, llm_provider="openai", openai_api_key="k", **overrides))
+    llm.client = openai.AsyncOpenAI(
+        api_key="k", base_url=overrides.get("openai_base_url") or "https://api.openai.com/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)),
+    )
+    return llm
+
+
+async def test_openai_sends_the_output_cap_as_max_completion_tokens():
+    """OpenAI's reasoning models reject `max_tokens`; its API takes `max_completion_tokens` for every model."""
+    fake = FakeGemini((200, _completion({"content": "ok"})))
+    await _openai_with(fake, llm_max_tokens=321).start("sys", TOOLS, "q").step()
+    assert fake.bodies[0]["max_completion_tokens"] == 321 and "max_tokens" not in fake.bodies[0]
+    assert "reasoning_effort" not in fake.bodies[0]
+
+
+async def test_gemini_and_custom_openai_servers_keep_max_tokens():
+    fake = FakeGemini((200, _completion({"content": "ok"})))
+    await _gemini_with(fake, llm_max_tokens=321).start("sys", TOOLS, "q").step()
+    assert fake.bodies[0]["max_tokens"] == 321 and "max_completion_tokens" not in fake.bodies[0]
+    fake = FakeGemini((200, _completion({"content": "ok"})))
+    await _openai_with(fake, llm_max_tokens=321, openai_base_url="http://localhost:1/v1").start("sys", TOOLS, "q").step()
+    assert fake.bodies[0]["max_tokens"] == 321 and "max_completion_tokens" not in fake.bodies[0]
+
+
+@pytest.mark.parametrize("base_url, first, second, message", [
+    (None, "max_completion_tokens", "max_tokens",
+     "Unrecognized request argument supplied: max_completion_tokens"),
+    ("http://localhost:1/v1", "max_tokens", "max_completion_tokens",
+     "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."),
+])
+async def test_a_rejected_output_cap_parameter_is_swapped_once_for_the_whole_client(base_url, first, second, message):
+    rejected = {"error": {"message": message, "type": "invalid_request_error", "param": first, "code": None}}
+    fake = FakeGemini((400, rejected), (200, _completion({"content": "ok"})), (200, _completion({"content": "again"})))
+    overrides = {"openai_base_url": base_url} if base_url else {}
+    llm = _openai_with(fake, **overrides)
+    conv = llm.start("sys", TOOLS, "q")
+    assert (await conv.step()).text == "ok"
+    assert first in fake.bodies[0] and second not in fake.bodies[0]
+    assert second in fake.bodies[1] and first not in fake.bodies[1]
+    assert (await llm.start("sys", TOOLS, "q2").step()).text == "again"  # remembered by the client
+    assert second in fake.bodies[2] and first not in fake.bodies[2]
+
+
+async def test_an_output_cap_that_is_only_too_large_is_not_swapped():
+    too_large = {"error": {"message": "max_completion_tokens is too large: 9000. This model supports at most 8192.",
+                           "type": "invalid_request_error"}}
+    fake = FakeGemini((400, too_large))
+    turn = await _openai_with(fake).start("sys", TOOLS, "q").step()
+    assert turn.stop_reason == "error" and len(fake.bodies) == 1

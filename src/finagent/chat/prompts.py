@@ -8,15 +8,19 @@ message instead (see `ChatAgent`).
 The prompt only ever names tools that were passed in: a model told about a tool it does not have
 will call it. Three sections depend on the tool set - the account check, mandate drafting and the
 trade proposal - and each has a "not available" variant that says what to tell the user.
+
+One section depends on the settings: Budget. It states the research depth (`config.chat_limits`):
+the round count of the mode in force and, in shallow mode, that model calls are limited by the
+provider's free tier and what to prioritise. Nothing else in the settings reaches the prompt.
 """
 from __future__ import annotations
 
 from collections.abc import Iterable
 
-# Logged with every turn so a change in behaviour can be tied to a change in the prompt.
-PROMPT_VERSION = "chat-2"
+from ..config import ChatLimits, chat_limits
 
-_DEFAULT_ROUNDS = 8
+# Logged with every turn so a change in behaviour can be tied to a change in the prompt.
+PROMPT_VERSION = "chat-3"
 
 
 def _role(trading: bool) -> str:
@@ -180,22 +184,30 @@ def _style(trading: bool) -> str:
     )
 
 
-def _budget(rounds: int) -> str:
+_BATCHING = (
+    "call all the independent tools you need in the same round (for example the account, positions and quotes "
+    "together, then the research tools together) instead of one tool per round."
+)
+
+
+def _budget(limits: ChatLimits) -> str:
+    if limits.mode == "shallow":
+        return (
+            "## Budget\n"
+            "This is shallow mode: model calls are limited by the provider's free tier, so you have at most "
+            f"{limits.max_rounds} tool rounds per turn. Every round is one model call, so {_BATCHING} "
+            "Prioritise: one context round, one research round, then the proposal. Stop researching and answer "
+            "when you have enough, and say briefly in the answer when deeper research was skipped for lack of "
+            "rounds."
+        )
     return (
         "## Budget\n"
-        f"You have up to {rounds} tool rounds per turn. Every round is one model call, and model calls are rate "
-        "limited, so use few rounds: call all the independent tools you need in the same round (for example the "
-        "account, positions and quotes together, then the research tools together) instead of one tool per round. "
-        "A typical trade turn takes three rounds: context, research, then the proposal. Stop researching and "
+        f"You have up to {limits.max_rounds} tool rounds per turn. Every round is one model call, and model calls "
+        f"are rate limited, so do not waste rounds: {_BATCHING} "
+        "A typical trade turn takes three rounds: context, research, then the proposal. Use further rounds when "
+        "the question needs deeper research (more sources, a second look at a filing). Stop researching and "
         "answer when you have enough."
     )
-
-
-def _rounds(settings: object) -> int:
-    try:
-        return max(1, int(getattr(settings, "chat_max_rounds", _DEFAULT_ROUNDS)))
-    except (TypeError, ValueError):
-        return _DEFAULT_ROUNDS
 
 
 def build_chat_system_prompt(settings: object, tool_names: Iterable[str]) -> str:
@@ -213,5 +225,5 @@ def build_chat_system_prompt(settings: object, tool_names: Iterable[str]) -> str
         _orders(trading),
         _language(),
         _style(trading),
-        _budget(_rounds(settings)),
+        _budget(chat_limits(settings)),
     ])
