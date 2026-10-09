@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import api_chat
+from . import api_chat, api_sources
 from .agent.answer import fallback_answer
 from .api_security import LocalApiGuard
 from .config import get_settings
@@ -76,6 +76,7 @@ def create_app(state_factory: Callable | None = None, *, web_app_dir: Path | Non
 
     app.add_middleware(LocalApiGuard, allow_remote=allow_remote)
     app.include_router(api_chat.router)
+    app.include_router(api_sources.router)
     if (web_dir / "index.html").is_file():
         app.mount("/app", StaticFiles(directory=web_dir), name="webapp")
 
