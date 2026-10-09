@@ -431,7 +431,8 @@ def test_confirm_with_a_wrong_hash_is_409_and_submits_nothing(world):
         assert r.status_code == 409
         body = r.json()
         assert body["status"] == "rejected" and "changed" in body["message"]
-        assert set(body) == {"status", "message", "ticket", "orders", "new_ticket"}
+        assert set(body) == {"status", "message", "ticket", "orders", "new_ticket", "reason", "block_codes"}
+        assert body["reason"] is None and body["block_codes"] == []  # refresh refusals only
         assert world.total_submits() == 0
 
 

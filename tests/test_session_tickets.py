@@ -164,3 +164,35 @@ def test_refresh_of_an_expired_ticket_that_is_not_the_newest_is_409(world):
         assert listed(client, sid) == [(old["id"], "expired"), (newer.id, "proposed")]
         # another chat cannot refresh it at all
         assert refresh(client, old["id"], new_session(client)).status_code == 404
+
+
+def test_a_refused_refresh_says_why(world):
+    with world.client() as client:
+        # the reviewer's case: the chat's only ticket expired, then the mandate denied its symbol
+        sid = new_session(client)
+        only = propose(client, world, sid)
+        world.clock.advance(301)
+        assert client.put(f"/api/mandate/{sid}", json={"deny_symbols": ["AAPL"]}).status_code == 200
+        r = refresh(client, only["id"], sid)
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert body["status"] == "rejected" and body["new_ticket"] is None
+        assert body["reason"] == "no_executable_legs" and body["block_codes"] == ["denied_symbol"]
+        assert "deny list" in body["message"]
+        assert listed(client, sid) == [(only["id"], "expired")]
+        # an expired ticket with a newer one
+        other = new_session(client)
+        old = propose(client, world, other)
+        world.clock.advance(301)
+        client.get(f"/api/sessions/{other}")  # runs expire_stale
+        stored = world.runtime.tickets.get(old["id"])
+        world.runtime.tickets.create(
+            other, decisions=stored.decisions, thesis=stored.thesis, risks=stored.risks,
+            invalidation=stored.invalidation, evidence_ids=stored.evidence_ids,
+            mandate_version=stored.mandate_version, quote_as_of=world.clock(), ttl_sec=300,
+        )
+        r = refresh(client, old["id"], other)
+        assert r.status_code == 409 and r.json()["reason"] == "not_newest" and r.json()["block_codes"] == []
+        # every other result carries the fields too, empty
+        fresh = confirm(client, world.runtime.tickets.active(other).model_dump(mode="json"), other)
+        assert fresh.status_code == 200 and fresh.json()["reason"] is None and fresh.json()["block_codes"] == []

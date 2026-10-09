@@ -13,13 +13,16 @@ the kill switch run under `ChatRuntime.lock` (serialised against a settings rebu
 shielded task, so a client that disconnects mid-confirm cannot interrupt a submission. Every ticket
 action first calls `TicketStore.expire_stale()`.
 
-**Ticket results** are `{status, message, ticket, orders, new_ticket}` with this HTTP mapping:
+**Ticket results** are `{status, message, ticket, orders, new_ticket, reason, block_codes}` (`reason`
+says why a refresh was refused, else null; `block_codes` lists the risk codes behind
+`no_executable_legs`, else []) with this HTTP mapping:
 submitted 200; requote 409 on confirm (the new ticket is in `new_ticket`) but 200 on refresh (that
 is what refresh is for); disabled 423; expired 410; not_found 404; rejected 200 for a ticket the
 user has rejected (reject is idempotent), 410 for an expired ticket on confirm and reject
 (expire_stale runs first, so the executor reports it as rejected), else 409 (hash mismatch, wrong
 state, nothing executable). Refresh re-quotes the chat's newest ticket even after it expired (200
-requote), so a refused refresh of an expired ticket is 409: a newer ticket exists;
+requote); a refused refresh is always 409, and its `reason` tells a newer ticket (`not_newest`)
+apart from a mandate, price or account refusal;
 error 502. No broker: confirm and refresh answer 503 `broker_not_connected`; reject still works (it
 is a local state change, `execution.reject_ticket`), so a card can be dismissed after the keys are
 cleared.
@@ -439,6 +442,8 @@ async def _ticket_action(rt, action: str, ticket_id: str, session_id: str, ticke
         "ticket": _dump(result.ticket),
         "orders": [o.model_dump(mode="json") for o in result.orders],
         "new_ticket": _dump(result.new_ticket),
+        "reason": result.reason,
+        "block_codes": list(result.block_codes),
     }, status_for(action, result))
 
 

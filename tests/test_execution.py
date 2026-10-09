@@ -807,6 +807,59 @@ async def test_an_expired_refresh_loses_to_a_proposal_made_while_it_re_evaluates
     assert len(world.tickets.for_session(SESSION)) == 2
 
 
+async def test_a_refused_refresh_says_why_in_a_machine_readable_reason(world):
+    # not the newest ticket: a later proposal exists
+    old = await _expired(world, [aapl()])
+    await world.propose([key_market()])
+    result = await world.executor.refresh(old.id, SESSION)
+    assert (result.status, result.reason, result.block_codes) == ("rejected", "not_newest", [])
+
+    # a ticket that is neither proposed nor expired
+    rejected = await world.propose([aapl()], session_id="sess-2")
+    await world.executor.reject(rejected.id, "sess-2")
+    result = await world.executor.refresh(rejected.id, "sess-2")
+    assert (result.status, result.reason) == ("rejected", "ticket_state")
+
+    # the reviewer's case: the chat's only ticket expired, and the mandate now denies its symbol
+    only = await world.propose([key_market()], session_id="sess-3")
+    world.clock.now = only.expires_at + timedelta(seconds=1)
+    world.tickets.expire_stale()
+    world.mandates["sess-3"] = Mandate(deny_symbols=["KEY"], version=2)
+    result = await world.executor.refresh(only.id, "sess-3")
+    assert (result.status, result.reason, result.block_codes) == ("rejected", "no_executable_legs", ["denied_symbol"])
+    assert "deny list" in result.message
+    assert result.new_ticket is None and world.tickets.get(only.id).status == TicketStatus.expired
+    assert [t["id"] for t in world.tickets.for_session("sess-3")] == [only.id]
+
+
+async def test_a_refresh_refused_by_prices_alone_lists_only_price_codes(world):
+    ticket = await world.propose([aapl(limit="200.00")])
+    world.data.set_price("AAPL", "260")  # the limit is now far outside the price band
+
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert (result.status, result.reason, result.block_codes) == ("rejected", "no_executable_legs", ["price_band"])
+    assert world.tickets.get(ticket.id).status == TicketStatus.proposed
+
+
+async def test_a_refresh_on_a_live_account_is_refused_as_not_paper(world):
+    ticket = await world.propose([aapl()])
+    world.broker.account_snapshot = make_account(paper=False)
+
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert (result.status, result.reason) == ("rejected", "not_paper")
+    assert result.new_ticket is None
+    [entry] = [e for e in world.ledger_entries() if e["kind"] == "refresh"]
+    assert entry["payload"]["reason"] == "not_paper"
+
+
+async def test_a_successful_refresh_has_no_reason(world):
+    ticket = await world.propose([key_market()])
+    result = await world.executor.refresh(ticket.id, SESSION)
+    assert result.status == "requote" and result.reason is None and result.block_codes == []
+
+
 # --- build_context ----------------------------------------------------------------------------
 
 
@@ -1483,6 +1536,7 @@ async def test_a_refreshed_ticket_is_ledgered_as_a_proposal(world):
     assert world.ledger_kinds() == ["proposal", "refresh"]
     [payload] = _proposal_entries(world)
     assert payload["source"] == "requote" and payload["supersedes"] == ticket.id
+    assert payload["replaced_status"] == "proposed"  # it was live; it is now superseded
     assert "turn_id" not in payload  # no chat turn made this ticket
     assert payload["ticket_id"] == new.id and payload["hash"] == new.hash
     assert payload["status"] == "proposed" and payload["mandate_version"] == new.mandate_version
@@ -1505,6 +1559,18 @@ async def test_a_ticket_requoted_on_confirm_is_ledgered_as_a_proposal(world):
     [payload] = _proposal_entries(world)
     assert payload["ticket_id"] == result.new_ticket.id and payload["hash"] == result.new_ticket.hash
     assert payload["source"] == "requote" and payload["supersedes"] == ticket.id
+    assert payload["replaced_status"] == "proposed"
+
+
+async def test_a_requote_of_an_expired_ticket_is_ledgered_as_replacing_an_expired_ticket(world):
+    ticket = await _expired(world, [key_market()])
+
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert result.status == "requote"
+    [payload] = _proposal_entries(world)
+    assert payload["supersedes"] == ticket.id and payload["replaced_status"] == "expired"
+    assert world.tickets.get(ticket.id).status == TicketStatus.expired
 
 
 async def test_a_requote_with_nothing_executable_ledgers_no_proposal(world):
