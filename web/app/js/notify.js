@@ -1,4 +1,5 @@
-/* Messages outside the conversation: screen-reader announcements and error toasts.
+/* Messages outside the conversation: screen-reader announcements and toasts (errors by default;
+ * `kind: 'success'` shows a check mark instead of the alert sign).
  *
  * The app has exactly one live region, `#announcer` (polite, visually hidden). It gets one short
  * announcement at the end of each turn ("Response complete"), and the text of a toast when one
@@ -33,7 +34,7 @@ export function notify(message, { kind = 'error' } = {}) {
   toast.setAttribute('data-kind', kind);
   const mark = document.createElement('span');
   mark.className = 'icon';
-  mark.appendChild(icon('alert', { size: 18 }));
+  mark.appendChild(icon(kind === 'success' ? 'check' : 'alert', { size: 18 }));
   const body = document.createElement('span');
   body.className = 'toast-text';
   body.textContent = message;

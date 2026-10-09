@@ -10,7 +10,8 @@
  *   ticket      data-trade-proposal and a reloaded chat's tickets: the ticket card, its timeline
  *   portfolio   the Portfolio panel
  *   orders      the Orders panel
- *   settings    the Settings panel (keys, trading switch, kill switch)
+ *   settings    the Settings panel (model provider, keys, trading switch, kill switch)
+ *   mode        the research depth: the top bar's mode chip, the shallow-mode notices
  */
 import './toolcard.js';
 import './thinking.js';
@@ -21,3 +22,4 @@ import './ticket-thread.js';
 import './portfolio.js';
 import './orders.js';
 import './settings.js';
+import './mode.js';

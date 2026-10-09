@@ -10,6 +10,7 @@ export const STORAGE_KEYS = Object.freeze({
   lang: 'finagent-app.lang',
   rail: 'finagent-app.rail',
   session: 'finagent-app.session',
+  shallowNote: 'finagent-app.shallow-note', // the shallow-mode note above a chat's first answer was dismissed
 });
 
 export const storage = {

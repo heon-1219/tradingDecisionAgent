@@ -3,6 +3,7 @@
 import { bindText, bindAttr } from './i18n.js';
 import { icon } from './icons.js';
 import { dispatch } from './registry.js';
+import { emit } from './state.js';
 import { createUserMessage, Turn } from './turn.js';
 
 const SUGGESTIONS = [
@@ -42,7 +43,10 @@ function buildEmpty(onSuggestion) {
     item.appendChild(button);
     list.appendChild(item);
   }
-  section.append(greeting, lede, list);
+  // A slot under the explanation for the components (the shallow-mode notice, components/mode.js).
+  const notice = el('div', 'empty-notice');
+  notice.hidden = true;
+  section.append(greeting, lede, notice, list);
   return section;
 }
 
@@ -77,8 +81,10 @@ export function createThread({ scroller, thread, onSuggestion }) {
     showEmpty() {
       reset();
       thread.classList.add('is-empty');
-      thread.appendChild(buildEmpty(onSuggestion));
+      const empty = buildEmpty(onSuggestion);
+      thread.appendChild(empty);
       scroller.scrollTop = 0;
+      emit('thread:empty', empty.querySelector('.empty-notice'));
     },
 
     showLoading() {

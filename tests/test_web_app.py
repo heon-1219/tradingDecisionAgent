@@ -7,7 +7,10 @@ points at another origin, the scripts have no HTML-string sinks (the one `srcdoc
 search suggestions, is pinned to its sandbox), the components never put money through a float,
 every element id the scripts look up exists in the page, the vendored files match their recorded
 checksums, and (when Node is installed) the JavaScript parses and the Node checks pass (i18n, SSE
-parser, markdown, decimal arithmetic, shell and component logic).
+parser, markdown, decimal arithmetic, shell and component logic, model settings). The model
+provider settings (Task 4.3) add: the three key-creation links are the only other sites the code
+names, typed keys never reach storage, and the research-depth strings exist in both languages with
+the server's wording.
 """
 from __future__ import annotations
 
@@ -38,6 +41,14 @@ CSP = (
 )
 JS_TYPES = ("text/javascript", "application/javascript")
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+# Where each provider's API keys are made: the only other sites the app's code may name, all in
+# one table of components/llm-model.js, shown as plain links (components/dom.js `externalLink`).
+KEY_LINK_FILE = "js/components/llm-model.js"
+KEY_LINKS = {
+    "https://aistudio.google.com/apikey",
+    "https://platform.openai.com/api-keys",
+    "https://console.anthropic.com/settings/keys",
+}
 
 
 def _index() -> str:
@@ -193,7 +204,8 @@ def test_js_has_no_external_urls_and_only_relative_imports():
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             for url in re.findall(r"https?://[^\s'\"`)]+", line):
                 in_comment = line.lstrip().startswith(("*", "/*", "//"))
-                assert in_comment or url == SVG_NAMESPACE, f"{_rel(path)}:{number}: {url}"
+                key_link = _rel(path) == KEY_LINK_FILE and url in KEY_LINKS
+                assert in_comment or url == SVG_NAMESPACE or key_link, f"{_rel(path)}:{number}: {url}"
             m = re.match(r"\s*(?:import|export)\b.*\bfrom\s+['\"]([^'\"]+)['\"]", line)
             if m:
                 assert m.group(1).startswith(("./", "../")), f"{_rel(path)}:{number}: {m.group(1)}"
@@ -425,11 +437,54 @@ def test_the_float_check_catches_what_it_should():
         assert not _float_uses(line), line
 
 
+def test_the_key_creation_links_are_exactly_the_three_documented_ones():
+    source = (WEB / KEY_LINK_FILE).read_text(encoding="utf-8")
+    found = set(re.findall(r"'(https://[^']+)'", source))
+    assert found == KEY_LINKS
+    for url in found:  # https on the provider's own host, no credentials, query or fragment
+        assert re.fullmatch(r"https://(aistudio\.google\.com|platform\.openai\.com|console\.anthropic\.com)/[a-z/-]+", url)
+    model = (COMPONENTS_DIR / "settings-model.js").read_text(encoding="utf-8")
+    # a plain <a href> built by externalLink (rel="noopener noreferrer nofollow", target="_blank")
+    assert "externalLink(KEY_LINKS[selected]" in model
+    dom = (COMPONENTS_DIR / "dom.js").read_text(encoding="utf-8")
+    assert "link.setAttribute('rel', 'noopener noreferrer nofollow');" in dom
+    assert "link.setAttribute('target', '_blank');" in dom
+
+
+def test_storage_is_written_only_under_the_app_keys_and_never_with_a_key_value():
+    # Every localStorage write goes through state.js's `storage`, under a STORAGE_KEYS name, and none
+    # of them carries anything typed into a key field.
+    writes = []
+    for path in JS_FILES:
+        for number, code, line in _code_lines(path):
+            if _rel(path) == "js/boot.js":  # reads the theme before the modules load; never writes
+                assert "setItem" not in code and "sessionStorage" not in code, f"{_rel(path)}:{number}"
+            elif _rel(path) != "js/state.js":
+                assert "localStorage" not in code and "sessionStorage" not in code, f"{_rel(path)}:{number}"
+            m = re.search(r"\bstorage\.set\(([^,]+),(.*)", code)
+            if m:
+                writes.append((_rel(path), number, m.group(1).strip(), m.group(2)))
+    assert writes
+    for name, number, target, value in writes:
+        assert re.fullmatch(r"STORAGE_KEYS\.\w+", target), f"{name}:{number}: {target}"
+        assert not re.search(r"(?i)key|secret|token|input|\.value", value.replace("STORAGE_KEYS", "")), \
+            f"{name}:{number}: {value}"
+    state_js = (JS_DIR / "state.js").read_text(encoding="utf-8")
+    assert "shallowNote: 'finagent-app.shallow-note'" in state_js
+
+
 def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
-    for name in ("settings.js", "settings-kill.js"):
+    model = (COMPONENTS_DIR / "settings-model.js").read_text(encoding="utf-8")
+    assert "keyInput.type = 'password';" in model
+    assert "keyInput.autocomplete = 'new-password';" in model
+    assert re.findall(r"keyInput\.value = ([^;]+);", model) and all(
+        value == "''" for value in re.findall(r"keyInput\.value = ([^;]+);", model)), "the key field is only ever emptied"
+    assert "keyInput.value.trim()" in model  # read only to build a request body
+    for name in ("settings.js", "settings-kill.js", "settings-model.js", "llm-model.js"):
         code = "\n".join(c for _, c, _ in _code_lines(COMPONENTS_DIR / name))
-        for sink in ("localStorage", "sessionStorage", "storage.", "console.", "document.cookie"):
+        for sink in ("localStorage", "sessionStorage", "storage.", "document.cookie"):
             assert sink not in code, f"{name}: {sink}"
+        assert not re.search(r"\bconsole\.\w+\(", code), f"{name}: console"
     settings = (COMPONENTS_DIR / "settings.js").read_text(encoding="utf-8")
     assert "input.type = secret ? 'password' : 'text';" in settings
     # new-password: browsers neither fill a saved password in nor offer to store one on their own
@@ -565,6 +620,39 @@ def test_component_logic():
     # The ticket model, the tool cards, the poller, the shared ticker, the panels and the forms.
     result = _node("scripts/test_components.mjs")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_model_settings_and_research_depth():
+    # The model section of Settings through every list and save answer, the mode chip, the notices.
+    result = _node("scripts/test_model_settings.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_research_depth_strings_match_the_server_in_both_languages():
+    en = (JS_DIR / "strings-components-en.js").read_text(encoding="utf-8")
+    ko = (JS_DIR / "strings-components-ko.js").read_text(encoding="utf-8")
+    keys = ["mode_shallow", "mode_deep", "mode_shallow_explain", "mode_deep_explain", "mode_open_settings", "mode_note",
+            "mode_note_dismiss", "settings_llm_heading", "settings_llm_summary", "settings_llm_provider",
+            "settings_llm_key_saved", "settings_llm_no_key", "settings_llm_key", "settings_llm_model", "settings_llm_load",
+            "settings_llm_custom", "settings_llm_paid", "settings_llm_paid_help", "settings_llm_save",
+            "settings_llm_checking", "settings_llm_saved", "settings_llm_saved_rate_limited",
+            "settings_llm_err_invalid_key", "settings_llm_err_model_unavailable", "settings_llm_err_key_required",
+            "settings_llm_err_model_required", "settings_llm_err_unreachable", "settings_llm_err_list_failed",
+            "settings_alpaca_not_paper_note"]
+    for key in keys:
+        assert re.search(rf"^  {key}: '[^']+',$", en, re.M), f"en {key}"
+        assert re.search(rf"^  {key}: '[^']+',$", ko, re.M), f"ko {key}"
+    # the way out, worded as the server's own shallow-mode note (src/finagent/chat/agent.py)
+    agent = (ROOT / "src" / "finagent" / "chat" / "agent.py").read_text(encoding="utf-8")
+    assert "add a paid API key, or mark your Gemini key as paid in Settings" in en
+    assert "add a paid API key, or mark your Gemini key as paid in" in agent
+    assert "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면" in ko
+    assert "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면" in agent
+    # one name per mode, everywhere: the server says 얕은 리서치 모드 too
+    assert "mode_shallow: '얕은 리서치 모드'" in ko and "mode_deep: '심층 리서치 모드'" in ko
+    assert "얕은 리서치 모드" in agent
+    assert "얕은 모드" not in ko.replace("얕은 리서치 모드", "") and "깊은 모드" not in ko
 
 
 @needs_node

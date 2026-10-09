@@ -64,7 +64,7 @@ const KEY_PREFIXES = [
   'family_', 'tool_', 'thinking_', 'source_', 'sources_', 'tier_', 'suggestions_', 'flags_', 'mandate_',
   'order_', 'orders_', 'portfolio_', 'positions_', 'stat_', 'col_', 'paper_', 'account_', 'ticket_',
   'timeline_', 'verdict_', 'severity_', 'clamp_', 'side_', 'size_', 'terms_', 'tif_', 'leg_', 'age_',
-  'settings_', 'kill_', 'status_', 'open_', 'popover_', 'err_', 'announce_',
+  'settings_', 'kill_', 'status_', 'open_', 'popover_', 'err_', 'announce_', 'mode_',
 ];
 const NOT_KEYS = new Set(['order_types']); // a Mandate field name
 const componentsDir = join(root, 'js', 'components');

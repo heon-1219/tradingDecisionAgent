@@ -1,5 +1,8 @@
 /* The Settings panel: connection status with key entry, the trading switch, the kill switch, the
- * model in use and the activity-log download. It replaces the shell's read-only view.
+ * model section (settings-model.js) and the activity-log download. It replaces the shell's
+ * read-only view. Each section is built by its own function (or module) and listed once in
+ * `build()`; `update()` passes every settings body to all of them. `settings:focus` with a section
+ * name ('model') scrolls to that section and moves the focus to its heading.
  *
  * Keys. The server never sends a key back, only status words, and this panel never keeps one: the
  * entry fields are password inputs (`autocomplete="new-password"`, so the browser neither fills a
@@ -18,6 +21,7 @@ import { registerPanel } from '../registry.js';
 import { emit, on, setState, state } from '../state.js';
 import { actionButton, el, iconButton, iconSpan, label, str, uid } from './dom.js';
 import { createKillSwitch } from './settings-kill.js';
+import { createModelSection } from './settings-model.js';
 
 // status word from the API -> [i18n key, tone]
 const STATUS = {
@@ -44,8 +48,10 @@ const FIELD_LABEL = {
 };
 
 // Each editable connection: the status field it reports, and the request fields it sends.
+// `warn` maps a status word to a warning shown under the row while the status says so.
 const CONNECTIONS = [
-  { status: 'alpaca', key: 'settings_alpaca', fields: [['alpaca_key_id', true], ['alpaca_secret', true]] },
+  { status: 'alpaca', key: 'settings_alpaca', fields: [['alpaca_key_id', true], ['alpaca_secret', true]],
+    warn: { not_paper: 'settings_alpaca_not_paper_note' } },
   { status: 'tavily', key: 'settings_tavily', fields: [['tavily_key', true]] },
   { status: 'sec_user_agent', key: 'settings_sec', fields: [['sec_user_agent', false]] },
 ];
@@ -110,12 +116,15 @@ function connectionRow(spec) {
   });
   const message = el('p', 'conn-message');
   message.hidden = true;
+  const warning = el('div', 'notice conn-warning');
+  warning.setAttribute('data-tone', 'bad');
+  warning.hidden = true;
   const actions = el('div', 'conn-actions');
   const save = actionButton('btn btn-primary btn-small', 'settings_save');
   const clear = actionButton('btn btn-quiet btn-small', 'settings_clear');
   actions.append(save, clear);
   form.append(message, actions);
-  row.append(head, form);
+  row.append(head, warning, form);
 
   function say(text, tone) {
     message.hidden = !text;
@@ -164,7 +173,14 @@ function connectionRow(spec) {
       save.click();
     }
   });
-  return { el: row, setStatus: (word) => setStatus(status, word) };
+  function setRowStatus(word) {
+    setStatus(status, word);
+    const key = spec.warn && spec.warn[word];
+    warning.hidden = !key;
+    if (key) warning.replaceChildren(iconSpan('alert', 18), label('p', 'notice-text', key));
+    else warning.replaceChildren();
+  }
+  return { el: row, setStatus: setRowStatus };
 }
 
 function build() {
@@ -175,16 +191,12 @@ function build() {
   const problem = el('p', 'panel-note');
   problem.hidden = true;
 
+  // The model keys are in the model section, with the provider they belong to.
   const connections = CONNECTIONS.map((spec) => ({ spec, row: connectionRow(spec) }));
-  const gemini = el('div', 'conn');
-  const geminiHead = el('div', 'conn-head');
-  const geminiStatus = statusNode();
-  geminiHead.append(label('span', 'conn-name', 'settings_gemini'), geminiStatus);
-  gemini.appendChild(geminiHead);
   const fallbacks = el('p', 'panel-note');
   fallbacks.hidden = true;
   const connSection = el('section', 'panel-section');
-  connSection.append(head, problem, ...connections.map((c) => c.row.el), gemini, fallbacks,
+  connSection.append(head, problem, ...connections.map((c) => c.row.el), fallbacks,
     label('p', 'panel-note', 'settings_keys_note'));
 
   // Trading: the switch, then the kill switch.
@@ -220,18 +232,7 @@ function build() {
   const tradingSection = el('section', 'panel-section');
   tradingSection.append(label('h2', 'panel-h', 'settings_trade_heading'), toggleRow, toggleMessage, kill.el);
 
-  const model = el('span', 'kv-value');
-  const effort = el('span', 'kv-value');
-  const agent = el('dl', 'kv');
-  for (const [key, value] of [['settings_model', model], ['settings_effort', effort]]) {
-    const row = el('div', 'kv-row');
-    const detail = el('dd');
-    detail.appendChild(value);
-    row.append(label('dt', '', key), detail);
-    agent.appendChild(row);
-  }
-  const agentSection = el('section', 'panel-section');
-  agentSection.append(label('h2', 'panel-h', 'settings_agent_heading'), agent);
+  const model = createModelSection({ adopt });
 
   const log = el('a', 'btn btn-quiet log-link');
   log.append(iconSpan('download', 16), label('span', 'btn-label', 'settings_log_download'));
@@ -239,8 +240,8 @@ function build() {
   const logSection = el('section', 'panel-section');
   logSection.append(label('h2', 'panel-h', 'settings_log_heading'), log, logNote);
 
-  container.replaceChildren(connSection, tradingSection, agentSection, logSection);
-  view = { connections, geminiStatus, fallbacks, problem, toggle, toggleState, kill, model, effort, log, logNote };
+  container.replaceChildren(model.el, connSection, tradingSection, logSection);
+  view = { connections, fallbacks, problem, toggle, toggleState, kill, model, log, logNote };
 }
 
 function update() {
@@ -249,7 +250,7 @@ function update() {
   view.problem.hidden = Boolean(settings) || !state.settingsError;
   view.problem.textContent = settings ? '' : str(state.settingsError);
   for (const { spec, row } of view.connections) row.setStatus(settings ? settings[spec.status] : undefined);
-  setStatus(view.geminiStatus, settings ? settings.gemini : undefined);
+  view.model.update(settings);
 
   const names = settings && Array.isArray(settings.env_fallbacks)
     ? settings.env_fallbacks.filter((name) => typeof name === 'string' && /^[A-Z0-9_]{1,64}$/.test(name)) : [];
@@ -261,8 +262,6 @@ function update() {
   view.toggle.disabled = !settings;
   bindText(view.toggleState, enabled ? 'status_enabled' : 'status_disabled');
   view.kill.update(settings);
-  view.model.textContent = settings && settings.model ? String(settings.model) : '–';
-  view.effort.textContent = settings && settings.effort ? String(settings.effort) : '–';
 
   const sessionId = state.sessionId;
   view.log.hidden = !sessionId;
@@ -288,4 +287,9 @@ registerPanel('settings', {
 
 on('change', (patch) => {
   if ('settings' in patch || 'settingsError' in patch || 'sessionId' in patch) update();
+});
+
+// "Open settings" from the mode chip and the shallow-mode notices: the panel is open by now.
+on('settings:focus', (section) => {
+  if (view && section === 'model') view.model.focus();
 });
