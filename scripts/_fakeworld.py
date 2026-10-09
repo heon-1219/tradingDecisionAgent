@@ -21,7 +21,9 @@ Two options exist for the demo server. `grounded=True` switches on the real `Gro
 (the settings get the provider "gemini" and a dummy key, declared paid so the chat agent stays in
 deep mode) and the fake transport answers its one `generateContent` request with `GROUNDED_SAMPLE`,
 so `grounded_web_answer` works offline and emits a `source-grounding` event. `broker_cls` swaps in
-a `FakeBroker` subclass (e.g. one whose orders fill).
+a `FakeBroker` subclass (e.g. one whose orders fill). The runtime's model-provider functions (key
+check, model list, client factory) are always `_demo_llm_admin.DemoLLMAdmin` (`world.llm_admin`), so
+switching the provider in the settings never calls a provider either.
 
 Used by `scripts/eval_scenarios.py` and by the demo server. `DemoLLM` (see `_demo_llm.py`) is the
 scripted model that goes with it.
@@ -54,6 +56,11 @@ for _path in (pathlib.Path(__file__).resolve().parent, ROOT):
 import httpx  # noqa: E402
 
 from _demo_llm import DemoLLM  # noqa: E402,F401 - re-exported: the scripted model for this world
+from _demo_llm_admin import (  # noqa: E402,F401 - re-exported for the demo server and the tests
+    DEMO_GEMINI_KEY,
+    GROUNDED_SAMPLE,
+    DemoLLMAdmin,
+)
 from finagent.agent.tools import ToolResult  # noqa: E402
 from finagent.app_state import ChatRuntime  # noqa: E402
 from finagent.config import Settings  # noqa: E402
@@ -66,40 +73,7 @@ from tests.fakes_trading import FakeBroker, FakeData, make_account, make_asset, 
 
 DEMO_KEY_ID = "demo-key-id"  # not secrets: they only make the runtime build a (fake) broker
 DEMO_SECRET = "demo-secret-key"
-DEMO_GEMINI_KEY = "demo-gemini-key"  # only makes the runtime build its grounded-search connector
 GROUNDING_HOST = "generativelanguage.googleapis.com"
-# A canned Gemini `generateContent` answer with Google Search grounding metadata, in the shape
-# `research/grounding.py` parses. The search-suggestions HTML is a small made-up sample: a style
-# block and plain links without `target`, like the real `searchEntryPoint.renderedContent`.
-GROUNDED_SAMPLE: dict = {
-    "candidates": [{
-        "content": {"role": "model", "parts": [{"text": (
-            "An S&P 500 index fund holds the stocks of the index in the same proportions, so its return follows "
-            "the index before costs. Funds that track the same index differ mainly in their expense ratio and in "
-            "how closely they follow the index. This is demo text served by the fake world, not a web result."
-        )}]},
-        "groundingMetadata": {
-            "webSearchQueries": ["how does an S&P 500 index fund work", "index fund expense ratio"],
-            "groundingChunks": [
-                {"web": {"uri": "https://www.investor.gov/introduction-investing/investing-basics/glossary/index-fund",
-                         "title": "investor.gov"}},
-                {"web": {"uri": "https://funds.example.com/guide/index-funds", "title": "funds.example.com"}},
-            ],
-            "searchEntryPoint": {"renderedContent": (
-                "<style>.demo-sg{display:flex;align-items:center;gap:8px;padding:8px 10px;font:13px/1.4 Arial,sans-serif;"
-                "color:#1f1f1f;background:#fafafa;border:1px solid #d2d2d2;border-radius:8px;overflow-x:auto;"
-                "white-space:nowrap}.demo-sg b{color:#5e5e5e;font-weight:500}.demo-sg a{padding:5px 12px;"
-                "border:1px solid #d2d2d2;border-radius:16px;background:#fff;color:#0b57d0;text-decoration:none}"
-                "@media (prefers-color-scheme:dark){.demo-sg{color:#e3e3e3;background:#1f1f1f;border-color:#444}"
-                ".demo-sg a{background:#2c2c2c;border-color:#3c4043;color:#a8c7fa}}</style>"
-                '<div class="demo-sg"><b>Search (demo)</b>'
-                '<a href="https://www.google.com/search?q=how+does+an+S%26P+500+index+fund+work">how does an S&amp;P 500 '
-                "index fund work</a>"
-                '<a href="https://www.google.com/search?q=index+fund+expense+ratio">index fund expense ratio</a></div>'
-            )},
-        },
-    }],
-}
 ETF_BASE_DATE = "2026-08-22"
 
 # symbol -> (demo last price, name). Made-up prices, not market data.
@@ -432,6 +406,7 @@ class FakeWorld:
     tmp_dir: Path
     registry: Any = None
     orchestrator: Any = None
+    llm_admin: Any = None  # the DemoLLMAdmin behind the runtime's model-provider checks
 
     @property
     def sessions(self):
@@ -498,15 +473,17 @@ def build_fake_world(*, llm, tmp_dir, real_products: bool = False, web_pages: di
     data = DemoData({symbol: make_quote(symbol, price) for symbol, (price, _name) in UNIVERSE.items()})
     web = FakeWeb(web_pages, grounded=GROUNDED_SAMPLE if grounded else None)
     registry, orchestrator = build_products(tmp, llm=llm, real_products=real_products)
+    llm_admin = DemoLLMAdmin()
     runtime = ChatRuntime(
         settings, llm=llm, registry=registry, orchestrator=orchestrator, env_path=env_path,
         broker_factory=lambda key_id, secret: broker,
         data_factory=lambda key_id, secret, http: data,
         http_factory=web.client,
+        **llm_admin.runtime_kwargs(),  # the provider key check, model list and client factory: offline
     )
     if not isinstance(runtime.broker, FakeBroker):  # a hard guard, not an assert (asserts vanish under -O)
         raise RuntimeError(
             f"the fake world must run on FakeBroker, got {type(runtime.broker).__name__}: keep both Alpaca "
             "key settings non-empty (they are dummy strings here)")
     return FakeWorld(runtime=runtime, settings=settings, broker=broker, data=data, web=web, tmp_dir=tmp,
-                     registry=registry, orchestrator=orchestrator)
+                     registry=registry, orchestrator=orchestrator, llm_admin=llm_admin)

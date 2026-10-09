@@ -307,6 +307,57 @@ def test_saving_keys_in_the_demo_never_builds_a_real_broker(tmp_path, monkeypatc
         fw.release_sqlite(world.runtime.db, getattr(world.registry, "rdb", None))
 
 
+def test_switching_the_model_provider_in_the_demo_never_reaches_a_provider(tmp_path, monkeypatch):
+    import finagent.app_state as app_state
+    import finagent.llm_admin as llm_admin
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the demo must not use the real model-provider functions")
+
+    async def aboom(*args, **kwargs):
+        boom()
+
+    monkeypatch.setattr(llm_admin, "fetch_models", aboom)
+    monkeypatch.setattr(llm_admin, "validate_llm", aboom)
+    monkeypatch.setattr(app_state, "make_llm", boom)
+    app, world = demo_server.build_demo_app(tmp_path)
+    try:
+        with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+            listed = client.post("/api/llm/models", json={"provider": "openai", "api_key": demo_server.DEMO_VALID_KEY},
+                                 headers=WRITE)
+            assert listed.status_code == 200, listed.text
+            assert [m["id"] for m in listed.json()["models"]] == ["gpt-6", "gpt-6-mini"]  # no embedding model
+            bad = client.post("/api/llm/models", json={"provider": "openai", "api_key": demo_server.DEMO_INVALID_KEY},
+                              headers=WRITE)
+            assert bad.status_code == 400 and bad.json()["error"] == "llm_invalid_key"
+
+            switched = client.put("/api/settings", headers=WRITE, json={
+                "llm_provider": "openai", "llm_model": "gpt-6", "openai_key": demo_server.DEMO_VALID_KEY})
+            assert switched.status_code == 200, switched.text
+            body = switched.json()
+            assert body["provider"] == "openai" and body["model"] == "gpt-6" and body["providers"]["openai"] == "set"
+            assert world.llm_admin.built == [("openai", "gpt-6")]
+            assert demo_server.DEMO_VALID_KEY not in switched.text
+            refused = client.put("/api/settings", headers=WRITE, json={
+                "llm_provider": "anthropic", "llm_model": "claude-opus-5-5", "anthropic_key": demo_server.DEMO_INVALID_KEY})
+            assert refused.status_code == 400 and refused.json()["error"] == "llm_invalid_key"
+            assert world.llm_admin.built == [("openai", "gpt-6")]  # nothing was built for the refused key
+
+            # the scripted model still answers, whatever provider the settings name
+            sid = new_session(client)
+            events = chat(client, sid, CORE)
+            assert len(of(events, "data-trade-proposal")) == 1 and not of(events, "error")
+    finally:
+        fw.release_sqlite(world.runtime.db, getattr(world.registry, "rdb", None))
+
+
+def test_the_help_names_the_test_keys_for_the_provider_settings(capsys):
+    with pytest.raises(SystemExit):
+        demo_server.main(["--help"])
+    out = capsys.readouterr().out
+    assert demo_server.DEMO_VALID_KEY in out and demo_server.DEMO_INVALID_KEY in out
+
+
 # --- main() ------------------------------------------------------------------------------------------
 
 

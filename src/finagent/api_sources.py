@@ -5,22 +5,23 @@ behind it (title, publisher, date, trust tier, a snippet and the link). The stre
 `{id, title, url, publisher, tier}` with a tool result, and history carries nothing, so the page
 reads this endpoint when a chat is opened and after every turn.
 
-The router is built like `api_chat.router` (same prefix, guarded route class and the 503 dependency
-when there is no chat runtime) and is included next to it, so `LocalApiGuard` covers it too. It only
-reads: `EvidenceStore.list(session_id)`, in the order the sources were recorded. An unknown session
-is a 404. Every field is as stored (connectors sanitize external text before they store it); the
-snippet is cut to `SNIPPET_MAX` characters. The records are external content: the page renders them
-as text and links only `http(s)` URLs.
+The router is built like `api_chat.router` (same prefix, `api_common.GuardedRoute` and the 503
+dependency when there is no chat runtime) and is included next to it, so `LocalApiGuard` covers it
+too. It only reads: `EvidenceStore.list(session_id)`, in the order the sources were recorded. An
+unknown session is a 404. Every field is as stored (connectors sanitize external text before they
+store it); the snippet is cut to `SNIPPET_MAX` characters. The records are external content: the
+page renders them as text and links only `http(s)` URLs.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from .api_chat import Runtime, SessionId, _GuardedRoute, _session_or_404, respond, runtime
+from .api_chat import SessionId, _session_or_404
+from .api_common import GuardedRoute, Runtime, respond, runtime
 
 SNIPPET_MAX = 500
 
-router = APIRouter(prefix="/api", route_class=_GuardedRoute, dependencies=[Depends(runtime)])
+router = APIRouter(prefix="/api", route_class=GuardedRoute, dependencies=[Depends(runtime)])
 
 
 def _source_json(record) -> dict:
