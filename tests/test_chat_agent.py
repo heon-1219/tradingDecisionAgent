@@ -923,13 +923,14 @@ async def test_finish_carries_the_mode_on_every_ending(world):
     events = Events()
     await world.agent(RecLLM([Turn("Hello.")])).run_turn(world.session_id, "hello", events)
     assert events[-1] == {"type": "finish", "usage": {}, "elapsed_ms": events[-1]["elapsed_ms"],
-                          "mode": "deep", "max_rounds": 8, "budget_exhausted": False}
+                          "mode": "deep", "max_rounds": 8, "time_budget_sec": 90.0, "budget_exhausted": False}
     # a refusal before the turn starts, and a failed model step, in shallow mode
     shallow(world)
     refused = Events()
     await world.agent(RecLLM([Turn("never")])).run_turn(world.session_id, "   ", refused)
     assert refused.types() == ["error", "finish"]
     assert (refused[-1]["mode"], refused[-1]["max_rounds"], refused[-1]["budget_exhausted"]) == ("shallow", 4, False)
+    assert refused[-1]["time_budget_sec"] == 150 and isinstance(refused[-1]["time_budget_sec"], int)
     failed = Events()
     await world.agent(RecLLM([Turn("LLM call error: x", [], "error")])).run_turn(world.session_id, "hello", failed)
     assert failed.types() == ["start", "error", "finish"]

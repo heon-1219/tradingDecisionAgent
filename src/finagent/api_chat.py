@@ -3,7 +3,9 @@
 Sessions, the chat stream (SSE), portfolio, mandate, tickets (confirm / reject / refresh / poll),
 settings, the kill switch and the ledger export. `api_security.LocalApiGuard` keeps all of it
 local-only (loopback clients, a Host allowlist, and `X-FinAgent-Client: 1` on every POST, PUT,
-PATCH and DELETE).
+PATCH and DELETE). The model provider settings and `POST /api/llm/models` live in `api_llm`, whose
+router is included here; the shared pieces (JSON, the error envelope, the guarded route class) are
+in `api_common`.
 
 **Only `POST /api/tickets/{id}/confirm` can place an order**: it is the one route that calls
 `Executor.confirm`, and nothing else here reaches `broker.submit_order`. Confirm, reject, refresh and
@@ -20,11 +22,13 @@ error 502. No broker: confirm and refresh answer 503 `broker_not_connected`; rej
 is a local state change, `execution.reject_ticket`), so a card can be dismissed after the keys are
 cleared.
 
-**Errors** are `{"error": "<code>", "message": "<friendly English>"}`, never exception text:
-unexpected failures are logged by exception type only, and request-validation errors list field
-locations and pydantic's own messages (`fields: [{loc, msg}]`) without echoing any input, so a
-rejected secret is never sent back. Every JSON body is built here with Decimals as strings.
-Without a chat runtime (`app.state.fin.chat is None`) every route answers 503 `chat_unavailable`.
+**Errors** are `{"error": "<code>", "message": "<friendly English>"}`, never exception text (see
+`api_common`). Without a chat runtime every route answers 503 `chat_unavailable`.
+
+**Paper only.** A broker whose account is not a paper account is never kept (`ChatRuntime`):
+`GET /api/settings` then says `alpaca: "not_paper"`, such keys are refused by `PUT /api/settings`
+with 400 `alpaca_not_paper`, and `GET /api/portfolio` reports `paper` from the account itself
+(`true`, or `null` when Alpaca's response did not say).
 
 **Chat stream.** `POST /api/chat` answers 404 for an unknown session before streaming. The turn
 runs as a task; its events arrive through `emit` -> `queue.put_nowait` and go out as
@@ -37,18 +41,20 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi import Path as PathParam
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response, StreamingResponse
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 
+from . import api_llm
+from .api_common import ApiError, Runtime, dumps, respond, runtime  # noqa: F401 - re-exported
+from .api_common import Body as _Body
+from .api_common import GuardedRoute as _GuardedRoute
+from .api_common import error_response as _error
+from .api_common import field_errors as _field_errors
 from .config import env_fallbacks
 from .envfile import EnvFileError, check_env_value
 from .trading.execution import ConfirmResult, TrackedOrder, reject_ticket, stored_orders
@@ -65,94 +71,14 @@ _STREAM_FAILED = "Sorry, something went wrong while writing this reply. Please t
 _KEEPALIVE = ": keep-alive\n\n"
 
 
-# --- JSON and errors ------------------------------------------------------------------------------
-
-
-def _json_default(obj: Any) -> Any:
-    if isinstance(obj, Decimal):
-        return str(obj)
-    if isinstance(obj, (datetime, date)):
-        return obj.isoformat()
-    if isinstance(obj, BaseModel):
-        return obj.model_dump(mode="json")
-    if isinstance(obj, (set, frozenset, tuple)):
-        return list(obj)
-    return f"<{type(obj).__name__}>"  # never repr(): it could carry anything
-
-
-def dumps(payload: Any) -> str:
-    return json.dumps(payload, ensure_ascii=False, default=_json_default)
-
-
-def respond(payload: Any, status: int = 200) -> Response:
-    return Response(dumps(payload).encode("utf-8"), status_code=status, media_type="application/json")
-
-
-def _error(status: int, code: str, message: str, **extra: Any) -> Response:
-    return respond({"error": code, "message": message, **extra}, status)
-
-
-class ApiError(Exception):
-    """Raised inside a route to answer `{"error": code, "message": message, **extra}`."""
-
-    def __init__(self, status: int, code: str, message: str, **extra: Any):
-        super().__init__(code)
-        self.status, self.code, self.message, self.extra = status, code, message, extra
-
-
-def _field_errors(errors: list[dict]) -> list[dict]:
-    """Field locations and messages only - never `input`/`ctx`, which echo what was sent."""
-    out = []
-    for err in errors[:20]:
-        loc = [str(part) for part in err.get("loc", ()) if part not in ("body", "query", "path")]
-        out.append({"loc": ".".join(loc) or "body", "msg": str(err.get("msg", "invalid"))[:200]})
-    return out
-
-
-class _GuardedRoute(APIRoute):
-    """Turns `ApiError`, validation errors and unexpected exceptions into safe JSON errors."""
-
-    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
-        handler = super().get_route_handler()
-        path = self.path
-
-        async def guarded(request: Request) -> Response:
-            try:
-                return await handler(request)
-            except ApiError as exc:
-                return _error(exc.status, exc.code, exc.message, **exc.extra)
-            except RequestValidationError as exc:
-                return _error(422, "invalid_request", "Some fields are missing or invalid.",
-                              fields=_field_errors(list(exc.errors())))
-            except StarletteHTTPException:
-                raise
-            except Exception as exc:  # noqa: BLE001 - logged by type only, never echoed
-                log.warning("%s %s failed: %s", request.method, path, type(exc).__name__)
-                return _error(500, "internal_error", "Something went wrong on the server. Please try again.")
-
-        return guarded
-
-
-def runtime(request: Request):
-    chat = getattr(getattr(request.app.state, "fin", None), "chat", None)
-    if chat is None:
-        raise ApiError(503, "chat_unavailable",
-                       "The chat service is not available. Check the server log and restart the app.")
-    return chat
-
-
-Runtime = Annotated[Any, Depends(runtime)]
 SessionId = Annotated[str, PathParam(min_length=1, max_length=ID_MAX)]
 TicketId = Annotated[str, PathParam(min_length=1, max_length=ID_MAX)]
 
 router = APIRouter(prefix="/api", route_class=_GuardedRoute, dependencies=[Depends(runtime)])
+router.include_router(api_llm.router)  # POST /api/llm/models
 
 
 # --- request models -------------------------------------------------------------------------------
-
-
-class _Body(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 class SessionCreate(_Body):
@@ -187,6 +113,14 @@ class SettingsUpdate(_Body):
     tavily_key: str | None = Field(default=None, max_length=256)
     sec_user_agent: str | None = Field(default=None, max_length=256)
     trading_enabled: StrictBool | None = None
+    # the model provider (rules and checks: api_llm)
+    llm_provider: api_llm.Provider | None = None
+    llm_model: str | None = Field(default=None, max_length=256)
+    llm_effort: api_llm.Effort | None = None
+    gemini_key: str | None = Field(default=None, max_length=256)
+    openai_key: str | None = Field(default=None, max_length=256)
+    anthropic_key: str | None = Field(default=None, max_length=256)
+    gemini_paid: StrictBool | None = None
 
 
 # Request field -> (settings field, label for messages).
@@ -195,7 +129,10 @@ _KEY_FIELDS = {
     "alpaca_secret": ("alpaca_api_secret_key", "Alpaca secret key"),
     "tavily_key": ("tavily_api_key", "Tavily API key"),
     "sec_user_agent": ("sec_user_agent", "SEC user agent"),
+    **api_llm.LLM_KEY_FIELDS,
 }
+# Request fields copied to the settings field of the same name, as they are.
+_PLAIN_FIELDS = frozenset({"trading_enabled"}) | api_llm.LLM_PLAIN_FIELDS
 
 
 # --- helpers -----------------------------------------------------------------------------------------
@@ -394,9 +331,12 @@ async def portfolio(rt: Runtime):
         log.warning("portfolio: broker request failed (%s)", type(exc).__name__)
         return respond({"connected": True, "error": "broker_unavailable",
                         "message": "The broker could not be reached. Try again shortly."}, 502)
+    if account.paper is False:  # not a paper account: the runtime drops the broker for good
+        await _shielded(rt.drop_non_paper_broker())
+        return respond({"connected": False})
     return respond({
         "connected": True,
-        "paper": True,
+        "paper": account.paper,  # from the account itself: true, or null when Alpaca did not say
         "account": account.model_dump(mode="json"),
         "positions": [p.model_dump(mode="json") for p in positions.values()],
         "open_orders": [o.model_dump(mode="json") for o in open_orders],
@@ -515,24 +455,25 @@ async def refresh_ticket_route(ticket_id: TicketId, body: TicketAction, rt: Runt
 # --- settings and kill switch ---------------------------------------------------------------------------
 
 
-def _set(value: Any) -> str:
-    return "set" if value else "missing"
+_set = api_llm.is_set
 
 
 def _settings_body(rt) -> dict:
     s = rt.settings
-    alpaca = "missing" if rt.broker is None else (rt.alpaca_status or "unreachable")
+    if rt.alpaca_status == "not_paper":  # keys of a non-paper account: no broker is kept for them
+        alpaca = "not_paper"
+    else:
+        alpaca = "missing" if rt.broker is None else (rt.alpaca_status or "unreachable")
     return {
         "alpaca": alpaca,
         "tavily": _set(s.tavily_api_key),
         "sec_user_agent": _set(s.sec_user_agent),
         "gemini": _set(s.gemini_api_key),
         "trading_enabled": bool(s.trading_enabled),
-        "model": s.llm_model,
-        "effort": s.llm_effort,
         "api_allow_remote": bool(getattr(s, "api_allow_remote", False)),
         # Names of writable settings that only the process environment provides (see env_fallbacks).
         "env_fallbacks": env_fallbacks(rt.env_path),
+        **api_llm.llm_settings_body(rt),  # provider, model, effort, mode, limits, gemini_paid, providers
     }
 
 
@@ -549,8 +490,8 @@ async def put_settings(body: SettingsUpdate, rt: Runtime):
     for field, value in body.model_dump(exclude_unset=True).items():
         if value is None:
             continue  # an explicit null means "leave as is"; "" removes a key
-        if field == "trading_enabled":
-            changes["trading_enabled"] = value
+        if field in _PLAIN_FIELDS:
+            changes[field] = value
             continue
         target, label = _KEY_FIELDS[field]
         value = value.strip(" \t\r\n")  # ASCII whitespace only: a Unicode separator is refused below
@@ -575,16 +516,20 @@ async def put_settings(body: SettingsUpdate, rt: Runtime):
         if alpaca_status == "invalid":
             raise ApiError(400, "alpaca_invalid", "Alpaca rejected these keys. Check that they are "
                            "paper-trading keys and try again. Nothing was saved.")
+        if alpaca_status == "not_paper":
+            raise ApiError(400, "alpaca_not_paper", "These keys belong to a live Alpaca account. This app "
+                           "only works with paper-trading keys. Nothing was saved.")
         if alpaca_status != "connected":
             raise ApiError(502, "alpaca_unreachable", "Alpaca could not be reached to check the keys. "
                            "Nothing was saved; try again shortly.")
+    warning = await api_llm.check_llm_changes(rt, changes)  # may make one live model call; raises ApiError
     if changes:
         try:
             await _shielded(rt.apply_settings(changes, alpaca_status=alpaca_status))
         except Exception as exc:  # noqa: BLE001 - logged by type only
             log.warning("saving settings failed: %s", type(exc).__name__)
             raise ApiError(500, "settings_not_saved", "The settings could not be saved.") from None
-    return respond(_settings_body(rt))
+    return respond({**_settings_body(rt), **({"warning": warning} if warning else {})})
 
 
 @router.post("/kill-switch")

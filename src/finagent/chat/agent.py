@@ -15,7 +15,7 @@ Events (Vercel AI SDK stream-protocol names, see the design spec §7), in order:
     data-grounding-flags {numbers}                numbers in the answer that no tool output supports
     text-delta {delta}                            the final text in ~200-character chunks
     error {message}                               generic and language-appropriate, never provider text
-    finish {usage, elapsed_ms, mode, max_rounds, budget_exhausted}
+    finish {usage, elapsed_ms, mode, max_rounds, time_budget_sec, budget_exhausted}
                                                   always last, also after an error
 A request refused before the turn starts (unknown session, empty or over-long message, a reply
 already in progress for the session) emits only `error` and `finish`.
@@ -199,6 +199,16 @@ def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return chunks
 
 
+def _finish_event(usage: dict, elapsed_ms: int, limits: ChatLimits, budget_exhausted: bool) -> dict:
+    """The `finish` event: the usage and time of the turn, the limits it ran under (so the UI can
+    show the mode per turn) and whether it ended on them."""
+    seconds = limits.time_budget_sec
+    return {"type": "finish", "usage": usage, "elapsed_ms": elapsed_ms, "mode": limits.mode,
+            "max_rounds": limits.max_rounds,
+            "time_budget_sec": int(seconds) if float(seconds).is_integer() else seconds,
+            "budget_exhausted": budget_exhausted}
+
+
 def _safe_emit(emit: Callable[[dict], None], event: dict, where: str) -> bool:
     try:
         emit(event)
@@ -343,8 +353,7 @@ class ChatAgent:
         message = _msg(key, lang)
         limits = chat_limits(self._settings)
         _safe_emit(emit, {"type": "error", "message": message}, "chat refusal")
-        _safe_emit(emit, {"type": "finish", "usage": {}, "elapsed_ms": self._elapsed_ms(t0), "mode": limits.mode,
-                          "max_rounds": limits.max_rounds, "budget_exhausted": False}, "chat refusal")
+        _safe_emit(emit, _finish_event({}, self._elapsed_ms(t0), limits, False), "chat refusal")
         return message
 
     def reset_conversations(self) -> None:
@@ -645,8 +654,7 @@ class ChatAgent:
 
     def _finish(self, st: _TurnState, t0: float) -> int:
         elapsed = self._elapsed_ms(t0)
-        st.emit({"type": "finish", "usage": dict(st.usage), "elapsed_ms": elapsed, "mode": st.limits.mode,
-                 "max_rounds": st.limits.max_rounds, "budget_exhausted": st.budget_exhausted})
+        st.emit(_finish_event(dict(st.usage), elapsed, st.limits, st.budget_exhausted))
         return elapsed
 
     def _elapsed_ms(self, t0: float) -> int:

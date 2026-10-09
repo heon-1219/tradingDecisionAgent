@@ -8,13 +8,31 @@ stack behind `/api/*`; `AppState.load` builds it last, and a failure there only 
 (its id lock is per instance), `sessions`, `tickets` (its lifecycle lock is per instance), plus
 exactly one `ChatAgent` (its per-session turn locks must be unique). The rest is *rebuildable*
 from the current settings by `rebuild()`: the HTTP client, the ledger (its known-secret list), the
-connectors, the Alpaca broker and market data (only when both keys are set), the executor (only
-with a broker) and the toolbox (which writes its `tool_call` and `proposal` audit entries to that
-ledger). The agent reaches the current toolbox through `_ToolboxHandle`, so
-a rebuild takes effect at the next tool call; the toolbox's one-proposal-per-turn slots
-(`turn_slots`) are owned by the runtime and shared by every toolbox it builds, so a rebuild in the
-middle of a turn cannot reset them. Every component shares the *same* mutable `settings` object,
-so the kill switch (`settings.trading_enabled = False`) is seen everywhere at once.
+connectors (Gemini search grounding whenever a Gemini key exists, whatever the chat provider is),
+the Alpaca broker and market data (only when both keys are set and the account is not known to be
+a live one), the executor (only with a broker) and the toolbox (which writes its `tool_call` and
+`proposal` audit entries to that ledger). The agent reaches the current toolbox through
+`_ToolboxHandle`, so a rebuild takes effect at the next tool call; the toolbox's
+one-proposal-per-turn slots (`turn_slots`) are owned by the runtime and shared by every toolbox it
+builds, so a rebuild in the middle of a turn cannot reset them. Every component shares the *same*
+mutable `settings` object, so the kill switch (`settings.trading_enabled = False`) is seen
+everywhere at once.
+
+**The model.** `AppState.load` creates the provider client once and wraps it in one `LLMHandle`.
+The QA orchestrator (`/answer`), the runtime and the one `ChatAgent` hold that handle, so
+`apply_settings` changes the model for all of them at once: it builds the new client from a copy of
+the settings (`llm_factory`), and after the env file is written swaps it into the handle, retires
+the old client (closed after the grace delay: a turn in flight still holds it through its
+conversation) and has the agent drop its cached provider conversations (`reset_conversations`).
+`check_llm` (one minimal model call) and `list_llm_models` go through injectable factories
+(`llm_validator`, `llm_models`); production uses `llm_admin`.
+
+**Paper only.** The Alpaca status check (`refresh_alpaca_status` at startup,
+`check_alpaca_keys` for candidate keys, `drop_non_paper_broker` from the portfolio route) reads
+`AccountSnapshot.paper`. `False` means a live account: the status is `not_paper` and the runtime
+rebuilds without a broker, executor or market data, exactly as if the keys were missing, and
+remembers that key pair so that no later rebuild brings them back. `None` (the response did not
+say) keeps the broker: the hard-coded paper host is still the first line of defence.
 
 A rebuild is build-then-swap: `_build()` constructs a full set of components and touches nothing
 shared (a failure retires what it made and changes nothing); `_swap()` puts them in service
@@ -31,8 +49,10 @@ checks the Alpaca keys. Nothing here logs a secret or an exception message: fail
 type.
 
 **Log scrubbing.** The runtime installs `logsafe`'s process-wide scrub at construction and, on
-every build, gives it the same accumulated known-secret list the ledger gets (current and replaced
-keys), so a traceback logged anywhere under `finagent.*` cannot show a key.
+every build, gives it the same accumulated known-secret list the ledger and the toolbox get
+(current and replaced keys: Alpaca, Tavily, Gemini, OpenAI, Anthropic), so a traceback logged
+anywhere under `finagent.*` cannot show a key. A candidate key (one being checked, or one given
+only to list models) joins that list before the call is made, whether or not it is ever saved.
 """
 from __future__ import annotations
 
@@ -40,13 +60,15 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
-from .agent.llm import LLMClient, make_llm
+from . import llm_admin
+from .agent.llm import LLMClient, LLMHandle, make_llm
 from .agent.orchestrator import Orchestrator
 from .agent.prompts import build_system_prompt, value_hints
 from .agent.tools import ToolRegistry
@@ -86,8 +108,14 @@ SECRET_FIELDS = (
     "alpaca_api_key_id", "alpaca_api_secret_key", "gemini_api_key", "tavily_api_key",
     "anthropic_api_key", "openai_api_key",
 )
-# Changing any of these needs new connectors (they capture keys at construction).
-_REBUILD_FIELDS = frozenset(ENV_NAMES) - {"trading_enabled"}
+# Settings that only the model client reads: changing them needs a new client (`_needs_new_llm`).
+_LLM_CLIENT_FIELDS = frozenset({"llm_provider", "llm_model", "llm_effort"})
+# Changing any of these needs new connectors, a new ledger and a new toolbox (they capture keys,
+# or the known-secret list, at construction).
+_REBUILD_FIELDS = frozenset(ENV_NAMES) - {"trading_enabled", "gemini_paid"} - _LLM_CLIENT_FIELDS
+# Changing any of these changes what a chat conversation was built with (the client, or the mode in
+# its system prompt): cached provider conversations are dropped.
+_CONVERSATION_FIELDS = _LLM_CLIENT_FIELDS | {"gemini_paid", *llm_admin.KEY_FIELDS.values()}
 
 
 @dataclass
@@ -110,6 +138,12 @@ def alpaca_status_for(exc: BaseException) -> str:
     if isinstance(exc, BrokerError) and exc.status in (401, 403):
         return "invalid"
     return "unreachable"
+
+
+def account_status(account: Any) -> str:
+    """`not_paper` when the account says it is not a paper account (`paper is False`); `connected`
+    when it is one or does not say (`True` / `None`)."""
+    return "not_paper" if getattr(account, "paper", None) is False else "connected"
 
 
 async def _aclose(component: Any) -> None:
@@ -154,10 +188,17 @@ class ChatRuntime:
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], Any] | None = None,
         close_grace_sec: float = CLOSE_GRACE_SEC,
+        llm_validator: Callable[[Any], Awaitable[str]] | None = None,
+        llm_models: Callable[[str, str, Any], Awaitable[list[dict]]] | None = None,
+        llm_factory: Callable[[Any], LLMClient] | None = None,
     ):
         install_log_scrubber()  # before anything here can log; the secret values follow in _build
         self.settings = settings
-        self.llm = llm
+        # The one model handle (see the module docstring); a bare client is wrapped here.
+        self.llm = LLMHandle.wrap(llm)
+        self._llm_validator = llm_validator or llm_admin.validate_llm
+        self._llm_models = llm_models or llm_admin.fetch_models
+        self._llm_factory = llm_factory or make_llm
         self.registry = registry
         self.orchestrator = orchestrator
         self.env_path = Path(env_path) if env_path is not None else ROOT / ".env"
@@ -166,7 +207,10 @@ class ChatRuntime:
         self.sessions = SessionStore(self.db)
         self.tickets = TicketStore(self.db, clock=clock) if clock is not None else TicketStore(self.db)
         self.lock = asyncio.Lock()
-        self.alpaca_status: str | None = None  # connected|missing|invalid|unreachable, None = unchecked
+        # connected | missing | invalid | unreachable | not_paper; None = unchecked
+        self.alpaca_status: str | None = None
+        # The Alpaca key pair found to belong to a non-paper account: no broker is built for it.
+        self._not_paper_keys: tuple[str, str] | None = None
         self._broker_factory = broker_factory or (lambda key_id, secret: AlpacaPaper(key_id, secret))
         self._data_factory = data_factory or (lambda key_id, secret, http: AlpacaData(key_id, secret, http))
         self._http_factory = http_factory or HttpClient
@@ -181,7 +225,7 @@ class ChatRuntime:
         self.http = self.ledger = self.edgar = self.web = self.grounded = None
         self.broker = self.data = self.executor = self.toolbox = None
         self.rebuild()
-        self.agent = ChatAgent(llm, _ToolboxHandle(self), self.sessions, settings)
+        self.agent = ChatAgent(self.llm, _ToolboxHandle(self), self.sessions, settings)
 
     # --- building --------------------------------------------------------------------------------
 
@@ -216,22 +260,24 @@ class ChatRuntime:
 
         key_id, secret = value("alpaca_api_key_id"), value("alpaca_api_secret_key")
         tavily_key, sec_user_agent = value("tavily_api_key"), value("sec_user_agent")
+        gemini_key = value("gemini_api_key")
         made: list[Any] = []
         try:
             http = self._http_factory()
             made.append(http)
-            # One accumulated list for both scrubs. The log scrubber is process-wide, so it gets
-            # the list now, even if this build fails: it only ever grows.
-            known_secrets = self._known_secrets(key_id, secret, tavily_key)
+            # One accumulated list for the three scrubs (ledger, logs, toolbox). The log scrubber
+            # is process-wide, so it gets the list now, even if this build fails: it only ever grows.
+            known_secrets = self._known_secrets(key_id, secret, tavily_key, gemini_key,
+                                                value("openai_api_key"), value("anthropic_api_key"))
             set_log_secrets(known_secrets)
             ledger = Ledger(self.db, known_secrets=known_secrets)
             edgar = Edgar(http, self.evidence, sec_user_agent) if sec_user_agent else None
             web = WebSearch(http, self.evidence, tavily_key)
-            grounded = None
-            if getattr(s, "llm_provider", None) == "gemini" and s.gemini_api_key:
-                grounded = GroundedWeb(http, s.gemini_api_key, s.grounding_model)
+            # Gemini search grounding needs only a Gemini key: it is a research connector of its
+            # own, whichever provider runs the chat.
+            grounded = GroundedWeb(http, gemini_key, s.grounding_model) if gemini_key else None
             broker = data = executor = None
-            if key_id and secret:
+            if key_id and secret and (key_id, secret) != self._not_paper_keys:
                 broker = self._broker_factory(key_id, secret)
                 made.append(broker)
                 data = self._data_factory(key_id, secret, http)
@@ -242,7 +288,7 @@ class ChatRuntime:
                 registry=self.registry, orchestrator=self.orchestrator, broker=broker, data=data,
                 edgar=edgar, web=web, grounded=grounded, evidence=self.evidence,
                 sessions=self.sessions, tickets=self.tickets, executor=executor, settings=s,
-                turn_slots=self.turn_slots, ledger=ledger,
+                turn_slots=self.turn_slots, ledger=ledger, known_secrets=known_secrets,
             )
         except BaseException:
             self._retire(made)
@@ -316,7 +362,7 @@ class ChatRuntime:
     async def shutdown(self) -> None:
         for task in list(self._close_tasks):
             task.cancel()
-        for component in [*self._retired, self.http, self.broker]:
+        for component in [*self._retired, self.http, self.broker, self.llm.current]:
             if component is not None:
                 await _aclose(component)
         self._retired.clear()
@@ -324,29 +370,49 @@ class ChatRuntime:
     # --- Alpaca keys -----------------------------------------------------------------------------
 
     async def refresh_alpaca_status(self) -> str:
+        """Check the broker in service: connected, missing, invalid, unreachable or not_paper. A
+        non-paper account costs the runtime its broker (`drop_non_paper_broker`)."""
         broker = self.broker
         if broker is None:
-            status = "missing"
+            # No broker for the keys of a known non-paper account is `not_paper`, not `missing`.
+            blocked = self._not_paper_keys is not None and self._not_paper_keys == self._alpaca_keys()
+            status = "not_paper" if blocked else "missing"
         else:
             try:
-                await broker.account()
-                status = "connected"
+                status = account_status(await broker.account())
             except Exception as exc:  # noqa: BLE001 - classified, logged by type only
                 status = alpaca_status_for(exc)
                 log.info("alpaca key check: %s (%s)", status, type(exc).__name__)
+        if status == "not_paper" and broker is not None:
+            await self.drop_non_paper_broker()
         self.alpaca_status = status
         return status
 
+    def _alpaca_keys(self) -> tuple[Any, Any]:
+        return (getattr(self.settings, "alpaca_api_key_id", None),
+                getattr(self.settings, "alpaca_api_secret_key", None))
+
+    async def drop_non_paper_broker(self) -> None:
+        """The account behind the current Alpaca keys is not a paper account: rebuild without a
+        broker, executor or market data (as if the keys were missing) and remember the key pair,
+        so no later rebuild brings them back. The keys stay in the settings and the env file; the
+        status is `not_paper` until other keys are saved."""
+        async with self.lock:
+            self._not_paper_keys = self._alpaca_keys()
+            self.alpaca_status = "not_paper"
+            if self.broker is not None:
+                log.warning("the Alpaca keys belong to a non-paper account: trading is not connected")
+                self.rebuild()
+
     async def check_alpaca_keys(self, key_id: str, secret: str) -> str:
         """Try candidate keys with a temporary broker (`account()` on the paper host) and close it.
-        Returns connected, invalid or unreachable."""
+        Returns connected, invalid, unreachable or not_paper (a live account's keys)."""
         try:
             broker = self._broker_factory(key_id, secret)
         except ValueError:
             return "invalid"
         try:
-            await broker.account()
-            return "connected"
+            return account_status(await broker.account())
         except Exception as exc:  # noqa: BLE001 - classified, logged by type only
             status = alpaca_status_for(exc)
             log.info("alpaca candidate key check: %s (%s)", status, type(exc).__name__)
@@ -354,28 +420,85 @@ class ChatRuntime:
         finally:
             await _aclose(broker)
 
+    # --- the model provider ------------------------------------------------------------------------
+
+    def _candidate(self, changes: dict[str, Any]) -> Any:
+        """A copy of the settings as they would be with `changes` applied; the shared settings
+        object is not touched."""
+        copy = getattr(self.settings, "model_copy", None)
+        if callable(copy):
+            return copy(update=dict(changes))
+        return SimpleNamespace(**{**vars(self.settings), **changes})
+
+    def _note_secrets(self, *values: Any) -> None:
+        """Add candidate secret values to the log scrubber (see the module docstring)."""
+        set_log_secrets(self._known_secrets(*values))
+
+    def _needs_new_llm(self, changes: dict[str, Any]) -> bool:
+        """Whether `changes` alter what the model client was built from: the provider, the model,
+        the effort, or the key of the provider that will be in use."""
+        candidate = self._candidate(changes)
+        key_field = llm_admin.KEY_FIELDS.get(getattr(candidate, "llm_provider", None))
+        names = [*_LLM_CLIENT_FIELDS, *([key_field] if key_field else [])]
+        return any(getattr(candidate, name, None) != getattr(self.settings, name, None) for name in names)
+
+    async def check_llm(self, changes: dict[str, Any]) -> str:
+        """One minimal model call for the configuration as it would be with `changes` (the
+        injected validator; `llm_admin.validate_llm` in production), built from a copy of the
+        settings. Returns ok, invalid_key, model_unavailable, rate_limited or unreachable; never
+        raises, and never logs more than an exception type."""
+        candidate = self._candidate(changes)
+        self._note_secrets(*(getattr(candidate, name, None) for name in llm_admin.KEY_FIELDS.values()))
+        try:
+            status = await self._llm_validator(candidate)
+        except Exception as exc:  # noqa: BLE001 - classified, logged by type only
+            status = llm_admin.classify_llm_error(exc)
+            log.info("llm check: %s (%s)", status, type(exc).__name__)
+        return status if status in llm_admin.STATUSES else "unreachable"
+
+    async def list_llm_models(self, provider: str, api_key: str) -> list[dict]:
+        """The provider's unfiltered model list for `api_key` (the injected lister;
+        `llm_admin.fetch_models` in production). Raises what the lister raises: the caller
+        classifies it. The key is not saved; it only joins the scrub list."""
+        self._note_secrets(api_key)
+        return await self._llm_models(provider, api_key, self.settings)
+
     # --- settings writes -------------------------------------------------------------------------
 
     async def apply_settings(self, changes: dict[str, Any], *, alpaca_status: str | None = None) -> None:
         """Apply `changes` (settings field -> value; None removes the key), all or nothing:
-        1. build the new components for the changed keys (a failure changes nothing);
+        1. build the new components for the changed keys, and the new model client if the
+           provider, the model, the effort or that provider's key changes (a failure changes
+           nothing);
         2. write the env file atomically (a failure discards what was built and changes nothing);
-        3. only then update the shared settings in place and swap the components in. Neither of
-           those can fail, so the env file, the settings and the components never disagree."""
+        3. only then update the shared settings in place, swap the components in and swap the
+           model client into the handle. None of those can fail, so the env file, the settings,
+           the components and the model never disagree. The old model client is retired (closed
+           after the grace delay), and the agent drops its cached provider conversations."""
         async with self.lock:
-            built = self._build(changes) if _REBUILD_FIELDS & set(changes) else None
+            made: list[Any] = []
             try:
+                built = self._build(changes) if _REBUILD_FIELDS & set(changes) else None
+                if built is not None:
+                    made += [c for c in (built.http, built.broker) if c is not None]
+                new_llm = self._llm_factory(self._candidate(changes)) if self._needs_new_llm(changes) else None
+                if new_llm is not None:
+                    made.append(new_llm)
                 update_env_file(
                     self.env_path, {ENV_NAMES[name]: _env_value(value) for name, value in changes.items()}
                 )
             except BaseException:
-                if built is not None:
-                    self._retire([c for c in (built.http, built.broker) if c is not None])
+                self._retire(made)
                 raise
             for name, value in changes.items():
                 setattr(self.settings, name, value)
             if built is not None:
                 self._swap(built)
+            if new_llm is not None:
+                self._retire([self.llm.swap(new_llm)])
+                log.info("model client swapped: %s", new_llm.name)
+            if _CONVERSATION_FIELDS & set(changes):
+                self.agent.reset_conversations()
             if {"alpaca_api_key_id", "alpaca_api_secret_key"} & set(changes):
                 # The caller has just checked the new keys; without keys there is no broker.
                 self.alpaca_status = "missing" if self.broker is None else alpaca_status
@@ -475,7 +598,9 @@ class AppState:
         if build_graph:
             kg = KG.build(rdb, lexicon, ontology, log=log.info)
         docs = DocStore.load(settings.docs_dir)
-        llm = llm or make_llm(settings)
+        # One handle for the QA orchestrator and the chat runtime: a provider or model switch
+        # (PUT /api/settings) swaps the client behind it for both.
+        llm = LLMHandle.wrap(llm or make_llm(settings))
         tools = ToolRegistry(rdb, index, resolver, kg, docs, ontology, lexicon, settings, vectors=vectors)
         system_prompt = build_system_prompt(ontology, rdb.meta(), docs.titles(), settings, hints=value_hints(rdb))
         orch = Orchestrator(settings, llm, tools, resolver, ontology, lexicon, system_prompt)

@@ -4,7 +4,9 @@ and the `ChatRuntime` wiring (`finagent.app_state`).
 World: a real `ChatRuntime` (AppDB on a tmp file, EvidenceStore, SessionStore, TicketStore, Ledger,
 Executor, ChatToolbox, ChatAgent) over `fakes_trading.FakeBroker`/`FakeData`, a scripted `StubLLM`,
 a fake QA orchestrator for `/answer`, an HTTP client that refuses every request (no network), and a
-tmp env file. The real `.env` is never touched.
+tmp env file. The real `.env` is never touched. The model provider checks (`PUT /api/settings`,
+`POST /api/llm/models`) go through the world's fake validator, model lister and client factory;
+their tests are in `test_api_llm.py`, which reuses this world.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from fakes_trading import (
     make_clock,
     make_quote,
 )
-from finagent.agent.llm import StubLLM, ToolCall, Turn
+from finagent.agent.llm import LLMHandle, StubLLM, ToolCall, Turn
 from finagent.api import create_app
 from finagent.api_chat import event_stream
 from finagent.api_security import LocalApiGuard, is_loopback, parse_host
@@ -57,8 +59,22 @@ DOWN_SECRET = "downSecretValue-4444444444444444"
 TAVILY = "tvly-test-key-0123456789abcdef"
 SEC_UA_FROM_SHELL = "Shell User shell-user@example.com"
 GEMINI = "gemini-test-key-0123456789abcdef"
+LIVE_ID = "AKLIVEKEYID333333333"  # keys of a live (non-paper) account
+LIVE_SECRET = "liveSecretValue-3333333333333333"
+PAPER_ID = "PKPAPERKEYID22222222"  # keys of an account that reports itself as paper
+PAPER_SECRET = "paperSecretValue-222222222222222"
+# Model provider keys: the fake validator and model lister decide by the key value.
+NEW_GEMINI = "gemini-new-key-9876543210fedcba"
+OPENAI = "sk-openai-test-key-0123456789abcd"
+ANTHROPIC = "sk-ant-test-key-0123456789abcdef"
+BAD_LLM_KEY = "sk-bad-llm-key-55555555555555"       # the provider rejects it
+LIMITED_LLM_KEY = "sk-limited-llm-key-4444444444"   # valid, rate limited right now
+DOWN_LLM_KEY = "sk-down-llm-key-33333333333333"     # the provider cannot be reached
+LEAKY_LLM_KEY = "sk-leaky-llm-key-22222222222222"   # the check raises with the key in its message
 SECRETS = [ALPACA_ID, ALPACA_SECRET, NEW_ID, NEW_SECRET, BAD_ID, BAD_SECRET, DOWN_ID, DOWN_SECRET,
-           TAVILY, GEMINI]
+           TAVILY, GEMINI, LIVE_ID, LIVE_SECRET, PAPER_ID, PAPER_SECRET, NEW_GEMINI, OPENAI, ANTHROPIC,
+           BAD_LLM_KEY, LIMITED_LLM_KEY, DOWN_LLM_KEY, LEAKY_LLM_KEY]
+LLM_KEY_FIELDS = {"gemini": "gemini_api_key", "openai": "openai_api_key", "anthropic": "anthropic_api_key"}
 
 ENV_TEXT = (
     "# local settings\n"
@@ -100,9 +116,52 @@ class ClosableBroker(FakeBroker):
 
 
 class FakeOrchestrator:
+    """Holds the model handle, like the real QA orchestrator; `think_trace` names the model in use."""
+
+    def __init__(self, llm=None):
+        self.llm = llm
+
     async def answer(self, question_id, question, on_event=None):
+        model = f"{self.llm.name}/{self.llm.model}" if self.llm is not None else "none"
         return AnswerResponse(question_id=question_id, question=question, retrieved_context="ctx",
-                              think_trace="trace", answer=f"answer to {question}")
+                              think_trace=f"trace by {model}", answer=f"answer to {question}")
+
+
+class ProviderError(Exception):
+    """What a provider SDK raises: an HTTP status and a message (here: with the key in it)."""
+
+    def __init__(self, status_code: int | None, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class SwitchedLLM(StubLLM):
+    """The client the world's `llm_factory` builds for a provider/model: it answers every turn with
+    one line naming itself, and records `aclose()`."""
+
+    def __init__(self, provider: str, model: str, effort: str = "medium"):
+        super().__init__(script_factory=lambda user_text: [Turn(f"Answer from {provider}/{model}.", [], "end_turn")])
+        self.name, self.model, self.effort = provider, model, effort
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+# What each provider's list-models endpoint returns in this world, unfiltered.
+MODEL_LISTS = {
+    "gemini": [{"id": "gemini-3.8-flash", "label": None, "created": 0.0},
+               {"id": "gemini-3.8-pro", "label": None, "created": 0.0},
+               {"id": "gemini-embedding-001", "label": None, "created": 0.0},
+               {"id": "gemini-3.8-flash-preview-tts", "label": None, "created": 0.0}],
+    "openai": [{"id": "gpt-test-large", "label": None, "created": 200.0},
+               {"id": "gpt-test-small", "label": None, "created": 100.0},
+               {"id": "text-embedding-test", "label": None, "created": 300.0},
+               {"id": "omni-moderation-test", "label": None, "created": 300.0}],
+    "anthropic": [{"id": "claude-test-sonnet", "label": "Claude Test Sonnet", "created": 300.0},
+                  {"id": "claude-test-opus", "label": "Claude Test Opus", "created": 200.0},
+                  {"id": "claude-test-opus-old", "label": "Claude Test Opus (old)", "created": 100.0}],
+}
 
 
 def _refuse_all(request: httpx.Request) -> httpx.Response:
@@ -135,9 +194,15 @@ class ApiWorld:
         self.brokers: list[ClosableBroker] = []
         self.legs = [LIMIT_LEG]
         self.llm = StubLLM(script_factory=self._script)
+        self.llm.model = self.settings.llm_model
         self.with_chat = chat
         self.runtime: ChatRuntime | None = None
         self.before_start = None  # optional hook(runtime) run inside the state factory
+        self.close_grace_sec = 0.0
+        self.llm_checks: list[tuple[str, str, str | None]] = []  # (provider, model, key) the validator saw
+        self.llm_built: list[SwitchedLLM] = []                    # clients the factory made
+        self.model_requests: list[tuple[str, str]] = []           # (provider, key) the model lister saw
+        self.model_lists = {name: list(items) for name, items in MODEL_LISTS.items()}
 
     # scripted model: one proposal, then a final answer
     def _script(self, user_text):
@@ -154,27 +219,62 @@ class ApiWorld:
         ]
 
     def broker_factory(self, key_id: str, secret: str) -> ClosableBroker:
-        broker = ClosableBroker(key_id)
+        # `paper` as AlpacaPaper.account() derives it from the account number: unknown (None) for
+        # the default keys, False for the live-account keys, True for the paper-account keys.
+        paper = {LIVE_ID: False, PAPER_ID: True}.get(key_id)
+        broker = ClosableBroker(key_id, account=make_account(paper=paper))
         if (key_id, secret) in {(DOWN_ID, DOWN_SECRET)}:
             broker.account_error = BrokerError(503, None, f"service unavailable {secret}")
-        elif (key_id, secret) not in {(ALPACA_ID, ALPACA_SECRET), (NEW_ID, NEW_SECRET)}:
+        elif (key_id, secret) not in {(ALPACA_ID, ALPACA_SECRET), (NEW_ID, NEW_SECRET), (LIVE_ID, LIVE_SECRET),
+                                      (PAPER_ID, PAPER_SECRET)}:
             broker.account_error = BrokerError(401, None, f"unauthorized {secret}")
         self.brokers.append(broker)
         return broker
+
+    # the model provider fakes: no network, decided by the key value
+    async def validate_llm(self, candidate) -> str:
+        provider, model = candidate.llm_provider, candidate.llm_model
+        key = getattr(candidate, LLM_KEY_FIELDS[provider], None)
+        self.llm_checks.append((provider, model, key))
+        if key == LEAKY_LLM_KEY:
+            raise ProviderError(None, f"connection reset while sending {key}")
+        if key == BAD_LLM_KEY:
+            return "invalid_key"
+        if key == DOWN_LLM_KEY:
+            return "unreachable"
+        if model == "no-such-model":
+            return "model_unavailable"
+        return "rate_limited" if key == LIMITED_LLM_KEY else "ok"
+
+    async def list_models(self, provider: str, api_key: str, settings) -> list[dict]:
+        self.model_requests.append((provider, api_key))
+        if api_key == BAD_LLM_KEY:
+            raise ProviderError(401, f"Incorrect API key provided: {api_key}")
+        if api_key == LIMITED_LLM_KEY:
+            raise ProviderError(429, f"rate limit reached for {api_key}")
+        if api_key in (DOWN_LLM_KEY, LEAKY_LLM_KEY):
+            raise ProviderError(None, f"connection reset while sending {api_key}")
+        return list(self.model_lists[provider])
+
+    def make_llm(self, settings) -> SwitchedLLM:
+        llm = SwitchedLLM(settings.llm_provider, settings.llm_model, settings.llm_effort)
+        self.llm_built.append(llm)
+        return llm
 
     def data_factory(self, key_id: str, secret: str, http) -> FakeData:
         return self.data
 
     def state(self):
-        fin = SimpleNamespace(settings=self.settings, llm=self.llm, tools=None,
-                              orchestrator=FakeOrchestrator(), chat=None)
+        handle = LLMHandle(self.llm)  # as AppState.load does: one handle for /answer and /api
+        fin = SimpleNamespace(settings=self.settings, llm=handle, tools=None,
+                              orchestrator=FakeOrchestrator(handle), chat=None)
         if self.with_chat:
             async def no_sleep(_seconds):
                 return None
 
             fin.chat = ChatRuntime(
                 self.settings,
-                llm=self.llm,
+                llm=handle,
                 registry=None,
                 orchestrator=fin.orchestrator,
                 env_path=self.env_path,
@@ -183,7 +283,10 @@ class ApiWorld:
                 http_factory=lambda: HttpClient(client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_all))),
                 clock=self.clock,
                 sleep=no_sleep,
-                close_grace_sec=0,
+                close_grace_sec=self.close_grace_sec,
+                llm_validator=self.validate_llm,
+                llm_models=self.list_models,
+                llm_factory=self.make_llm,
             )
             self.runtime = fin.chat
             if self.before_start is not None:
@@ -578,6 +681,13 @@ def test_settings_get_reports_status_and_never_secrets(world):
             "effort": world.settings.llm_effort,
             "api_allow_remote": False,
             "env_fallbacks": [],
+            # Task 3.8: the model provider and the research depth (the test world runs the stub provider)
+            "provider": "stub",
+            "mode": "deep",
+            "max_rounds": 12,
+            "time_budget_sec": 300,
+            "gemini_paid": False,
+            "providers": {"gemini": "set", "openai": "missing", "anthropic": "missing"},
         }
         assert_no_secrets(r)
 
@@ -883,6 +993,7 @@ def test_answer_still_returns_the_five_fields(world):
         body = r.json()
         assert set(body) == {"question_id", "question", "retrieved_context", "think_trace", "answer"}
         assert body["answer"] == "answer to hello"
+        assert body["think_trace"] == f"trace by stub/{world.settings.llm_model}"
 
 
 def test_api_is_503_without_a_chat_runtime(tmp_path):
