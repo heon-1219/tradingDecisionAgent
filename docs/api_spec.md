@@ -399,11 +399,12 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 | `rejected`, ticket is `rejected_by_user` | The user had already rejected it | 409 | 200 | 409 |
 | `rejected`, ticket is `expired` | Expired before the action | 410 | 410 | 410 |
 | `rejected`, any other case | Hash mismatch, ticket not `proposed`, claimed by another confirm, or no leg executable at current prices | 409 | 409 | 409 |
+| `rejected`, the account is not a paper account | The account reported `paper: false` at the re-check. Nothing was submitted; on confirm the ticket ends `failed`, on refresh nothing is re-quoted. The app then drops the broker (`alpaca: "not_paper"`), so a later confirm answers 503 `broker_not_connected` | 409 | n/a | 409 |
 | `error` | The re-check failed, every leg failed, the outcome could not be saved, or the ticket could not be read. If the outcome could not be saved, the message says orders may have been placed: check open orders before trying again | 502 | 502 | 502 |
 
 ## Settings
 
-**`GET /api/settings`** returns connection status. It never returns a secret.
+**`GET /api/settings`** returns connection status. It never returns a secret. An unsettled `alpaca` status (anything but `connected` and `not_paper`) is checked again when this is called, at most once a minute.
 
 | Field | Values |
 |---|---|
@@ -454,7 +455,7 @@ For the string fields, `""` removes the key and `null` (or leaving the field out
 | 400 | `llm_model_required` | No model would be named |
 | 400 | `llm_invalid_key` | The provider rejected the key (401 or 403, an invalid-key 400, or no credit); nothing was saved |
 | 400 | `llm_model_unavailable` | The model is unknown or not available for this key; nothing was saved |
-| 502 | `llm_unreachable` | The provider could not be reached to check (a network error or a 5xx); nothing was saved |
+| 502 | `llm_unreachable` | The check failed with a network error, a 5xx, or a provider response the app does not recognise; nothing was saved |
 | 500 | `settings_not_saved` | Writing the settings failed |
 | 422 | `invalid_request` | Unknown field or wrong type (for example `llm_provider: "stub"`) |
 
@@ -467,7 +468,7 @@ For the string fields, `""` removes the key and `null` (or leaving the field out
 | `provider` | `gemini`, `openai` or `anthropic` | Required |
 | `api_key` | string, at most 256 characters, optional | The key to try, with the same value rules as a saved key. Without it, the saved key of that provider is used. It is never saved, echoed or logged, and it belongs in the body: there is no `GET` form |
 
-The list comes from the provider's own list-models endpoint. It keeps the chat-capable text models (embedding, image, audio, TTS, live, moderation and similar models are dropped by their id), newest first, at most 60. `suggested` is the model in use if it is listed; otherwise Gemini's default model (`gemini-3.8-flash`), Anthropic's newest Opus and then its newest Sonnet, or else the first of the list; `null` for an empty list. `label` is the provider's display name, or the id when it has none.
+The list comes from the provider's own list-models endpoint. It keeps the chat-capable text models (embedding, image, audio, TTS, live, moderation and similar models are dropped by their id; `-instruct` ids are kept behind a custom `OPENAI_BASE_URL`), newest first, at most 60. If that leaves nothing of a non-empty list, the unfiltered list is offered instead. The listing must finish within 30 s, all pages included. `suggested` is the model in use if it is listed; otherwise Gemini's default model (`gemini-3.8-flash`), Anthropic's newest Opus and then its newest Sonnet, or else the first of the list; `null` for an empty list. `label` is the provider's display name, or the id when it has none.
 
 ```json
 {"provider": "anthropic", "models": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}, {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"}], "suggested": "claude-opus-5-5"}
@@ -480,7 +481,8 @@ The list comes from the provider's own list-models endpoint. It keeps the chat-c
 | 400 | `invalid_value` | `api_key` has characters that cannot be used (`field` is `api_key`) |
 | 400 | `llm_invalid_key` | The provider rejected the key |
 | 429 | `llm_rate_limited` | The provider is rate limiting the key right now; try again shortly |
-| 502 | `llm_unreachable` | The provider could not be reached |
+| 502 | `llm_unreachable` | A network error, a 5xx, or a provider response the app does not recognise |
+| 502 | `llm_list_failed` | The provider answered but refused the listing for a reason other than the key (for example a 400 or 404); a model id can still be entered by hand |
 | 422 | `invalid_request` | Unknown provider, unknown field or wrong type |
 
 The access rules apply as to every `/api` `POST`: a loopback client, an allowed Host, `X-FinAgent-Client: 1` and a matching `Origin`.
@@ -512,7 +514,7 @@ It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no
 {"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
 ```
 
-`tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the UTF-8 bytes of `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)` (with `null` for arguments that are not an object); `result_sha256` is the SHA-256 of the output text's UTF-8 bytes, or `null` when the tool returned no text; `latency_ms` is the tool's own time. A cancelled call has `"cancelled": true` and no `result_sha256`, and any other exception that escaped the tool has `"raised": "<exception type>"`. Tool calls the agent skips once the turn's budget is spent are not run and not ledgered; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"` and `"supersedes": "<old ticket id>"` instead of a `turn_id`. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `broker_error`, `upstream_error` or `unexpected_error`: one entry for every `propose_trades` call that ends without a ticket, except a cancelled one), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
+`tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the UTF-8 bytes of `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)` (with `null` for arguments that are not an object); `result_sha256` is the SHA-256 of the output text's UTF-8 bytes, or `null` when the tool returned no text; `latency_ms` is the tool's own time. A cancelled call has `"cancelled": true` and no `result_sha256`, and any other exception that escaped the tool has `"raised": "<exception type>"`. Tool calls the agent skips once the turn's budget is spent are not run and not ledgered; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"` and `"supersedes": "<old ticket id>"` instead of a `turn_id`. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `not_paper_account`, `broker_error`, `upstream_error` or `unexpected_error`: one entry for every `propose_trades` call that ends without a ticket, except a cancelled one), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
 
 Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included (not values passed with `extra=` or logger names; a text over 100,000 characters is cut; token counts such as `max_tokens: 9000` stay readable). Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
 
@@ -965,11 +967,12 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `rejected`, 티켓이 `rejected_by_user` | 사용자가 이미 거절했습니다 | 409 | 200 | 409 |
 | `rejected`, 티켓이 `expired` | 동작 전에 이미 만료됐습니다 | 410 | 410 | 410 |
 | `rejected`, 그 밖의 경우 | 해시 불일치, `proposed`가 아닌 티켓, 다른 confirm이 이미 선점함, 현재 가격에서 실행 가능한 레그가 없음 | 409 | 409 | 409 |
+| `rejected`, 모의투자 계좌가 아님 | 재검사 때 계좌가 `paper: false`라고 답했습니다. 아무것도 제출하지 않았으며, confirm이면 티켓은 `failed`가 되고 refresh면 재호가하지 않습니다. 그 뒤 앱이 브로커를 버리므로(`alpaca: "not_paper"`) 이후의 confirm은 503 `broker_not_connected`로 답합니다 | 409 | 해당 없음 | 409 |
 | `error` | 재검사 실패, 모든 레그 실패, 결과를 저장하지 못함, 또는 티켓을 읽을 수 없음. 결과를 저장하지 못한 경우 메시지가 주문이 들어갔을 수 있다고 알리므로 다시 시도하기 전에 미체결 주문을 확인하세요 | 502 | 502 | 502 |
 
 ## 설정
 
-**`GET /api/settings`**는 연결 상태를 돌려줍니다. 비밀값은 절대 반환하지 않습니다.
+**`GET /api/settings`**는 연결 상태를 돌려줍니다. 비밀값은 절대 반환하지 않습니다. 확정되지 않은 `alpaca` 상태(`connected`와 `not_paper`가 아닌 것)는 이 호출 때 다시 확인하며, 최대 1분에 한 번입니다.
 
 | 필드 | 값 |
 |---|---|
@@ -1020,7 +1023,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | 400 | `llm_model_required` | 모델 이름이 없게 됨 |
 | 400 | `llm_invalid_key` | 제공자가 키를 거부함(401이나 403, 잘못된 키를 뜻하는 400, 또는 크레디트 없음). 아무것도 저장하지 않았습니다 |
 | 400 | `llm_model_unavailable` | 모델을 모르거나 이 키로 쓸 수 없음. 아무것도 저장하지 않았습니다 |
-| 502 | `llm_unreachable` | 확인하려 했지만 제공자에 닿지 못함(네트워크 오류나 5xx). 아무것도 저장하지 않았습니다 |
+| 502 | `llm_unreachable` | 확인이 네트워크 오류, 5xx, 또는 앱이 알 수 없는 제공자 응답으로 실패함. 아무것도 저장하지 않았습니다 |
 | 500 | `settings_not_saved` | 설정을 기록하지 못함 |
 | 422 | `invalid_request` | 알 수 없는 필드이거나 타입이 틀림(예: `llm_provider: "stub"`) |
 
@@ -1033,7 +1036,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `provider` | `gemini`, `openai`, `anthropic` | 필수 |
 | `api_key` | 문자열, 최대 256자, 선택 | 시험해 볼 키. 저장하는 키와 같은 값 규칙을 따릅니다. 없으면 그 제공자에 저장된 키를 씁니다. 저장하지도, 되돌려 보내지도, 로그에 남기지도 않으며, 본문으로만 받습니다(`GET` 형태는 없습니다) |
 
-목록은 제공자 자체의 모델 목록 엔드포인트에서 옵니다. 채팅이 가능한 텍스트 모델만 남기며(임베딩, 이미지, 오디오, TTS, live, 모더레이션 등의 모델은 ID로 걸러 냅니다), 최신순으로 최대 60개입니다. `suggested`는 사용 중인 모델이 목록에 있으면 그 모델이고, 없으면 Gemini는 기본 모델(`gemini-3.8-flash`), Anthropic은 가장 새로운 Opus, 그다음 가장 새로운 Sonnet, 그 밖에는 목록의 첫 모델이며, 목록이 비어 있으면 `null`입니다. `label`은 제공자가 붙인 표시 이름이고, 없으면 ID입니다.
+목록은 제공자 자체의 모델 목록 엔드포인트에서 옵니다. 채팅이 가능한 텍스트 모델만 남기며(임베딩, 이미지, 오디오, TTS, live, 모더레이션 등의 모델은 ID로 걸러 내고, `-instruct` ID는 사용자 지정 `OPENAI_BASE_URL`에서는 남깁니다), 최신순으로 최대 60개입니다. 그렇게 해서 비어 있지 않던 목록이 비면 거르지 않은 목록을 대신 보여 줍니다. 목록 조회는 모든 페이지를 포함해 30초 안에 끝나야 합니다. `suggested`는 사용 중인 모델이 목록에 있으면 그 모델이고, 없으면 Gemini는 기본 모델(`gemini-3.8-flash`), Anthropic은 가장 새로운 Opus, 그다음 가장 새로운 Sonnet, 그 밖에는 목록의 첫 모델이며, 목록이 비어 있으면 `null`입니다. `label`은 제공자가 붙인 표시 이름이고, 없으면 ID입니다.
 
 ```json
 {"provider": "anthropic", "models": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}, {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"}], "suggested": "claude-opus-5-5"}
@@ -1046,7 +1049,8 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | 400 | `invalid_value` | `api_key`에 쓸 수 없는 문자가 있음(`field`는 `api_key`) |
 | 400 | `llm_invalid_key` | 제공자가 키를 거부함 |
 | 429 | `llm_rate_limited` | 지금은 제공자가 이 키의 요청을 제한하고 있음. 잠시 뒤 다시 시도하세요 |
-| 502 | `llm_unreachable` | 제공자에 닿지 못함 |
+| 502 | `llm_unreachable` | 네트워크 오류, 5xx, 또는 앱이 알 수 없는 제공자 응답 |
+| 502 | `llm_list_failed` | 제공자가 답은 했지만 키가 아닌 다른 이유(예: 400, 404)로 목록을 거부함. 모델 ID는 직접 입력할 수 있습니다 |
 | 422 | `invalid_request` | 알 수 없는 제공자나 필드, 또는 틀린 타입 |
 
 모든 `/api` `POST`와 같은 접근 규칙이 적용됩니다. 루프백 클라이언트, 허용된 Host, `X-FinAgent-Client: 1`, 일치하는 `Origin`이 필요합니다.
@@ -1078,7 +1082,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
 ```
 
-`tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)`(인자가 객체가 아니면 `null`)의 UTF-8 바이트에 대한 SHA-256이고, `result_sha256`은 출력 텍스트의 UTF-8 바이트에 대한 SHA-256이며 도구가 텍스트를 돌려주지 않았으면 `null`입니다. `latency_ms`는 도구 자체의 소요 시간입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구에서 빠져나온 그 밖의 예외에는 `"raised": "<예외 유형>"`이 붙습니다. 턴의 예산을 다 쓴 뒤 에이전트가 건너뛴 도구 호출은 실행되지 않으므로 원장에 남지 않습니다. 또한 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`와 `"supersedes": "<이전 티켓 ID>"`가 들어갑니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `broker_error`, `upstream_error`, `unexpected_error` 중 하나. 취소된 경우를 빼고 티켓 없이 끝난 `propose_trades` 호출마다 한 항목)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
+`tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)`(인자가 객체가 아니면 `null`)의 UTF-8 바이트에 대한 SHA-256이고, `result_sha256`은 출력 텍스트의 UTF-8 바이트에 대한 SHA-256이며 도구가 텍스트를 돌려주지 않았으면 `null`입니다. `latency_ms`는 도구 자체의 소요 시간입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구에서 빠져나온 그 밖의 예외에는 `"raised": "<예외 유형>"`이 붙습니다. 턴의 예산을 다 쓴 뒤 에이전트가 건너뛴 도구 호출은 실행되지 않으므로 원장에 남지 않습니다. 또한 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`와 `"supersedes": "<이전 티켓 ID>"`가 들어갑니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `not_paper_account`, `broker_error`, `upstream_error`, `unexpected_error` 중 하나. 취소된 경우를 빼고 티켓 없이 끝난 `propose_trades` 호출마다 한 항목)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
 
 페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다(`extra=`로 넘긴 값과 로거 이름은 대상이 아니고, 100,000자를 넘는 텍스트는 잘리며, `max_tokens: 9000` 같은 토큰 수는 그대로 읽힙니다). 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
 
