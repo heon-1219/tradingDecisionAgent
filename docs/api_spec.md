@@ -148,9 +148,10 @@ The chat and trading API is the HTTP surface of the local paper-trading app (`we
 |---|---|---|---|
 | `POST` | `/api/sessions` | Create a chat session | 201 |
 | `GET` | `/api/sessions` | List sessions | 200 |
-| `GET` | `/api/sessions/{session_id}` | One session with its recent messages, active ticket and mandate | 200 |
+| `GET` | `/api/sessions/{session_id}` | One session with its recent messages, its tickets, active ticket and mandate | 200 |
 | `PATCH` | `/api/sessions/{session_id}` | Rename a session | 200 |
 | `POST` | `/api/chat` | Send a message; the reply streams as Server-Sent Events | 200 |
+| `GET` | `/api/sources/{session_id}` | The evidence records the session's answers cite | 200 |
 | `GET` | `/api/portfolio` | Paper account, positions and open orders | 200 |
 | `GET` | `/api/mandate/{session_id}` | Read the session's mandate | 200 |
 | `PUT` | `/api/mandate/{session_id}` | Save the session's mandate | 200 |
@@ -192,6 +193,7 @@ Status codes: 201, 422.
 | `session` | `{id, title, lang, created_at}` |
 | `messages` | The last 50 messages of any role (`user`, `assistant`, `event`), oldest first: `{role, content, meta, created_at}`. `meta` is a JSON object or `null`. `event` rows are per-turn summaries without tool output |
 | `active_ticket` | The newest unexpired `proposed` ticket, or `null` |
+| `tickets` | Every ticket of the session (the newest 50), oldest first: `{id, status, created_at}`. It includes tickets that no message mentions, such as a requote made by refresh or by a confirm, so a reloaded chat can show them. Read each one with [`GET /api/tickets/{ticket_id}`](#get-a-ticket) |
 | `mandate` | The saved mandate, or the defaults if none was saved |
 | `mandate_saved` | `true` if a mandate was saved for this session |
 
@@ -232,6 +234,26 @@ Status codes: 200 (stream), 404 `session_not_found`, 422 `invalid_request`, 503 
 | `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | Always the last event, also after an error. `usage` holds token counts summed over the turn, as the provider reports them (for example `input` and `output`). `mode` (`shallow` or `deep`), `max_rounds` and `time_budget_sec` are the limits the turn ran under (see [Settings](#settings)). `budget_exhausted` is `true` when the turn ended on them: the answer is then what the model wrote when asked to stop, or a fallback, and in shallow mode it says so and that a paid API key in Settings allows deeper research. If the stream itself fails, its closing `finish` has only `usage` and `elapsed_ms` | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
 
 Order within a turn: `start`; then for each round an optional `reasoning-delta` and, for every tool call in order, `tool-input-available`, `tool-output-available`, any `source-url` events and any events the tool produced (`data-mandate`, `data-trade-proposal`, `source-grounding`); then an optional `data-grounding-flags`, the `text-delta` chunks and `finish`. A refusal or failure is `error` followed by `finish`. Order status updates are not pushed on the stream: poll `GET /api/tickets/{ticket_id}`.
+
+## Sources
+
+**`GET /api/sources/{session_id}`** returns the evidence records behind the session's answers, in the order they were recorded. An answer cites them as `[E1]`, `[E2]`, and so on. The stream's `source-url` events carry only part of a record, and the history carries none, so a client reads this when it opens a chat and after each turn.
+
+| Field | Meaning |
+|---|---|
+| `id` | `E1`, `E2`, ... as cited in the answer text |
+| `title`, `url`, `publisher` | As the research tool stored them |
+| `tier` | Trust tier: 1 for primary sources such as SEC filings; higher numbers are less authoritative |
+| `published_at` | Publication date as a string, or `null` |
+| `connector` | The research tool that recorded it, for example `edgar` |
+| `untrusted` | `true` for text taken from outside the trusted sources, such as web search results |
+| `snippet` | The stored excerpt, cut to 500 characters |
+
+```json
+{"sources": [{"id": "E1", "title": "Apple Inc. 10-K", "url": "https://www.sec.gov/apple-10k", "publisher": "SEC EDGAR", "tier": 1, "published_at": "2025-10-31", "connector": "edgar", "untrusted": false, "snippet": "10-K filed 2025-10-31"}]}
+```
+
+The records are external content: show them as text, and link only `http` and `https` URLs. Status codes: 200, 404 `session_not_found`.
 
 ## Portfolio
 
@@ -358,7 +380,7 @@ Orders are Alpaca order snapshots: `{id, client_order_id, symbol, side, qty, not
 |---|---|---|
 | `POST /api/tickets/{ticket_id}/confirm` | `{"session_id": "...", "hash": "<ticket.hash>"}` | Re-checks the ticket and, if nothing material changed, submits its orders. **The only call that can place an order.** Needs a broker and `trading_enabled` |
 | `POST /api/tickets/{ticket_id}/reject` | `{"session_id": "..."}` | Moves a `proposed` ticket to `rejected_by_user`. Works without a broker. Rejecting an already rejected ticket is answered with 200 |
-| `POST /api/tickets/{ticket_id}/refresh` | `{"session_id": "..."}` | Re-quotes a `proposed` ticket at current prices and replaces it with a new ticket. Never submits. Needs a broker |
+| `POST /api/tickets/{ticket_id}/refresh` | `{"session_id": "..."}` | Re-quotes a ticket at current prices and replaces it with a new ticket: a `proposed` ticket, or an `expired` one that is still the session's newest ticket (it stays `expired`). Never submits. Needs a broker |
 
 All three answer with the same result body:
 
@@ -397,7 +419,7 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 | `expired` | The ticket was past its expiry when confirm ran | 410 | n/a | n/a |
 | `not_found` | Unknown id, or a ticket of another session | 404 | 404 | 404 |
 | `rejected`, ticket is `rejected_by_user` | The user had already rejected it | 409 | 200 | 409 |
-| `rejected`, ticket is `expired` | Expired before the action | 410 | 410 | 410 |
+| `rejected`, ticket is `expired` | Expired before the action. Refresh re-quotes the session's newest ticket even after it expired, so a refused refresh of an expired ticket means a newer ticket exists (a later proposal, or this ticket's own requote) | 410 | 410 | 409 |
 | `rejected`, any other case | Hash mismatch, ticket not `proposed`, claimed by another confirm, or no leg executable at current prices | 409 | 409 | 409 |
 | `rejected`, the account is not a paper account | The account reported `paper: false` at the re-check. Nothing was submitted; on confirm the ticket ends `failed`, on refresh nothing is re-quoted. The app then drops the broker (`alpaca: "not_paper"`), so a later confirm answers 503 `broker_not_connected` | 409 | n/a | 409 |
 | `error` | The re-check failed, every leg failed, the outcome could not be saved, or the ticket could not be read. If the outcome could not be saved, the message says orders may have been placed: check open orders before trying again | 502 | 502 | 502 |
@@ -716,9 +738,10 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 |---|---|---|---|
 | `POST` | `/api/sessions` | 채팅 세션 생성 | 201 |
 | `GET` | `/api/sessions` | 세션 목록 | 200 |
-| `GET` | `/api/sessions/{session_id}` | 세션 하나와 최근 메시지, 활성 티켓, 투자 원칙 | 200 |
+| `GET` | `/api/sessions/{session_id}` | 세션 하나와 최근 메시지, 티켓 목록, 활성 티켓, 투자 원칙 | 200 |
 | `PATCH` | `/api/sessions/{session_id}` | 세션 이름 변경 | 200 |
 | `POST` | `/api/chat` | 메시지 전송. 답변은 Server-Sent Events로 스트리밍 | 200 |
+| `GET` | `/api/sources/{session_id}` | 세션의 답변이 인용하는 근거 기록 | 200 |
 | `GET` | `/api/portfolio` | 모의 계좌, 보유 종목, 미체결 주문 | 200 |
 | `GET` | `/api/mandate/{session_id}` | 세션의 투자 원칙 조회 | 200 |
 | `PUT` | `/api/mandate/{session_id}` | 세션의 투자 원칙 저장 | 200 |
@@ -760,6 +783,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `session` | `{id, title, lang, created_at}` |
 | `messages` | 역할(`user`, `assistant`, `event`)과 관계없이 최근 50개를 오래된 순으로: `{role, content, meta, created_at}`. `meta`는 JSON 객체 또는 `null`입니다. `event` 행은 도구 출력이 없는 턴 요약입니다 |
 | `active_ticket` | 만료되지 않은 가장 최근의 `proposed` 티켓, 없으면 `null` |
+| `tickets` | 세션의 모든 티켓(최근 50개)을 오래된 순으로: `{id, status, created_at}`. refresh나 confirm이 만든 재호가 티켓처럼 어떤 메시지에도 나오지 않는 티켓도 들어 있으므로, 다시 연 대화에서도 보여 줄 수 있습니다. 각 티켓은 [`GET /api/tickets/{ticket_id}`](#티켓-조회)로 읽습니다 |
 | `mandate` | 저장된 투자 원칙, 저장된 것이 없으면 기본값 |
 | `mandate_saved` | 이 세션에 투자 원칙이 저장돼 있으면 `true` |
 
@@ -800,6 +824,26 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | 항상 마지막 이벤트이며 오류 뒤에도 옵니다. `usage`는 제공자가 보고한 토큰 수를 턴 전체로 합산한 값입니다(예: `input`, `output`). `mode`(`shallow` 또는 `deep`), `max_rounds`, `time_budget_sec`는 그 턴에 적용된 한도입니다([설정](#설정) 참고). `budget_exhausted`가 `true`면 턴이 그 한도에서 끝난 것입니다. 이때 답은 멈추라는 요청을 받은 모델이 쓴 것이거나 대체 메시지이며, 얕은 모드에서는 그 사실과, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있다는 안내가 들어갑니다. 스트림 자체가 실패하면 마지막 `finish`에는 `usage`와 `elapsed_ms`만 있습니다 | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
 
 한 턴 안의 순서: `start`. 이어서 라운드마다 선택적 `reasoning-delta`와, 도구 호출을 순서대로 하나씩 `tool-input-available`, `tool-output-available`, 있다면 `source-url`, 그리고 도구가 만든 이벤트(`data-mandate`, `data-trade-proposal`, `source-grounding`). 그다음 선택적 `data-grounding-flags`, `text-delta` 조각들, `finish`. 거절이나 실패는 `error` 뒤에 `finish`가 옵니다. 주문 상태 변화는 스트림으로 푸시하지 않으므로 `GET /api/tickets/{ticket_id}`를 폴링하세요.
+
+## 출처
+
+**`GET /api/sources/{session_id}`**는 세션의 답변이 근거로 삼은 기록을 기록된 순서대로 돌려줍니다. 답변은 이를 `[E1]`, `[E2]` 같은 표시로 인용합니다. 스트림의 `source-url` 이벤트에는 기록의 일부만 있고 대화 기록에는 없으므로, 클라이언트는 대화를 열 때와 턴이 끝날 때마다 이것을 읽습니다.
+
+| 필드 | 의미 |
+|---|---|
+| `id` | 답변 텍스트에 인용된 그대로 `E1`, `E2`, ... |
+| `title`, `url`, `publisher` | 리서치 도구가 저장한 그대로 |
+| `tier` | 신뢰 등급: SEC 공시 같은 1차 출처는 1이고, 숫자가 클수록 덜 권위 있는 출처입니다 |
+| `published_at` | 문자열로 된 발행일, 없으면 `null` |
+| `connector` | 이 기록을 남긴 리서치 도구(예: `edgar`) |
+| `untrusted` | 웹 검색 결과처럼 신뢰 출처 밖에서 가져온 텍스트면 `true` |
+| `snippet` | 저장된 발췌문, 최대 500자 |
+
+```json
+{"sources": [{"id": "E1", "title": "Apple Inc. 10-K", "url": "https://www.sec.gov/apple-10k", "publisher": "SEC EDGAR", "tier": 1, "published_at": "2025-10-31", "connector": "edgar", "untrusted": false, "snippet": "10-K filed 2025-10-31"}]}
+```
+
+기록은 외부 콘텐츠입니다. 텍스트로만 보여 주고, `http`와 `https` URL만 링크로 만드세요. 상태 코드: 200, 404 `session_not_found`.
 
 ## 포트폴리오
 
@@ -926,7 +970,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 |---|---|---|
 | `POST /api/tickets/{ticket_id}/confirm` | `{"session_id": "...", "hash": "<ticket.hash>"}` | 티켓을 다시 검사하고, 의미 있는 변화가 없으면 주문을 제출합니다. **주문을 낼 수 있는 유일한 호출입니다.** 브로커와 `trading_enabled`가 필요합니다 |
 | `POST /api/tickets/{ticket_id}/reject` | `{"session_id": "..."}` | `proposed` 티켓을 `rejected_by_user`로 바꿉니다. 브로커 없이도 동작합니다. 이미 거절한 티켓을 다시 거절하면 200으로 답합니다 |
-| `POST /api/tickets/{ticket_id}/refresh` | `{"session_id": "..."}` | `proposed` 티켓을 현재 가격으로 다시 호가해 새 티켓으로 바꿉니다. 제출하지 않습니다. 브로커가 필요합니다 |
+| `POST /api/tickets/{ticket_id}/refresh` | `{"session_id": "..."}` | 티켓을 현재 가격으로 다시 호가해 새 티켓으로 바꿉니다. 대상은 `proposed` 티켓, 또는 세션의 가장 최근 티켓인 `expired` 티켓입니다(만료된 티켓은 `expired`로 남습니다). 제출하지 않습니다. 브로커가 필요합니다 |
 
 세 호출 모두 같은 결과 본문으로 답합니다.
 
@@ -965,7 +1009,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `expired` | confirm이 실행될 때 티켓이 이미 만료돼 있었습니다 | 410 | 해당 없음 | 해당 없음 |
 | `not_found` | 없는 ID이거나 다른 세션의 티켓입니다 | 404 | 404 | 404 |
 | `rejected`, 티켓이 `rejected_by_user` | 사용자가 이미 거절했습니다 | 409 | 200 | 409 |
-| `rejected`, 티켓이 `expired` | 동작 전에 이미 만료됐습니다 | 410 | 410 | 410 |
+| `rejected`, 티켓이 `expired` | 동작 전에 이미 만료됐습니다. refresh는 세션의 가장 최근 티켓이면 만료된 뒤에도 다시 호가하므로, 만료된 티켓의 refresh가 거절됐다면 더 새로운 티켓(이후의 제안, 또는 이 티켓의 재호가)이 있다는 뜻입니다 | 410 | 410 | 409 |
 | `rejected`, 그 밖의 경우 | 해시 불일치, `proposed`가 아닌 티켓, 다른 confirm이 이미 선점함, 현재 가격에서 실행 가능한 레그가 없음 | 409 | 409 | 409 |
 | `rejected`, 모의투자 계좌가 아님 | 재검사 때 계좌가 `paper: false`라고 답했습니다. 아무것도 제출하지 않았으며, confirm이면 티켓은 `failed`가 되고 refresh면 재호가하지 않습니다. 그 뒤 앱이 브로커를 버리므로(`alpaca: "not_paper"`) 이후의 confirm은 503 `broker_not_connected`로 답합니다 | 409 | 해당 없음 | 409 |
 | `error` | 재검사 실패, 모든 레그 실패, 결과를 저장하지 못함, 또는 티켓을 읽을 수 없음. 결과를 저장하지 못한 경우 메시지가 주문이 들어갔을 수 있다고 알리므로 다시 시도하기 전에 미체결 주문을 확인하세요 | 502 | 502 | 502 |

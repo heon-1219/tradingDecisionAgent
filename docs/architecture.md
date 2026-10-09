@@ -332,7 +332,8 @@ After a confirm, the UI polls `GET /api/tickets/{id}?session_id=...`. That call 
 ### Reject, refresh and expiry
 
 - **Reject.** `proposed` to `rejected_by_user` with one compare-and-set, plus a `reject` ledger entry. It needs no broker, so a ticket card can always be dismissed, even after the keys were cleared. Rejecting an already rejected ticket is answered with 200.
-- **Refresh.** Re-evaluates a still-`proposed` ticket at current prices and replaces it with a new ticket. If no leg is executable the old ticket is left untouched. Otherwise the old ticket is moved to `superseded` first, through a compare-and-set, and only then is the new ticket created. A refresh that races a confirm therefore cannot leave a second live copy of the same trade. Refresh never submits.
+- **Refresh.** Re-evaluates a `proposed` ticket at current prices and replaces it with a new ticket. It also takes an `expired` ticket while that is still the session's newest ticket (`TicketStore.latest`, checked before and after the re-evaluation), so a quote that lapsed can be renewed from its card. The expired ticket stays `expired` (a terminal state) and only the new ticket is created; any other expired ticket is refused (HTTP 409: a newer ticket exists, either a later proposal or this ticket's own requote). If no leg is executable the old ticket is left untouched. Otherwise a proposed ticket is moved to `superseded` first, through a compare-and-set, and only then is the new ticket created. A refresh that races a confirm therefore cannot leave a second live copy of the same trade. Refresh never submits.
+- **Reload.** `GET /api/sessions/{id}` lists every ticket of the session (`tickets`: id, status and creation time, oldest first), so the web app can show the requotes that no chat turn mentions after the chat is reopened.
 - **Expiry.** A ticket lives `ticket_ttl_sec` seconds (300). `expire_stale()` runs before every ticket action, whenever a session is loaded or a ticket is read, and at startup. `TicketStore.active()` never returns an expired ticket.
 - **One active ticket per session.** Creating any ticket (a new proposal, a refresh or a requote) supersedes the session's other `proposed` tickets.
 
@@ -366,7 +367,7 @@ stateDiagram-v2
 | `submitting` | Claimed by a confirm; orders are being sent | `proposed` | no |
 | `submitted` | At least one leg was placed or is uncertain; the broker order ids are stored | `submitting` | yes, in practice |
 | `rejected_by_user` | The user rejected it | `proposed` | yes |
-| `expired` | Its lifetime passed before it was confirmed | `proposed` | yes |
+| `expired` | Its lifetime passed before it was confirmed. While it is the session's newest ticket, refresh can still re-quote it into a new ticket; it stays `expired` | `proposed` | yes |
 | `superseded` | Replaced by a newer ticket (new proposal, refresh or requote) | `proposed`, `submitting` | yes |
 | `failed` | No leg was placed, or the pre-submit re-check failed | `submitting` | yes |
 
@@ -849,7 +850,8 @@ confirm 이후 UI는 `GET /api/tickets/{id}?session_id=...`를 폴링합니다. 
 ### 거절, 갱신, 만료
 
 - **거절(reject).** compare-and-set 한 번으로 `proposed`에서 `rejected_by_user`로 바꾸고 `reject` 원장 항목을 남깁니다. 브로커가 필요 없으므로 키를 지운 뒤에도 티켓 카드를 언제든 닫을 수 있습니다. 이미 거절된 티켓을 다시 거절하면 200으로 답합니다.
-- **갱신(refresh).** 아직 `proposed`인 티켓을 현재 가격으로 다시 평가해 새 티켓으로 바꿉니다. 실행 가능한 레그가 없으면 기존 티켓은 그대로 둡니다. 그렇지 않으면 기존 티켓을 먼저 compare-and-set으로 `superseded`로 옮기고, 그다음에야 새 티켓을 만듭니다. 그래서 refresh가 confirm과 경합해도 같은 거래의 살아 있는 사본이 둘이 되지 않습니다. refresh는 주문을 제출하지 않습니다.
+- **갱신(refresh).** `proposed` 티켓을 현재 가격으로 다시 평가해 새 티켓으로 바꿉니다. `expired` 티켓도 그것이 아직 세션의 가장 최근 티켓이면(`TicketStore.latest`, 재평가 전후에 확인) 받아 주므로, 시세가 만료된 카드에서 바로 새 시세를 받을 수 있습니다. 만료된 티켓은 `expired`(종료 상태)로 남고 새 티켓만 만들어집니다. 그 밖의 만료된 티켓은 거절됩니다(HTTP 409: 이후의 제안이나 이 티켓의 재호가처럼 더 새로운 티켓이 있음). 실행 가능한 레그가 없으면 기존 티켓은 그대로 둡니다. 그렇지 않으면 `proposed` 티켓을 먼저 compare-and-set으로 `superseded`로 옮기고, 그다음에야 새 티켓을 만듭니다. 그래서 refresh가 confirm과 경합해도 같은 거래의 살아 있는 사본이 둘이 되지 않습니다. refresh는 주문을 제출하지 않습니다.
+- **다시 열기.** `GET /api/sessions/{id}`는 세션의 모든 티켓 목록(`tickets`: ID, 상태, 생성 시각, 오래된 순)을 돌려주므로, 웹 앱은 대화를 다시 열었을 때 어떤 턴에도 나오지 않는 재호가 티켓까지 보여 줄 수 있습니다.
 - **만료.** 티켓 수명은 `ticket_ttl_sec`초(300)입니다. `expire_stale()`은 티켓에 대한 모든 동작 전에, 세션을 불러오거나 티켓을 읽을 때마다, 그리고 시작 시에 실행됩니다. `TicketStore.active()`는 만료된 티켓을 돌려주지 않습니다.
 - **세션당 활성 티켓 하나.** 어떤 티켓이든(새 제안, refresh, requote) 만들어지면 그 세션의 다른 `proposed` 티켓은 `superseded`가 됩니다.
 
@@ -883,7 +885,7 @@ stateDiagram-v2
 | `submitting` | confirm이 선점해 주문을 보내는 중 | `proposed` | 아니오 |
 | `submitted` | 하나 이상의 레그가 placed 또는 uncertain이며 브로커 주문 ID가 저장됨 | `submitting` | 예(사실상) |
 | `rejected_by_user` | 사용자가 거절함 | `proposed` | 예 |
-| `expired` | 확인되기 전에 수명이 끝남 | `proposed` | 예 |
+| `expired` | 확인되기 전에 수명이 끝남. 세션의 가장 최근 티켓인 동안에는 refresh로 새 티켓을 받을 수 있으며, 이 티켓은 `expired`로 남음 | `proposed` | 예 |
 | `superseded` | 더 새로운 티켓(새 제안, refresh, requote)으로 대체됨 | `proposed`, `submitting` | 예 |
 | `failed` | placed 레그가 없거나 제출 전 재검사에 실패함 | `submitting` | 예 |
 
