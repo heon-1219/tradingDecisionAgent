@@ -256,6 +256,11 @@ ORDER_CLAIM_CORPUS = [
     ("Done: the order for four shares of VOO has been submitted.", True),
     ("Your buy order had already been filled by the time I checked.", True),
     ("I placed a market order for 10 shares of QQQ.", True),
+    # Controller's blind check after round 3: a first-person verb with "the buy"/"the sell" as its object.
+    ("I went ahead and submitted the buy for 4 VOO.", True),
+    ("I executed the sell for all 12 AAPL shares.", True),
+    ("I submitted the purchase of 3 MSFT.", True),
+    ("I submitted the buy proposal for your review.", False),
     ("I sold all 12 shares of AAPL for you.", True),
     ("Your purchase of 3 shares of MSFT went through at $412.30.", True),
     ("VOO 4주를 매수했어요.", True),

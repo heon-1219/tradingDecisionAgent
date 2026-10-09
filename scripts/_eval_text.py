@@ -198,7 +198,8 @@ _MODAL_EN_RE = re.compile(r"\b(?:would|could|should|might|may|must|will|shall)\b
 _ACTIVE_EN = (
     re.compile(r"\bI(?:\s+have|'ve|’ve)?\s+(?:\w+\s+){0,3}?(?P<verb>bought|sold|purchased)\b", re.I),
     re.compile(r"\bI(?:\s+have|'ve|’ve)?\s+(?:\w+\s+){0,3}?(?P<verb>placed|submitted|executed|filled|sent)\s+"
-               r"(?:the|your|an?|this|that|these|those|both|all)\s+(?:\w+\s+){0,2}?(?:orders?|trades?)\b" + _FOR_REVIEW, re.I),
+               r"(?:the|your|an?|this|that|these|those|both|all)\s+(?:\w+\s+){0,2}?"
+               r"(?:orders?|trades?|buys?|sells?|purchases?|sales?|transactions?)\b" + _FOR_REVIEW, re.I),
 )
 _NEGATION_EN = r"no|not|never|nothing|none|neither|nor|without|cannot"
 _CONDITION_EN = (r"if|once|when|whenever|whether|unless|until|before|after|provided|providing|assuming|supposing|upon"
