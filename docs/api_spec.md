@@ -823,7 +823,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `data-grounding-flags` | `numbers` | 최종 텍스트가 완성된 뒤, 그 안의 일부 숫자가 이 턴의 도구 출력으로 뒷받침되지 않을 때. 참고용입니다 | `data: {"type":"data-grounding-flags","numbers":["$1,250","3.4%"]}` |
 | `text-delta` | `delta` | 최종 답변을 최대 200자 안팎의 조각으로. 전체 텍스트를 먼저 만든 뒤 나눠 보내므로 토큰 단위 스트리밍이 아니라 조각 전달입니다 | `data: {"type":"text-delta","delta":"VOO tracks the S&P 500 [E1]. ..."}` |
 | `error` | `message` | 턴이 거절되었거나 실패했을 때. 메시지는 일반적인 문구이며, 사용자 메시지의 언어로 나오고, 제공자의 문구는 담지 않습니다 | `data: {"type":"error","message":"Sorry, something went wrong while writing this reply. Please try again in a moment."}` |
-| `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | 항상 마지막 이벤트이며 오류 뒤에도 옵니다. `usage`는 제공자가 보고한 토큰 수를 턴 전체로 합산한 값입니다(예: `input`, `output`). `mode`(`shallow` 또는 `deep`), `max_rounds`, `time_budget_sec`는 그 턴에 적용된 한도입니다([설정](#설정) 참고). `budget_exhausted`가 `true`면 턴이 그 한도에서 끝난 것입니다. 이때 답은 멈추라는 요청을 받은 모델이 쓴 것이거나 대체 메시지이며, 얕은 모드에서는 그 사실과, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있다는 안내가 들어갑니다. 스트림 자체가 실패하면 마지막 `finish`에는 `usage`와 `elapsed_ms`만 있습니다 | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
+| `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | 항상 마지막 이벤트이며 오류 뒤에도 옵니다. `usage`는 제공자가 보고한 토큰 수를 턴 전체로 합산한 값입니다(예: `input`, `output`). `mode`(`shallow` 또는 `deep`), `max_rounds`, `time_budget_sec`는 그 턴에 적용된 한도입니다([설정](#설정) 참고). `budget_exhausted`가 `true`면 턴이 그 한도에서 끝난 것입니다. 이때 답은 멈추라는 요청을 받은 모델이 쓴 것이거나 대체 메시지이며, 얕은 리서치 모드에서는 그 사실과, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있다는 안내가 들어갑니다. 스트림 자체가 실패하면 마지막 `finish`에는 `usage`와 `elapsed_ms`만 있습니다 | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
 
 한 턴 안의 순서: `start`. 이어서 라운드마다 선택적 `reasoning-delta`와, 도구 호출을 순서대로 하나씩 `tool-input-available`, `tool-output-available`, 있다면 `source-url`, 그리고 도구가 만든 이벤트(`data-mandate`, `data-trade-proposal`, `source-grounding`). 그다음 선택적 `data-grounding-flags`, `text-delta` 조각들, `finish`. 거절이나 실패는 `error` 뒤에 `finish`가 옵니다. 주문 상태 변화는 스트림으로 푸시하지 않으므로 `GET /api/tickets/{ticket_id}`를 폴링하세요.
 
@@ -1030,7 +1030,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `provider` | 채팅 모델 제공자: `gemini`, `openai`, `anthropic`(`stub`은 테스트에서만) |
 | `model`, `effort` | 모델 ID와 추론 강도(`low`, `medium`, `high`, `xhigh`, `max`) |
 | `mode` | 리서치 깊이: `shallow`(얕은 리서치 모드. `gemini_paid`가 아닌 Gemini) 또는 `deep`(심층 리서치 모드. OpenAI, Anthropic, 유료로 선언한 Gemini) |
-| `max_rounds`, `time_budget_sec` | 그 모드에서 답변 하나의 한도: 도구 라운드 수와 초(기본값은 얕은 모드 4와 150, 심층 모드 12와 300) |
+| `max_rounds`, `time_budget_sec` | 그 모드에서 답변 하나의 한도: 도구 라운드 수와 초(기본값은 얕은 리서치 모드 4와 150, 심층 리서치 모드 12와 300) |
 | `gemini_paid` | 불리언. Gemini 키가 유료 요금제라는 사용자의 선언 |
 | `providers` | `{"gemini", "openai", "anthropic"}`, 각각 `set` 또는 `missing`: 키가 저장돼 있는지 |
 | `api_allow_remote` | 불리언 |
@@ -1052,7 +1052,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `llm_model` | 문자열, 최대 256자 | 모델 ID(예: `POST /api/llm/models`에서 고른 것). 지울 수 없으며 `""`는 400 `llm_model_required`입니다 |
 | `llm_effort` | `low`, `medium`, `high`, `xhigh`, `max` | 추론 강도(Gemini는 `xhigh`와 `max`를 `high`로 보냅니다) |
 | `gemini_key`, `openai_key`, `anthropic_key` | 문자열, 최대 256자 | 제공자 API 키. 사용 중인 제공자의 키는 지울 수 없습니다 |
-| `gemini_paid` | 불리언 | Gemini 키를 유료로 선언합니다(심층 모드). 모델 호출 없이 다음 답변부터 적용됩니다 |
+| `gemini_paid` | 불리언 | Gemini 키를 유료로 선언합니다(심층 리서치 모드). 모델 호출 없이 다음 답변부터 적용됩니다 |
 
 문자열 필드에서 `""`는 키를 삭제하고, `null`(또는 필드 생략)은 그대로 둡니다. 값은 ASCII 공백을 다듬은 뒤 `"`, `\`, `${`가 없는 출력 가능한 ASCII여야 합니다. 저장하면 커넥터를 그 자리에서 다시 만들므로 에이전트의 도구 구성은 다음 메시지부터 바뀝니다. 응답은 `GET /api/settings`와 같은 본문이며, 해당하면 `"warning": "llm_rate_limited"`가 붙습니다.
 

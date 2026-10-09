@@ -54,7 +54,7 @@ A tool whose key is missing is left out of the agent's tool list, so the agent o
 
 ### Model provider
 
-Gemini is the default (`gemini-3.8-flash`). In **Settings**, under **Model**, you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. Each provider shows whether its key is saved, and links to the page where its keys are made. The model list comes from the provider itself and shows the chat models your key can use: it loads when you pick a provider whose key is saved, or with **Load models** after you type a key. A **custom model id** is accepted too. The key field is never filled in by the app and is emptied after every save; keys are written only to your local `.env`.
+Gemini is the default (`gemini-3.8-flash`). In **Settings**, under **Model**, you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. Each provider shows whether its key is saved, and the key field links to the page where the selected provider's keys are made. The model list comes from the provider itself and shows the chat models your key can use: it loads when the panel opens or when you pick a provider whose key is saved, and with **Load models** after you type a new key. Effort is turned off for OpenAI, whose models ignore it. A **custom model id** is accepted too. The key field is never filled in by the app and is emptied after every save; keys are written only to your local `.env`.
 
 Before anything is saved, a change of provider, model or key is checked with one small model call. A rejected key or an unavailable model is refused, an unreachable provider saves nothing, and a rate-limited key is saved with a warning. A switch applies from the next reply, to `/answer` as well as the chat. To use another OpenAI-compatible server, set `OPENAI_BASE_URL` in `.env`; Settings does not show it. Gemini search grounding needs only a Gemini key, whichever provider runs the chat, and on Gemini 3.x it needs a key with billing enabled.
 
@@ -67,7 +67,7 @@ A free-tier Gemini key allows only a few model calls a minute and a day (about 5
 | **Shallow** | Gemini, unless the key is declared paid (`GEMINI_PAID=true`) | 4 (`SHALLOW_MAX_ROUNDS`) | 150 s (`SHALLOW_TIME_BUDGET_SEC`) |
 | **Deep** | OpenAI, Anthropic, or Gemini with `GEMINI_PAID=true` | 12 (`CHAT_MAX_ROUNDS`) | 300 s (`CHAT_TIME_BUDGET_SEC`) |
 
-A round is one model call plus the tool calls it asks for. In shallow mode the prompt tells the model to spend one round on context, one on research, and then to propose. The top bar shows the current mode ("Shallow mode" or "Deep mode"; hover, focus or tap it for the limits and a link to Settings). In shallow mode the empty chat explains the limit, a chat's first reply has a one-line note you can dismiss, and a reply that stops at its budget says so and links to Settings. In Settings, **My Gemini key is on a paid plan** sets `GEMINI_PAID`. `GEMINI_PAID` is your statement, not a check, because the app cannot tell a free key from a paid one. A free key declared paid gets deep limits it cannot sustain.
+A round is one model call plus the tool calls it asks for. In shallow mode the prompt tells the model to spend one round on context, one on research, and then to propose. The top bar shows the current mode ("Shallow mode" or "Deep mode"; hover, focus or tap it for the limits and a link to Settings). In shallow mode the empty chat explains the limit, the first reply of each chat has a one-line note (once per chat; dismiss it and it stays away in this browser), and a reply that stops at its budget says so and links to Settings. In Settings, **My Gemini key is on a paid plan (deep mode)** sets `GEMINI_PAID`. `GEMINI_PAID` is your statement, not a check, because the app cannot tell a free key from a paid one. A free key declared paid gets deep limits it cannot sustain.
 
 ### Run it
 
@@ -88,7 +88,7 @@ python scripts/demo_server.py          # then open http://127.0.0.1:8770/  (--po
 
 It has a fake broker, made-up prices and news, no network access, and a scripted model that reacts to words in your message. It is not a language model, so its answers show how the screens work, not what a real model writes. After Confirm the fake broker fills the order over a few seconds, so the order timeline moves. It starts in a few seconds, keeps its state in a temporary directory that is deleted on exit, and never reads or writes your `.env` or `data/`. Messages to try: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, and `Summarise https://research.example.com/market-note` (a page with a planted instruction). `python scripts/demo_server.py --help` lists the rest.
 
-The demo accepts test keys in Settings for any provider, and calls no provider: `demo-valid-key` is accepted, `demo-invalid-key` is rejected, and any other key counts as unreachable.
+The demo accepts test keys in Settings for any provider, and calls no provider: `demo-valid-key` is accepted, `demo-invalid-key` is rejected, `demo-limited-key` is accepted but rate limited (saved with a warning), and any other key counts as unreachable. The demo starts in deep mode, because its Gemini key is declared paid: clear **My Gemini key is on a paid plan (deep mode)** in Settings to see shallow mode.
 
 ### Live checks
 
@@ -810,7 +810,7 @@ flowchart LR
 
 ### 모델 제공자
 
-기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**의 **모델** 섹션에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 제공자마다 키가 저장돼 있는지 표시하고, 키를 발급하는 페이지 링크를 보여 줍니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 키가 저장된 제공자를 고르면 목록을 불러오고, 키를 입력했다면 **모델 목록 불러오기**로 불러올 수 있습니다. **모델 ID 직접 입력**도 받습니다. 앱은 키 입력란을 미리 채우지 않으며 저장할 때마다 비웁니다. 키는 로컬 `.env`에만 기록됩니다.
+기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**의 **모델** 섹션에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 제공자마다 키가 저장돼 있는지 표시하고, 키 입력란에는 선택한 제공자의 키 발급 페이지 링크가 있습니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 패널을 열 때나 키가 저장된 제공자를 고를 때 목록을 불러오고, 새 키를 입력했다면 **모델 목록 불러오기**로 불러옵니다. OpenAI 모델은 추론 강도를 쓰지 않으므로 OpenAI에서는 이 항목이 꺼집니다. **모델 ID 직접 입력**도 받습니다. 앱은 키 입력란을 미리 채우지 않으며 저장할 때마다 비웁니다. 키는 로컬 `.env`에만 기록됩니다.
 
 저장하기 전에, 제공자·모델·키를 바꾸면 작은 모델 호출 한 번으로 확인합니다. 거부된 키나 쓸 수 없는 모델은 저장을 거절하고, 제공자에 닿지 못하면 아무것도 저장하지 않으며, 요청 한도에 걸린 키는 경고와 함께 저장합니다. 전환은 다음 답변부터 적용되며 채팅뿐 아니라 `/answer`에도 적용됩니다. OpenAI 호환 서버를 쓰려면 `.env`에 `OPENAI_BASE_URL`을 지정하십시오. 설정 화면에는 이 항목이 없습니다. Gemini 검색 그라운딩은 어느 제공자가 채팅을 맡든 Gemini 키만 있으면 되고, Gemini 3.x에서는 결제가 활성화된 키가 필요합니다.
 
@@ -823,7 +823,7 @@ flowchart LR
 | **얕은 리서치 모드**(shallow) | Gemini 사용 시. 단, 키가 유료라고 선언하면(`GEMINI_PAID=true`) 제외 | 4 (`SHALLOW_MAX_ROUNDS`) | 150초 (`SHALLOW_TIME_BUDGET_SEC`) |
 | **심층 리서치 모드**(deep) | OpenAI, Anthropic, 또는 `GEMINI_PAID=true`인 Gemini | 12 (`CHAT_MAX_ROUNDS`) | 300초 (`CHAT_TIME_BUDGET_SEC`) |
 
-라운드는 모델 호출 한 번과 그 호출이 요청한 도구 호출을 합친 단위입니다. 얕은 리서치 모드에서는 프롬프트가 모델에게 한 라운드는 상황 파악에, 한 라운드는 리서치에 쓰고 그다음에 제안하라고 지시합니다. 상단 바에 현재 모드("얕은 리서치 모드" 또는 "심층 리서치 모드")가 표시되며, 마우스를 올리거나 포커스를 주거나 탭하면 한도와 설정 링크를 보여 줍니다. 얕은 리서치 모드에서는 빈 채팅 화면에 한도를 설명하고, 대화의 첫 답변 위에 닫을 수 있는 한 줄 안내를 띄우며, 한도에서 멈춘 답변에는 그 사실과 설정 링크가 붙습니다. 설정의 **Gemini 키가 유료 요금제입니다** 체크박스가 `GEMINI_PAID`를 정합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다. 앱은 무료 키와 유료 키를 구별할 수 없으므로, 무료 키를 유료라고 선언하면 감당하지 못할 심층 리서치 모드 한도가 적용됩니다.
+라운드는 모델 호출 한 번과 그 호출이 요청한 도구 호출을 합친 단위입니다. 얕은 리서치 모드에서는 프롬프트가 모델에게 한 라운드는 상황 파악에, 한 라운드는 리서치에 쓰고 그다음에 제안하라고 지시합니다. 상단 바에 현재 모드("얕은 리서치 모드" 또는 "심층 리서치 모드")가 표시되며, 마우스를 올리거나 포커스를 주거나 탭하면 한도와 설정 링크를 보여 줍니다. 얕은 리서치 모드에서는 빈 채팅 화면에 한도를 설명하고, 대화마다 첫 답변 위에 한 줄 안내를 한 번 띄우며(닫으면 이 브라우저에서는 다시 나오지 않습니다), 한도에서 멈춘 답변에는 그 사실과 설정 링크가 붙습니다. 설정의 **Gemini 키가 유료 요금제입니다 (심층 리서치 모드)** 체크박스가 `GEMINI_PAID`를 정합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다. 앱은 무료 키와 유료 키를 구별할 수 없으므로, 무료 키를 유료라고 선언하면 감당하지 못할 심층 리서치 모드 한도가 적용됩니다.
 
 ### 실행
 
@@ -844,7 +844,7 @@ python scripts/demo_server.py          # 이후 http://127.0.0.1:8770/ 를 엽�
 
 가짜 브로커, 지어낸 가격과 뉴스, 차단된 네트워크, 그리고 메시지의 단어에 반응하는 스크립트 모델로 구성됩니다. 언어 모델이 아니므로 그 답변은 화면이 어떻게 동작하는지를 보여 줄 뿐, 실제 모델이 쓰는 글을 보여 주지는 않습니다. 승인하면 가짜 브로커가 몇 초에 걸쳐 주문을 체결하므로 주문 타임라인이 움직입니다. 몇 초 안에 시작하고, 상태는 종료할 때 삭제되는 임시 디렉터리에 두며, `.env`와 `data/`를 읽거나 쓰지 않습니다. 시험해 볼 메시지: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, `Summarise https://research.example.com/market-note`(지시문이 심어진 페이지). 나머지는 `python scripts/demo_server.py --help`에 있습니다.
 
-데모는 설정 화면에서 모든 제공자에 대해 테스트 키를 받으며, 실제 제공자는 호출하지 않습니다. `demo-valid-key`는 통과하고, `demo-invalid-key`는 거절되며, 그 밖의 키는 연결 불가로 처리됩니다.
+데모는 설정 화면에서 모든 제공자에 대해 테스트 키를 받으며, 실제 제공자는 호출하지 않습니다. `demo-valid-key`는 통과하고, `demo-invalid-key`는 거절되며, `demo-limited-key`는 통과하지만 요청 한도에 걸린 것으로 처리되어 경고와 함께 저장되고, 그 밖의 키는 연결 불가로 처리됩니다. 데모의 Gemini 키는 유료로 선언되어 있어 심층 리서치 모드로 시작합니다. 얕은 리서치 모드를 보려면 설정에서 **Gemini 키가 유료 요금제입니다 (심층 리서치 모드)** 체크를 해제하십시오.
 
 ### 실서비스 점검
 
