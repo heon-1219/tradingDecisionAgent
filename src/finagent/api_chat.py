@@ -16,8 +16,10 @@ action first calls `TicketStore.expire_stale()`.
 **Ticket results** are `{status, message, ticket, orders, new_ticket}` with this HTTP mapping:
 submitted 200; requote 409 on confirm (the new ticket is in `new_ticket`) but 200 on refresh (that
 is what refresh is for); disabled 423; expired 410; not_found 404; rejected 200 for a ticket the
-user has rejected (reject is idempotent), 410 for an expired ticket (expire_stale runs first, so
-the executor reports it as rejected), else 409 (hash mismatch, wrong state, nothing executable);
+user has rejected (reject is idempotent), 410 for an expired ticket on confirm and reject
+(expire_stale runs first, so the executor reports it as rejected), else 409 (hash mismatch, wrong
+state, nothing executable). Refresh re-quotes the chat's newest ticket even after it expired (200
+requote), so a refused refresh of an expired ticket is 409: a newer ticket exists;
 error 502. No broker: confirm and refresh answer 503 `broker_not_connected`; reject still works (it
 is a local state change, `execution.reject_ticket`), so a card can be dismissed after the keys are
 cleared.
@@ -183,7 +185,7 @@ def status_for(action: str, result: ConfirmResult) -> int:
     if status == "rejected":
         if action == "reject" and ticket_status == TicketStatus.rejected_by_user:
             return 200
-        if ticket_status == TicketStatus.expired:
+        if ticket_status == TicketStatus.expired and action != "refresh":
             return 410
         return 409
     return 502
@@ -287,6 +289,8 @@ async def get_session(session_id: SessionId, rt: Runtime):
         "session": session,
         "messages": rt.sessions.messages(session_id, limit=50),
         "active_ticket": _dump(rt.tickets.active(session_id)),
+        # every ticket of the chat, oldest first: a reload shows requotes no turn mentions
+        "tickets": rt.tickets.for_session(session_id),
         "mandate": (mandate or Mandate()).model_dump(mode="json"),
         "mandate_saved": mandate is not None,
     })

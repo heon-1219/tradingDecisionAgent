@@ -740,6 +740,73 @@ async def test_refresh_from_another_session_is_not_found(world):
     assert result.status == "not_found"
 
 
+async def _expired(world: World, legs: list[OrderLeg]) -> Ticket:
+    ticket = await world.propose(legs)
+    world.clock.now = ticket.expires_at + timedelta(seconds=1)
+    world.tickets.expire_stale()
+    assert world.tickets.get(ticket.id).status == TicketStatus.expired
+    return ticket
+
+
+async def test_refresh_requotes_the_sessions_newest_ticket_after_it_expired(world):
+    ticket = await _expired(world, [key_market()])
+    await world.propose([aapl()], session_id="sess-other")  # another chat's tickets do not count
+    world.data.set_price("KEY", "15.50")
+
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert result.status == "requote", result.message
+    assert result.ticket.status == TicketStatus.expired  # terminal: it stays expired
+    new = result.new_ticket
+    assert new.status == TicketStatus.proposed
+    assert new.quote_as_of == world.clock()
+    assert new.expires_at > world.clock()
+    assert new.decisions[0].est_price > ticket.decisions[0].est_price
+    assert world.tickets.get(ticket.id).status == TicketStatus.expired
+    assert world.tickets.latest(SESSION).id == new.id
+    assert world.tickets.active(SESSION).id == new.id
+    assert world.broker.submits == 0
+
+    # refreshing the expired ticket again: the requote is newer now, so nothing is created
+    again = await world.executor.refresh(ticket.id, SESSION)
+    assert again.status == "rejected" and again.new_ticket is None
+    assert "a newer ticket exists" in again.message
+    assert [t["id"] for t in world.tickets.for_session(SESSION)] == [ticket.id, new.id]
+
+
+async def test_refresh_of_an_expired_ticket_that_is_not_the_newest_is_rejected(world):
+    old = await _expired(world, [aapl()])
+    newer = await world.propose([key_market()])
+
+    result = await world.executor.refresh(old.id, SESSION)
+
+    assert result.status == "rejected" and result.new_ticket is None
+    assert "a newer ticket exists" in result.message
+    assert world.tickets.get(old.id).status == TicketStatus.expired
+    assert world.tickets.get(newer.id).status == TicketStatus.proposed
+    assert [t["id"] for t in world.tickets.for_session(SESSION)] == [old.id, newer.id]
+
+
+async def test_an_expired_refresh_loses_to_a_proposal_made_while_it_re_evaluates(world):
+    ticket = await _expired(world, [key_market()])
+    original = world.broker.account
+    meanwhile: dict = {"armed": True}
+
+    async def propose_during_account():
+        if meanwhile["armed"]:
+            meanwhile["armed"] = False
+            meanwhile["ticket"] = await world.propose([aapl()])  # a chat turn, mid-refresh
+        return await original()
+
+    world.broker.account = propose_during_account
+    result = await world.executor.refresh(ticket.id, SESSION)
+
+    assert result.status == "rejected" and result.new_ticket is None
+    assert "a newer ticket exists" in result.message
+    assert world.tickets.active(SESSION).id == meanwhile["ticket"].id  # the proposal is not superseded
+    assert len(world.tickets.for_session(SESSION)) == 2
+
+
 # --- build_context ----------------------------------------------------------------------------
 
 

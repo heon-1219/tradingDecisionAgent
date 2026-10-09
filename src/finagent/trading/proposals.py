@@ -426,6 +426,29 @@ class TicketStore:
                 return ticket
         return None
 
+    def latest(self, session_id: str) -> Ticket | None:
+        """The newest ticket of `session_id` in any status (by `created_at`, then insertion order),
+        or None. Used to decide whether an expired ticket may still be re-quoted: only the newest
+        one may. Raises `TicketStateError` for a row that cannot be parsed, as `get()` does."""
+        rows = self._db.query(
+            "SELECT id FROM tickets WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (session_id,),
+        )
+        return self.get(rows[0]["id"]) if rows else None
+
+    def for_session(self, session_id: str, limit: int = 50) -> list[dict]:
+        """`{"id", "status", "created_at"}` for the newest `limit` tickets of `session_id`, oldest
+        first: what a reloaded chat needs to show every ticket, including requotes that no chat
+        turn mentions. Read from the row's columns only (no body is parsed, so a corrupt row is
+        still listed); the session is matched exactly in SQL."""
+        rows = self._db.query(
+            "SELECT id, status, created_at FROM tickets WHERE session_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (session_id, max(0, int(limit))),
+        )
+        rows.reverse()
+        return [{"id": row["id"], "status": row["status"], "created_at": row["created_at"]} for row in rows]
+
     def transition(
         self,
         ticket_id: str,

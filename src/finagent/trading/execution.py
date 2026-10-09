@@ -73,12 +73,16 @@ ticket is never stranded in `submitting`. `run.persisted` is set only once that 
 locked database, say) is retried once by the handler. Cancellation is then re-raised; any other
 exception becomes an `error` result (or the normal submission result, if everything was saved).
 
-**refresh(ticket_id, session_id)** re-evaluates a still-`proposed` ticket at current prices. Like
-confirm, it acts on the old ticket only through a CAS: after the re-evaluation it first checks
-there is something executable (if not: `rejected`, and the old ticket is left untouched), then
-moves the old ticket `proposed -> superseded` - if a confirm, reject or expiry got there first,
-that CAS fails and refresh returns `rejected` without creating anything - and only then creates the
-new ticket. So a refresh racing a confirm can never leave a second live copy of the same trade.
+**refresh(ticket_id, session_id)** re-evaluates a `proposed` ticket at current prices, or an
+`expired` one when it is the session's newest ticket (`TicketStore.latest`), so that the person
+who let a quote lapse can ask for a fresh one; an expired ticket that is not the newest, or one
+already re-quoted, is `rejected` ("a newer ticket exists"). Like confirm, it acts on the old ticket
+only through a CAS: after the re-evaluation it first checks there is something executable (if not:
+`rejected`, and the old ticket is left untouched), then moves a proposed ticket `proposed ->
+superseded` - if a confirm, reject or expiry got there first, that CAS fails and refresh returns
+`rejected` without creating anything - and only then creates the new ticket. An expired ticket is
+terminal and stays as it is. So a refresh racing a confirm can never leave a second live copy of
+the same trade.
 
 **One active ticket per session.** `TicketStore.create` supersedes every other `proposed` ticket in
 the session, so a requote (from confirm or refresh) also supersedes any unrelated proposal made in
@@ -169,6 +173,7 @@ NOT_PAPER_MESSAGE = (
     "accounts only: trading is disconnected until paper-trading keys are saved in Settings."
 )
 _DEFAULT_TTL_SEC = 300
+_NEWER_TICKET = "ticket is expired and a newer ticket exists; nothing was re-quoted"
 _CENT = Decimal("0.01")
 _SUB_PENNY = Decimal("0.0001")
 _HUNDRED = Decimal("100")
@@ -687,6 +692,16 @@ class Executor:
             new_ticket=new_ticket,
         )
 
+    def _is_newest(self, ticket: Ticket) -> bool:
+        """Whether `ticket` is still its session's newest ticket. Only that one may be re-quoted
+        after it expired: an older one has been replaced already (by a later proposal, or by an
+        earlier refresh of this very ticket). An unreadable newer row counts as newer."""
+        try:
+            newest = self._tickets.latest(ticket.session_id)
+        except TicketStateError:
+            return False
+        return newest is not None and newest.id == ticket.id
+
     def _new_ticket(self, ticket: Ticket, decisions: list[RiskDecision], mandate: Mandate) -> Ticket:
         """The re-quoted copy of `ticket`, recorded in the ledger as shown (a `proposal` entry,
         like the one the chat toolbox writes for a ticket the model proposed)."""
@@ -989,7 +1004,10 @@ class Executor:
         loaded = self._load(ticket_id, session_id)
         if isinstance(loaded, ConfirmResult):
             return loaded
-        if loaded.status != TicketStatus.proposed:
+        lapsed = loaded.status == TicketStatus.expired
+        if lapsed and not self._is_newest(loaded):
+            return ConfirmResult("rejected", loaded, [], _NEWER_TICKET)
+        if not lapsed and loaded.status != TicketStatus.proposed:
             return ConfirmResult("rejected", loaded, [], f"ticket is {loaded.status.value}")
         try:
             ctx = await self.build_context([leg.symbol for leg in loaded.legs])
@@ -1008,19 +1026,25 @@ class Executor:
             return ConfirmResult(
                 "rejected", loaded, [], f"No leg can be placed at current prices: {reasons}"
             )
-        # Supersede the old ticket FIRST, through a CAS: if a confirm, reject or expiry moved it
+        # Supersede a proposed ticket FIRST, through a CAS: if a confirm, reject or expiry moved it
         # while we were re-evaluating, we lose here and create nothing - so there is never a
-        # second live copy of a trade that is already being (or has been) submitted.
-        try:
-            superseded = self._tickets.transition(
-                loaded.id, {TicketStatus.proposed}, TicketStatus.superseded
-            )
-        except TicketStateError:
-            current = self._latest(loaded.id, loaded)
-            return ConfirmResult(
-                "rejected", current, [],
-                f"ticket is {current.status.value}; nothing was re-quoted",
-            )
+        # second live copy of a trade that is already being (or has been) submitted. An expired
+        # ticket is terminal: it stays expired, and nothing can confirm it.
+        if lapsed:
+            if not self._is_newest(loaded):  # a chat turn proposed something meanwhile
+                return ConfirmResult("rejected", loaded, [], _NEWER_TICKET)
+            superseded = loaded
+        else:
+            try:
+                superseded = self._tickets.transition(
+                    loaded.id, {TicketStatus.proposed}, TicketStatus.superseded
+                )
+            except TicketStateError:
+                current = self._latest(loaded.id, loaded)
+                return ConfirmResult(
+                    "rejected", current, [],
+                    f"ticket is {current.status.value}; nothing was re-quoted",
+                )
         try:
             new_ticket = self._new_ticket(loaded, decisions, mandate)
         except ValueError as exc:
