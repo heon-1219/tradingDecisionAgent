@@ -10,11 +10,15 @@ import {
   advance, clock, decision, dispatch, document, finish, flush, leg, liveTurn, net, on, order, replayTurn, setState,
   sources, test, ticker, ticket,
 } from './component_harness.mjs';
+import { setLang } from '../web/app/js/i18n.js';
 
 const { calls } = net;
 const cardOf = (turn) => turn.slots.extras.querySelector('.ticket');
 const button = (card, cls) => card.querySelector(`.${cls}`);
 const noticeText = (card) => card.querySelector('.ticket-notice').textContent;
+// The server's own words, kept in a collapsed detail row (only when they add something).
+const serverDetail = (card) => card.querySelector('.ticket-notice').querySelector('.notice-detail');
+const confirmPosts = () => calls.filter((c) => c.method === 'POST' && c.path.endsWith('/confirm'));
 // E1 is a known source of chat s1; the tickets below also cite E9, which is not.
 sources.seedSources('s1', [{ id: 'E1', title: 'Alpaca IEX quotes', publisher: 'Alpaca Markets', tier: 1 }]);
 
@@ -126,7 +130,12 @@ await test('confirm 200: sends the hash once, shows the order timeline, no Confi
   assert.equal(card.getAttribute('data-state'), 'submitted');
   assert.equal(button(card, 'btn-confirm'), null);
   assert.equal(card.querySelector('.ticket-actions'), null);
-  assert.equal(noticeText(card), '1 of 1 orders placed.');
+  // the banner is built from the structured result, in the interface language
+  const summary = card.querySelector('.ticket-notice');
+  assert.equal(summary.querySelector('.notice-text').textContent, '1 of 1 orders were sent to the paper account.');
+  assert.equal(summary.querySelector('.notice-order').textContent, 'BUY▲VOO3 sharesLimit $612.00 · DayFilled');
+  assert.equal(serverDetail(card), null, 'everything placed: the server text adds nothing');
+  assert.ok(!noticeText(card).includes('orders placed.'));
   const row = card.querySelector('.timeline-row');
   assert.equal(row.querySelector('.timeline-main').textContent, 'BUY▲VOO3 shares');
   assert.ok(row.querySelector('.timeline-status').textContent.includes('Filled'));
@@ -134,9 +143,29 @@ await test('confirm 200: sends the hash once, shows the order timeline, no Confi
   assert.equal(card.querySelector('.timeline-foot').textContent, 'Every order is final.');
 });
 
+await test('a click queued against a button that was already replaced sends nothing while busy', async () => {
+  const tk = ticket();
+  let open;
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 200,
+    gate: new Promise((resolve) => { open = resolve; }),
+    body: { status: 'submitted', message: 'ok', ticket: { ...tk, status: 'submitted' }, orders: [order()], new_ticket: null } },
+  ticketRead({ ...tk, status: 'submitted' }, [{ client_order_id: 'c0', broker_order_id: 'o1', order: order() }])];
+  const { card } = propose(tk);
+  calls.length = 0;
+  const confirm = button(card, 'btn-confirm');
+  confirm.click();
+  // The card re-rendered at once; a second click event aimed at the old node (a double click the
+  // browser had already queued) still reaches its listener. The busy guard must drop it.
+  assert.notEqual(button(card, 'btn-confirm'), confirm);
+  confirm.dispatch('click');
+  open();
+  await flush();
+  assert.equal(confirmPosts().length, 1);
+});
+
 await test('confirm 409 requote: old → new price, the old card retires, the new one needs its own Confirm', async () => {
   const tk = ticket();
-  const next = ticket({ decisions: [decision(0, {}, { est_price: '612.40', est_cost_usd: '1837.20' })], hash: 'b'.repeat(64) });
+  const next = ticket({ decisions: [decision(0, {}, { est_price: '612.40', est_cost_usd: '1837.20' })] });
   net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 409, body: { status: 'requote', message: 'Prices moved', ticket: { ...tk, status: 'superseded' }, orders: [], new_ticket: next } }];
   const { turn, card } = propose(tk);
   button(card, 'btn-confirm').click();
@@ -151,6 +180,15 @@ await test('confirm 409 requote: old → new price, the old card retires, the ne
   assert.equal(cards[1].getAttribute('data-state'), 'proposed');
   assert.equal(button(cards[1], 'btn-confirm').disabled, false);
   assert.equal(calls.filter((c) => c.method === 'POST' && c.path.includes(next.id)).length, 0, 'the new ticket is not confirmed for the user');
+  // confirming the new card sends the NEW ticket's id and hash, never the old one's
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${next.id}/confirm`, status: 200, body: {
+    status: 'submitted', message: 'ok', ticket: { ...next, status: 'submitted' }, orders: [order()], new_ticket: null } },
+  ticketRead({ ...next, status: 'submitted' }, [{ client_order_id: 'c0', broker_order_id: 'o1', order: order() }])];
+  calls.length = 0;
+  button(cards[1], 'btn-confirm').click();
+  await flush();
+  assert.deepEqual(confirmPosts().map((c) => [c.path, c.body.hash]), [[`/api/tickets/${next.id}/confirm`, next.hash]]);
+  assert.notEqual(next.hash, tk.hash);
   cards[1].remove();
 });
 
@@ -165,14 +203,30 @@ await test('confirm 409 rejected, 410, 423, 503, 404: each has its own message a
     return card;
   };
   // 409 rejected (the hash no longer matches): the message is shown, the card stays confirmable
-  let card = await run(409, (tk) => ({ status: 'rejected', ticket: tk }));
-  assert.equal(noticeText(card), 'server says no');
+  let changedHash = null;
+  let card = await run(409, (tk) => {
+    changedHash = 'f'.repeat(64);
+    return { status: 'rejected', ticket: { ...tk, hash: changedHash } };
+  });
+  assert.equal(card.querySelector('.ticket-notice').querySelector('.notice-text').textContent,
+    'The ticket changed on the server, so nothing was submitted. Review it and confirm again.');
+  assert.equal(serverDetail(card).textContent, 'Details from the serverserver says no');
+  assert.equal(serverDetail(card).hasAttribute('open'), false);
+  // the next confirm sends the ticket's new hash, as the server now has it
+  const id = card.getAttribute('data-ticket-id');
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${id}/confirm`, status: 409,
+    body: { status: 'rejected', message: 'again', ticket: null, orders: [], new_ticket: null } }];
+  calls.length = 0;
+  button(card, 'btn-confirm').click();
+  await flush();
+  assert.deepEqual(confirmPosts().map((c) => c.body.hash), [changedHash]);
   assert.equal(card.getAttribute('data-state'), 'proposed');
   assert.equal(button(card, 'btn-confirm').disabled, false);
   card.remove();
   // 409 rejected because the ticket was already submitted: the returned ticket decides the state
   card = await run(409, (tk) => ({ status: 'rejected', ticket: { ...tk, status: 'rejected_by_user' } }));
   assert.equal(card.getAttribute('data-state'), 'rejected_by_user');
+  assert.ok(noticeText(card).startsWith('This ticket can no longer be confirmed.'));
   assert.equal(button(card, 'btn-confirm'), null);
   // 410: greyed, with Refresh quote
   card = await run(410, (tk) => ({ status: 'expired', ticket: { ...tk, status: 'expired' } }));
@@ -181,6 +235,7 @@ await test('confirm 409 rejected, 410, 423, 503, 404: each has its own message a
   // 423: trading is disabled, a link opens Settings, nothing else changes
   card = await run(423, () => ({ status: 'disabled', ticket: null }));
   assert.ok(noticeText(card).includes('Trading is disabled'));
+  assert.equal(serverDetail(card), null, 'the localized text says it all');
   const opened = [];
   const stop = on('panel:open', (name) => opened.push(name));
   card.querySelector('.ticket-notice').querySelector('button').click();
@@ -212,8 +267,9 @@ await test('confirm 502: "check open orders", the portfolio reloads, and no blin
   await flush();
   stop();
   assert.ok(refreshed.length >= 1);
-  assert.ok(noticeText(card).includes('0 of 1 orders placed, 1 uncertain.'));
+  assert.ok(noticeText(card).startsWith('The confirmation did not finish, and orders may have been placed.'));
   assert.ok(noticeText(card).includes('Check your open orders'));
+  assert.equal(serverDetail(card).querySelector('.notice-line').textContent, '0 of 1 orders placed, 1 uncertain.');
   assert.equal(button(card, 'btn-confirm'), null);
   assert.equal(card.getAttribute('data-state'), 'submitted');
   assert.equal(card.querySelector('.timeline-row').textContent.startsWith('Uncertain'), true);
@@ -227,6 +283,57 @@ await test('confirm 502: "check open orders", the portfolio reloads, and no blin
   assert.equal(button(second, 'btn-confirm'), null);
   assert.ok(second.querySelector('.ticket-notice').querySelectorAll('button').map((b) => b.textContent).includes('Check again'));
   second.remove();
+});
+
+await test('Korean: the confirm result is summarised in Korean; the server text only in the detail row', async () => {
+  setLang('ko');
+  try {
+    const tk = ticket({ decisions: [decision(0), decision(1, { symbol: 'BND', qty: '33', limit_price: '74.01' })] });
+    const message = '1 of 2 orders placed, 1 failed. Leg 2 BUY 33 BND @ limit $74.01: error - insufficient buying power.';
+    net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 200, body: {
+      status: 'submitted', message, ticket: { ...tk, status: 'submitted' }, orders: [order({ status: 'accepted', filled_qty: '0' })],
+      new_ticket: null } },
+    ticketRead({ ...tk, status: 'submitted' }, [{ client_order_id: 'c0', broker_order_id: 'o1', order: order({ status: 'accepted', filled_qty: '0' }) }])];
+    const { card } = propose(tk);
+    assert.equal(button(card, 'btn-confirm').textContent, '주문 2건 승인');
+    button(card, 'btn-confirm').click();
+    await flush();
+    const summary = card.querySelector('.ticket-notice');
+    assert.equal(summary.querySelector('.notice-text').textContent, '주문 2건 중 1건을 모의 계좌로 보냈습니다.');
+    assert.equal(summary.querySelector('.notice-order').textContent, '매수▲VOO3주지정가 $612.00 · 당일접수됨');
+    assert.ok(summary.textContent.includes('일부 주문은 들어가지 않았습니다'));
+    // English appears only inside the collapsed detail row
+    const outside = [...summary.querySelectorAll('.notice-text, .notice-order')].map((n) => n.textContent).join(' ');
+    assert.ok(!/orders placed|insufficient/.test(outside));
+    assert.equal(serverDetail(card).querySelector('.notice-line').textContent, message);
+  } finally {
+    setLang('en');
+  }
+});
+
+await test('a ticket the app cannot read is never confirmable under a wrong label', async () => {
+  net.routes = [portfolio];
+  // a side in capitals is still a buy; an exponent quantity is still a number
+  const upper = propose(ticket({ decisions: [decision(0, { side: 'BUY', qty: '1E+1' })] })).card;
+  assert.equal(button(upper, 'btn-confirm').textContent, 'Confirm buy 10 VOO');
+  assert.equal(button(upper, 'btn-confirm').disabled, false);
+  assert.equal(upper.querySelector('.side-badge').textContent, 'BUY▲');
+  for (const bad of [{ side: 'short' }, { qty: 'abc' }, { qty: null, notional: null }, { side: undefined }]) {
+    const card = propose(ticket({ decisions: [decision(0, bad)] })).card;
+    const confirm = button(card, 'btn-confirm');
+    assert.equal(confirm.textContent, 'Confirm ticket', JSON.stringify(bad));
+    assert.equal(confirm.disabled, true, JSON.stringify(bad));
+    assert.ok(card.querySelector('.ticket-caveat').textContent.includes('cannot read'), JSON.stringify(bad));
+    calls.length = 0;
+    confirm.dispatch('click'); // even a click that reaches the listener sends nothing
+    await flush();
+    assert.equal(confirmPosts().length, 0, JSON.stringify(bad));
+    card.remove();
+  }
+  // one unreadable leg among good ones makes the whole ticket unconfirmable
+  const mixed = propose(ticket({ decisions: [decision(0), decision(1, { side: 'hold' })] })).card;
+  assert.equal(button(mixed, 'btn-confirm').textContent, 'Confirm ticket');
+  assert.equal(button(mixed, 'btn-confirm').disabled, true);
 });
 
 await test('reject, and Modify through the chat', async () => {

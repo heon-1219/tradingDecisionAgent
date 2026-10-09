@@ -226,11 +226,108 @@ _FORBIDDEN = ("insertAdjacentHTML", "document.write", "eval(", "new Function", "
 SRCDOC_FILE = "js/components/grounding.js"
 
 
+_REGEX_BEFORE = set("(,=:[!&|?{};+-*%<>~^")
+
+
+def strip_comments(text: str) -> str:
+    """`text` with every `//` and `/* */` comment blanked out (newlines kept, so line numbers hold).
+    Strings and template literals are kept as they are, and so are regex literals: a `/` that
+    follows an operator, a bracket or `return` opens one. A line that merely starts with `*` is code
+    unless it is inside a block comment."""
+    out = []
+    i, n = 0, len(text)
+    state = "code"
+    last = ""  # the last significant code character, to tell a regex from a division
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if state == "code":
+            if c == "/" and nxt == "/":
+                state = "line"
+                out.append("  ")
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block"
+                out.append("  ")
+                i += 2
+                continue
+            if c in "'\"`":
+                state = c
+            elif c == "/" and (last in _REGEX_BEFORE or last == "" or "".join(out).rstrip().endswith("return")):
+                j, in_class = i + 1, False
+                while j < n and text[j] != "\n":
+                    if text[j] == "\\":
+                        j += 2
+                        continue
+                    if text[j] == "[":
+                        in_class = True
+                    elif text[j] == "]":
+                        in_class = False
+                    elif text[j] == "/" and not in_class:
+                        break
+                    j += 1
+                out.append(text[i:j + 1])
+                i = j + 1
+                last = "/"
+                continue
+            out.append(c)
+            if not c.isspace():
+                last = c
+            i += 1
+        elif state == "line":
+            if c == "\n":
+                state = "code"
+                out.append(c)
+            else:
+                out.append(" ")
+            i += 1
+        elif state == "block":
+            if c == "*" and nxt == "/":
+                state = "code"
+                out.append("  ")
+                i += 2
+            else:
+                out.append("\n" if c == "\n" else " ")
+                i += 1
+        else:  # inside a string or a template literal
+            out.append(c)
+            if c == "\\":
+                out.append(nxt)
+                i += 2
+                continue
+            if c == state:
+                state = "code"
+                last = c
+            i += 1
+    return "".join(out)
+
+
 def _code_lines(path):
-    """(line number, code without `//` comments) for every line that is not inside a comment block."""
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.lstrip().startswith(("*", "/*")):
-            yield number, line.split("//")[0], line
+    """(line number, code with the comments blanked out, the raw line) for every line of `path`."""
+    text = path.read_text(encoding="utf-8")
+    for number, (code, line) in enumerate(zip(strip_comments(text).split("\n"), text.split("\n")), 1):
+        yield number, code, line
+
+
+def test_the_comment_stripper_keeps_code_and_drops_comments():
+    sample = (
+        "const a = '//not a comment'; // a comment\n"
+        "/* block\n"
+        " * parseFloat(x) inside the block\n"
+        " */\n"
+        "const b = 2\n"
+        "  * parseFloat(c); // a continued expression on a line starting with *\n"
+        "const re = /[/'\"]+/g; const d = e / f; // regex and division\n"
+        "const t = `${x} // kept`;\n"
+    )
+    lines = strip_comments(sample).split("\n")
+    assert lines[0].rstrip() == "const a = '//not a comment';"
+    assert "parseFloat" not in lines[2]
+    assert "parseFloat(c)" in lines[5]  # a line that starts with `*` outside a comment is code
+    assert lines[6].rstrip() == "const re = /[/'\"]+/g; const d = e / f;"
+    assert lines[7] == "const t = `${x} // kept`;"
+    assert len(lines) == len(sample.split("\n"))
 
 
 def test_js_never_assigns_non_constant_html():
@@ -270,31 +367,55 @@ def test_third_party_html_only_ever_goes_into_a_locked_sandbox():
 
 # Money is a decimal string from the server and is never converted to a float: arithmetic and
 # formatting go through js/decimal.js (scaled BigInt). A line in the components that needs one of
-# these calls for something that is not money (seconds, pixels) says so in a `// not money:` comment.
-_FLOAT_CALLS = ("parseFloat(", "Number(", "parseInt(", ".toFixed(", "Math.round(")
+# these for something that is not money (seconds, pixels) says so in a `// not money:` comment.
+_MONEY_WORD = r"\w*(?:price|cost|amount|value|cash|equity|qty|quantity|notional|total|money|power|proceeds|pl)\w*"
+_FLOAT_PATTERNS = (
+    re.compile(r"\bparseFloat\("),
+    re.compile(r"(?<![\w.$])Number\("),
+    re.compile(r"\bparseInt\("),
+    re.compile(r"\.toFixed\("),
+    re.compile(r"\.toPrecision\("),
+    re.compile(r"\bMath\.round\("),
+    re.compile(r"\bMath\.(?:floor|trunc|ceil)\([^;]*\b" + _MONEY_WORD, re.I),
+    re.compile(r"\*\s*1(?![\w.])"),  # `x * 1`: a coercion to a number
+    re.compile(r"NumberFormat\([^;]*\)\s*\.format\("),
+    # unary plus on a value: `+x`, `(+x)`, `= +x`, `return +x` (not `a + b`, `x++` or `+=`)
+    re.compile(r"(?:^|[=(,:?!&|{\[;]|\breturn|\btypeof)\s*\+(?![+=])\s*[A-Za-z_$(]"),
+)
+
+
+def _float_uses(code: str) -> list[str]:
+    return [pattern.pattern for pattern in _FLOAT_PATTERNS if pattern.search(code)]
 
 
 def test_components_never_put_money_through_a_float():
     assert COMPONENT_FILES
-    for path in COMPONENT_FILES:
+    for path in [*COMPONENT_FILES, JS_DIR / "decimal.js"]:
         for number, code, line in _code_lines(path):
-            used = [call for call in _FLOAT_CALLS if call in code]
+            used = _float_uses(code)
             if used:
                 assert "// not money:" in line, f"{_rel(path)}:{number}: {used[0]} without a '// not money:' note"
     decimal = (JS_DIR / "decimal.js").read_text(encoding="utf-8")
-    for call in ("parseFloat(", "Number(", "parseInt(", ".toFixed("):
-        assert call not in decimal, call
-    assert "BigInt(" in decimal
+    assert "BigInt(" in decimal and decimal.count("// not money:") <= 1  # only the exponent of "1E+1"
 
 
 def test_the_float_check_catches_what_it_should():
-    bad = ["const total = parseFloat(leg.qty) * parseFloat(leg.limit_price);", "x = Number(account.cash) - cost",
-           "cost.toFixed(2)", "Math.round(price * 100) / 100", "parseInt(value, 10)"]
-    good = ["const cost = mul(leg.qty, leg.limit_price);", "Number.isNaN(time)", "formatMoney(total)", "String(n)"]
+    bad = [
+        "const total = parseFloat(leg.qty) * parseFloat(leg.limit_price);", "x = Number(account.cash) - cost",
+        "cost.toFixed(2)", "Math.round(price * 100) / 100", "parseInt(value, 10)", "const p = +leg.limit_price;",
+        "show(+quote.ask)", "return +cost;", "const c = price * 1;", "Math.floor(order.notional / 2)",
+        "Math.trunc(buyingPower)", "new Intl.NumberFormat('en-US').format(cash)", "x.toPrecision(4)",
+        "`${+amount}`",
+    ]
+    good = [
+        "const cost = mul(leg.qty, leg.limit_price);", "Number.isNaN(time)", "formatMoney(total)", "String(n)",
+        "const label = 'a' + b;", "i += 1;", "count++;", "a + +1 === b", "x * 10", "Math.floor(ms / 1000)",
+        "Math.max(0, seconds)", "const sum = a + b + c;",
+    ]
     for line in bad:
-        assert any(call in line for call in _FLOAT_CALLS), line
-    for line in good:
-        assert not any(call in line for call in _FLOAT_CALLS), line
+        assert _float_uses(line), line
+    for line in good[:-3] + good[-2:]:
+        assert not _float_uses(line), line
 
 
 def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
@@ -303,9 +424,34 @@ def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
         for sink in ("localStorage", "sessionStorage", "storage.", "console.", "document.cookie"):
             assert sink not in code, f"{name}: {sink}"
     settings = (COMPONENTS_DIR / "settings.js").read_text(encoding="utf-8")
-    assert "input.type = secret ? 'password' : 'text';" in settings and "input.autocomplete = 'off';" in settings
+    assert "input.type = secret ? 'password' : 'text';" in settings
+    # new-password: browsers neither fill a saved password in nor offer to store one on their own
+    assert "input.autocomplete = secret ? 'new-password' : 'off';" in settings
     assert "for (const input of inputs) input.value = '';" in settings  # cleared after every save
     assert "input.value =" not in settings.replace("input.value = '';", "")  # never pre-filled
+
+
+def test_every_tool_of_the_toolbox_has_the_family_of_its_toolbox_group():
+    # The tool card's family comes from a fixed map in toolcard.js; the toolbox groups its tools
+    # under "# --- <group> ---" comments. Every tool must be in the map, in its own group's family.
+    source = (ROOT / "src" / "finagent" / "chat" / "toolbox.py").read_text(encoding="utf-8")
+    defs = source[source.index("_TOOL_DEFS: tuple"):]
+    defs = defs[: defs.index("\n)\n")]
+    groups: dict[str, str] = {}
+    group = None
+    for line in defs.splitlines():
+        m = re.match(r"\s{4}# --- (\w+)", line)
+        if m:
+            group = m.group(1)
+        m = re.match(r'\s{8}"(\w+)", \(', line)
+        if m:
+            groups[m.group(1)] = group
+    assert len(groups) >= 20 and set(groups.values()) == {"account", "market", "research", "knowledge", "mandate",
+                                                          "trading"}
+    card = (COMPONENTS_DIR / "toolcard.js").read_text(encoding="utf-8")
+    table = card[card.index("const TOOL_FAMILY = {"): card.index("};", card.index("const TOOL_FAMILY = {"))]
+    families = dict(re.findall(r"(\w+): '(\w+)'", table))
+    assert families == groups
 
 
 def test_the_html_sink_check_catches_what_it_should():

@@ -25,13 +25,16 @@ export const FAMILIES = {
   other: { icon: 'tool', key: 'family_other' },
 };
 
+// The toolbox's own groups (chat/toolbox.py, "# --- <group> ---"); tests/test_web_app.py checks
+// that every tool is here, in its group.
 const TOOL_FAMILY = {
   get_account: 'account', get_positions: 'account', list_orders: 'account',
   get_market_status: 'market', lookup_asset: 'market', get_quotes: 'market', price_metrics: 'market',
-  get_movers: 'market', screen_us_etfs: 'market',
+  get_movers: 'market',
   search_news: 'research', web_search: 'research', fetch_source: 'research', sec_filings: 'research',
   sec_financial_facts: 'research', sec_filing_passages: 'research', grounded_web_answer: 'research',
-  ask_product_database: 'knowledge', search_products: 'knowledge', graph_neighbors: 'knowledge',
+  screen_us_etfs: 'research', ask_product_database: 'research',
+  search_products: 'knowledge', graph_neighbors: 'knowledge',
   draft_mandate: 'mandate',
   propose_trades: 'trading',
 };

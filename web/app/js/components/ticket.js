@@ -23,6 +23,7 @@ import { ensurePortfolio, snapshot } from './portfolio-store.js';
 import { nowMs, onTick } from './ticker.js';
 import { confirmLabel, executableLegs, interpretResult, modifyMessage, requoteChanges, ticketState } from './ticket-model.js';
 import { createModifyForm } from './ticket-modify.js';
+import { noticeNodes, submittedNotice } from './ticket-notice.js';
 import { noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
 import { createTimeline } from './ticket-timeline.js';
 import { ticketBody } from './ticket-view.js';
@@ -62,8 +63,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
 
   const currentState = () => override || ticketState(ticket, nowMs());
 
-  /* Show a message in the card: `text` (from the server) or an i18n `key`, optional detail lines
-   * (text) and action buttons. `null` clears it. */
+  /* Show a message in the card (see ticket-notice.js for the description it takes); `null` clears it. */
   function setNotice(spec) {
     notice.hidden = !spec;
     if (!spec) {
@@ -71,16 +71,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
       return;
     }
     notice.setAttribute('data-tone', spec.tone || 'muted');
-    const content = el('div', 'notice-body');
-    content.appendChild(spec.key ? label('p', 'notice-text', spec.key, spec.vars) : el('p', 'notice-text', spec.text));
-    if (spec.also) content.appendChild(label('p', 'notice-text', spec.also));
-    for (const line of spec.lines || []) content.appendChild(el('p', 'notice-line', line));
-    if (spec.actions && spec.actions.length) {
-      const row = el('div', 'notice-actions');
-      row.append(...spec.actions);
-      content.appendChild(row);
-    }
-    notice.replaceChildren(iconSpan(spec.tone === 'ok' ? 'check' : spec.tone === 'muted' ? 'info' : 'alert', 18), content);
+    notice.replaceChildren(...noticeNodes(spec));
   }
 
   function showTimeline(known) {
@@ -123,8 +114,9 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
     if (current === 'proposed') {
       const name = confirmLabel(ticket);
       const confirm = actionButton('btn btn-confirm', name.key, { vars: name.vars });
-      confirm.disabled = busy || executableLegs(ticket).length === 0;
+      confirm.disabled = busy || !name.safe; // a ticket the card cannot describe is not confirmable here
       confirm.addEventListener('click', () => act('confirm'));
+      if (!name.safe && executableLegs(ticket).length) row.appendChild(label('p', 'ticket-caveat', 'ticket_unreadable'));
       const modify = actionButton('btn btn-modify', 'ticket_modify');
       modify.disabled = busy;
       modify.addEventListener('click', openModify);
@@ -220,6 +212,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
 
   async function act(action) {
     if (busy) return;
+    if (action === 'confirm' && !confirmLabel(ticket).safe) return;
     busy = true;
     render();
     const path = `/api/tickets/${encodeURIComponent(ticket.id)}/${action}`;
@@ -253,7 +246,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         override = null;
         if (ticket.status !== 'submitted') ticket = { ...ticket, status: 'submitted' };
         orders = outcome.orders;
-        setNotice(said ? { tone: 'ok', text: said } : { tone: 'ok', key: 'ticket_submitted_note' });
+        setNotice(submittedNotice(outcome.orders, executableLegs(ticket).length, said));
         announce(t('ticket_announce_submitted'));
         emit('portfolio:refresh');
         break;
@@ -274,8 +267,8 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         setNotice(null);
         announce(t('ticket_announce_rejected'));
         break;
-      case 'rejected': // 409: show the message; the returned ticket says where things stand
-        setNotice(said ? { tone: 'bad', text: said } : { tone: 'bad', key: 'ticket_conflict' });
+      case 'rejected': // 409: the returned ticket says where things stand; the server says why
+        setNotice({ tone: 'bad', key: ticket.status === 'proposed' ? 'ticket_changed' : 'ticket_conflict', detail: said });
         if (action === 'confirm') announce(t('ticket_announce_not_placed'));
         break;
       case 'expired': // 410: grey the card; a refresh that came too late offers a new proposal
@@ -305,7 +298,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         const check = actionButton('btn btn-small', 'ticket_check_again', { iconName: 'refresh', iconSize: 14 });
         check.addEventListener('click', () => sync());
         setNotice({
-          tone: 'bad', ...(said ? { text: said } : { key: 'ticket_uncertain' }), also: 'ticket_check_orders',
+          tone: 'bad', key: 'ticket_uncertain', also: 'ticket_check_orders', detail: said,
           actions: [panelLink('open_orders', 'orders', 'receipt'), check],
         });
         announce(t('ticket_announce_uncertain'));
@@ -319,7 +312,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         setNotice({ tone: 'bad', key: 'ticket_not_found' });
         break;
       default: // reject or refresh failed (5xx, network): nothing changed
-        setNotice(said ? { tone: 'bad', text: said } : { tone: 'bad', key: 'err_generic' });
+        setNotice({ tone: 'bad', key: 'ticket_action_failed', detail: said });
     }
     render();
   }

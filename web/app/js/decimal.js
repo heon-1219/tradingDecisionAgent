@@ -7,11 +7,13 @@
  * figures it does not send (e.g. buying power after a trade), which the UI labels "est.".
  *
  * Every function accepts a decimal string or an already parsed value, and returns `null` (or the
- * `fallback` text, for the formatters) for anything that is not a plain decimal: no exponent, no
- * separators, no NaN. No DOM is touched, so `scripts/test_decimal.mjs` runs it under Node.
+ * `fallback` text, for the formatters) for anything else: no separators, no NaN. An exponent is
+ * accepted ("1E+1", as Python writes some Decimals), within ±40. No DOM is touched, so
+ * `scripts/test_decimal.mjs` runs it under Node.
  */
 
-const DECIMAL_RE = /^([+-]?)(\d{1,40})(?:\.(\d{1,20}))?$/;
+const DECIMAL_RE = /^([+-]?)(\d{1,40})(?:\.(\d{1,20}))?(?:[eE]([+-]?\d{1,2}))?$/;
+const MAX_EXPONENT = 40;
 const DASH = '–';
 
 /* "12.340" -> {int: 12340n, scale: 3}. Strings only (plus values this module produced). */
@@ -22,9 +24,16 @@ export function parseDecimal(value) {
   if (typeof value !== 'string') return null;
   const match = DECIMAL_RE.exec(value.trim());
   if (!match) return null;
-  const [, sign, whole, fraction = ''] = match;
-  const int = BigInt(whole + fraction);
-  return { int: sign === '-' ? -int : int, scale: fraction.length };
+  const [, sign, whole, fraction = '', exponentText] = match;
+  const exponent = exponentText === undefined ? 0 : parseInt(exponentText, 10); // not money: an exponent
+  if (Math.abs(exponent) > MAX_EXPONENT) return null;
+  let int = BigInt(whole + fraction);
+  let scale = fraction.length - exponent;
+  if (scale < 0) {
+    int *= 10n ** BigInt(-scale);
+    scale = 0;
+  }
+  return { int: sign === '-' ? -int : int, scale };
 }
 
 function pow10(n) {

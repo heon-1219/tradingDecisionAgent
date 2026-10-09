@@ -10,7 +10,7 @@ import { formatMoney, formatPercent, formatQty } from '../decimal.js';
 import { badge, el, label, str } from './dom.js';
 import { sideBadge, sizeNode, termsNode } from './order-view.js';
 import { sourceChip } from './sources.js';
-import { buyingPowerAfter, clampChanges, positionPercentAfter, ticketTotals } from './ticket-model.js';
+import { buyingPowerAfter, clampChanges, legSide, positionPercentAfter, ticketTotals } from './ticket-model.js';
 
 const VERDICT = {
   accept: ['verdict_accept', 'ok'],
@@ -46,7 +46,7 @@ function legItem(decision) {
   const leg = decision.leg || {};
   const verdict = str(decision.verdict);
   const item = el('li', 'leg');
-  item.setAttribute('data-side', str(leg.side) === 'sell' ? 'sell' : 'buy');
+  item.setAttribute('data-side', legSide(leg) || 'unknown');
   item.setAttribute('data-verdict', verdict);
 
   const head = el('div', 'leg-head');
@@ -54,7 +54,7 @@ function legItem(decision) {
 
   const figures = el('dl', 'leg-figures');
   figures.appendChild(figure('ticket_est_price', formatMoney(str(decision.est_price))));
-  figures.appendChild(figure(str(leg.side) === 'sell' ? 'ticket_est_proceeds' : 'ticket_est_cost',
+  figures.appendChild(figure(legSide(leg) === 'sell' ? 'ticket_est_proceeds' : 'ticket_est_cost',
     formatMoney(str(decision.est_cost_usd))));
   const share = figure('ticket_position_after', '–', 'is-derived');
   share.hidden = true;

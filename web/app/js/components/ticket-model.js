@@ -7,28 +7,50 @@
  * are shown as information only. Money is the server's decimal strings; the few sums the server
  * does not send are computed with exact decimal arithmetic and labelled "est." by the card.
  */
-import { add, cmp, div, formatMoney, formatQty, isPositiveDecimal, mul, sub, toTrimmed } from '../decimal.js';
+import {
+  add, cmp, div, formatMoney, formatQty, isPositiveDecimal, mul, parseDecimal, sub, toTrimmed,
+} from '../decimal.js';
 
 const text = (value) => (typeof value === 'string' ? value : '');
+const PLAIN_POSITIVE = /^\d{1,12}(\.\d{1,6})?$/; // what a person may type into the Modify fields
 
 export function executableLegs(ticket) {
   return Array.isArray(ticket?.legs) ? ticket.legs : [];
 }
 
-/* The Confirm button's full label, as an i18n key and its variables:
- * "Confirm buy 3 VOO", "Confirm sell $500.00 of BND", or "Confirm 2 orders". */
+/* 'buy' or 'sell' (any case), else null. */
+export function legSide(leg) {
+  const side = text(leg?.side).toLowerCase();
+  return side === 'buy' || side === 'sell' ? side : null;
+}
+
+/* Can the card say exactly what this leg does? A known side, and a quantity or an amount that is a
+ * positive decimal. */
+export function readableLeg(leg) {
+  if (!legSide(leg)) return false;
+  const hasQty = leg.qty !== null && leg.qty !== undefined;
+  const size = parseDecimal(text(hasQty ? leg.qty : leg.notional));
+  return Boolean(size) && size.int > 0n && Boolean(text(leg.symbol));
+}
+
+/* The Confirm button's full label, as an i18n key and its variables: "Confirm buy 3 VOO", "Confirm
+ * sell $500.00 of BND", or "Confirm 2 orders". `safe` is false when a leg cannot be read (an
+ * unknown side, a size that does not parse): the label is then the generic "Confirm ticket" and
+ * the card keeps Confirm disabled, rather than naming an order it cannot vouch for. */
 export function confirmLabel(ticket) {
   const legs = executableLegs(ticket);
-  if (legs.length === 0) return { key: 'ticket_confirm_none', vars: {} };
-  if (legs.length > 1) return { key: 'ticket_confirm_many', vars: { n: legs.length } };
+  if (legs.length === 0) return { key: 'ticket_confirm_none', vars: {}, safe: false };
+  if (!legs.every(readableLeg)) return { key: 'ticket_confirm_generic', vars: {}, safe: false };
+  if (legs.length > 1) return { key: 'ticket_confirm_many', vars: { n: legs.length }, safe: true };
   const leg = legs[0];
-  const side = text(leg.side) === 'sell' ? 'sell' : 'buy';
+  const side = legSide(leg);
   if (leg.qty !== null && leg.qty !== undefined) {
-    return { key: `ticket_confirm_${side}_qty`, vars: { qty: formatQty(text(leg.qty)), symbol: text(leg.symbol) } };
+    return { key: `ticket_confirm_${side}_qty`, vars: { qty: formatQty(text(leg.qty)), symbol: text(leg.symbol) }, safe: true };
   }
   return {
     key: `ticket_confirm_${side}_notional`,
     vars: { amount: formatMoney(text(leg.notional)), symbol: text(leg.symbol) },
+    safe: true,
   };
 }
 
@@ -42,7 +64,7 @@ export function ticketTotals(ticket) {
   let complete = true;
   for (const decision of Array.isArray(ticket?.decisions) ? ticket.decisions : []) {
     if (!decision || decision.verdict === 'reject') continue;
-    const side = text(decision.leg?.side);
+    const side = legSide(decision.leg);
     const cost = text(decision.est_cost_usd);
     if (side === 'sell') sells += 1;
     else buys += 1;
@@ -69,7 +91,7 @@ export function positionPercentAfter(decision, positions, equity) {
   if (!symbol || !cost || !isPositiveDecimal(text(equity))) return null;
   const held = (Array.isArray(positions) ? positions : []).find((p) => text(p?.symbol) === symbol);
   const current = held ? text(held.market_value) : '0';
-  const after = text(decision.leg.side) === 'sell' ? sub(current, cost) : add(current, cost);
+  const after = legSide(decision.leg) === 'sell' ? sub(current, cost) : add(current, cost);
   if (!after) return null;
   const floor = cmp(after, '0') < 0 ? '0' : after;
   const share = div(floor, text(equity), 6);
@@ -98,7 +120,7 @@ export function requoteChanges(oldTicket, newTicket) {
     const match = next[index] && text(next[index].leg?.symbol) === text(decision.leg?.symbol) ? next[index] : null;
     return {
       symbol: text(decision.leg?.symbol),
-      side: text(decision.leg?.side),
+      side: legSide(decision.leg) || '',
       from: text(decision.est_price) || null,
       to: match ? text(match.est_price) || null : null,
     };
@@ -148,7 +170,7 @@ export function interpretResult(action, result) {
  * the reply comes back in Korean. */
 export function modifyMessage(edits, lang = 'en') {
   const parts = edits.map((edit) => {
-    const side = edit.side === 'sell' ? 'sell' : 'buy';
+    const side = legSide(edit) === 'sell' ? 'sell' : 'buy';
     const size = edit.qty !== undefined && edit.qty !== null
       ? `${toTrimmed(edit.qty) ?? edit.qty} ${edit.symbol}`
       : `$${edit.notional} of ${edit.symbol}`;
@@ -165,14 +187,14 @@ export function readModify(legs, values) {
   const errors = {};
   legs.forEach((leg, index) => {
     const typed = values[index] || {};
-    const edit = { side: text(leg.side), symbol: text(leg.symbol) };
+    const edit = { side: legSide(leg) || '', symbol: text(leg.symbol) };
     const sizeField = leg.qty !== null && leg.qty !== undefined ? 'qty' : 'notional';
     const size = text(typed[sizeField]).trim().replaceAll(',', '');
-    if (!isPositiveDecimal(size)) errors[`${index}.${sizeField}`] = 'ticket_modify_err';
+    if (!PLAIN_POSITIVE.test(size) || !isPositiveDecimal(size)) errors[`${index}.${sizeField}`] = 'ticket_modify_err';
     edit[sizeField] = size;
     if (text(leg.type) === 'limit') {
       const price = text(typed.limit_price).trim().replaceAll(',', '');
-      if (!isPositiveDecimal(price)) errors[`${index}.limit_price`] = 'ticket_modify_err';
+      if (!PLAIN_POSITIVE.test(price) || !isPositiveDecimal(price)) errors[`${index}.limit_price`] = 'ticket_modify_err';
       edit.limit_price = price;
     }
     edits.push(edit);

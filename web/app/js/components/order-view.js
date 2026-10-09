@@ -46,11 +46,18 @@ export function isFinalOrder(order) {
   return Boolean(order) && FINAL_ORDER_STATUSES.has(str(order.status).toLowerCase());
 }
 
-/* "BUY ▲" / "SELL ▼": the word first, the mark for a quick scan. */
+/* "BUY ▲" / "SELL ▼": the word first, the mark for a quick scan. A side that is neither is shown as
+ * it came, with no mark, never as a buy. */
 export function sideBadge(side) {
-  const sell = str(side).toLowerCase() === 'sell';
+  const word = str(side).toLowerCase();
   const node = el('span', 'side-badge');
-  node.setAttribute('data-side', sell ? 'sell' : 'buy');
+  if (word !== 'buy' && word !== 'sell') {
+    node.setAttribute('data-side', 'unknown');
+    node.textContent = word || '?';
+    return node;
+  }
+  const sell = word === 'sell';
+  node.setAttribute('data-side', word);
   const mark = el('span', 'side-mark', sell ? '▼' : '▲');
   mark.setAttribute('aria-hidden', 'true');
   node.append(label('span', '', sell ? 'side_sell' : 'side_buy'), mark);

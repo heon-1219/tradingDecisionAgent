@@ -330,6 +330,51 @@
   margin-top: 2px;
 }
 
+/* A confirm result, one order per line (built from the structured answer). */
+.notice-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notice-order {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 13px;
+}
+
+.notice-order .leg-symbol {
+  font-size: 13.5px;
+}
+
+.notice-order .leg-size {
+  font-size: 13px;
+}
+
+/* The server's own words, kept for errors and uncertain outcomes; collapsed. */
+.notice-detail > summary {
+  width: max-content;
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.notice-detail > summary:hover {
+  color: var(--text);
+}
+
+.notice-detail .notice-line {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
 /* ── 3. Forms ──────────────────────────────────────────────────────────────────────────────── */
 
 .field {
@@ -1055,6 +1100,13 @@ button.source-item[aria-expanded="true"] {
   color: var(--warning);
 }
 
+/* A side the app does not know is shown as it came, never dressed as a buy. */
+.side-badge[data-side="unknown"] {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .side-mark {
   font-size: 9px;
 }
@@ -1200,6 +1252,12 @@ button.source-item[aria-expanded="true"] {
   margin: 0;
   color: var(--warning);
   font-size: 12.5px;
+}
+
+.ticket-actions > .ticket-caveat {
+  flex: 1 1 100%;
+  order: -1;
+  line-height: 1.5;
 }
 
 .ticket-why {

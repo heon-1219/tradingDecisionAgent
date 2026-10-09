@@ -7,16 +7,19 @@
 // (fake DOM, scripted fetch, manual clock, fixtures) is scripts/component_harness.mjs.
 import assert from 'node:assert/strict';
 import {
-  advance, changeParts, clock, decision, dict, dispatch, document, emit, finish, leg, liveTurn, mandateForm, model,
-  net, order, orderView, panel, placePopover, refreshPortfolio, replayTurn, setState, settingsErrorText, sources, t,
-  test, ticker, ticket, timeline, toolcard,
+  advance, changeParts, clock, decision, dict, dispatch, document, emit, finish, flush, leg, liveTurn, mandateForm,
+  model, net, order, orderView, panel, placePopover, refreshPortfolio, replayTurn, setState, settingsErrorText,
+  sources, t, test, ticker, ticket, timeline, toolcard,
 } from './component_harness.mjs';
+import { externalLink } from '../web/app/js/components/dom.js';
+import { createKillSwitch } from '../web/app/js/components/settings-kill.js';
+import { noteTicket } from '../web/app/js/components/ticket-store.js';
 
 // --- pure: the ticket model ------------------------------------------------------------------------------
 
 await test('confirm label: one leg is spelled out, several are counted, and every key exists', () => {
   const one = model.confirmLabel(ticket());
-  assert.deepEqual(one, { key: 'ticket_confirm_buy_qty', vars: { qty: '3', symbol: 'VOO' } });
+  assert.deepEqual(one, { key: 'ticket_confirm_buy_qty', vars: { qty: '3', symbol: 'VOO' }, safe: true });
   assert.equal(t(one.key, one.vars), 'Confirm buy 3 VOO');
   const sell = model.confirmLabel(ticket({ decisions: [decision(0, { side: 'sell', symbol: 'BND', qty: '1200.50' })] }));
   assert.equal(t(sell.key, sell.vars), 'Confirm sell 1,200.5 BND');
@@ -28,6 +31,18 @@ await test('confirm label: one leg is spelled out, several are counted, and ever
   const mixed = ticket({ decisions: [decision(0), decision(1, { symbol: 'XYZ' }, { verdict: 'reject' })] });
   assert.equal(t(model.confirmLabel(mixed).key, model.confirmLabel(mixed).vars), 'Confirm buy 3 VOO');
   assert.equal(model.confirmLabel({ legs: [] }).key, 'ticket_confirm_none');
+  assert.equal(model.confirmLabel(ticket()).safe, true);
+  // fail-safe: what the label cannot vouch for gets the generic label and safe: false
+  const label = (legOver) => model.confirmLabel(ticket({ decisions: [decision(0, legOver)] }));
+  assert.deepEqual(label({ side: 'SELL' }), { key: 'ticket_confirm_sell_qty', vars: { qty: '3', symbol: 'VOO' }, safe: true });
+  assert.deepEqual(label({ qty: '1E+1' }).vars, { qty: '10', symbol: 'VOO' });
+  for (const bad of [{ side: 'short' }, { side: '' }, { side: undefined }, { qty: 'abc' }, { qty: '0' }, { qty: '-3' },
+    { qty: '1e999' }, { qty: null, notional: null }, { qty: null, notional: 'lots' }, { symbol: '' }]) {
+    assert.deepEqual(label(bad), { key: 'ticket_confirm_generic', vars: {}, safe: false }, JSON.stringify(bad));
+  }
+  assert.equal(model.legSide({ side: 'Buy' }), 'buy');
+  assert.equal(model.legSide({ side: 'hold' }), null);
+  assert.ok(dict.en.ticket_confirm_generic && dict.ko.ticket_confirm_generic);
   for (const side of ['buy', 'sell']) {
     for (const kind of ['qty', 'notional']) assert.ok(dict.en[`ticket_confirm_${side}_${kind}`] && dict.ko[`ticket_confirm_${side}_${kind}`]);
   }
@@ -113,6 +128,7 @@ await test('the Modify message and its field checks', () => {
   const demo = /\b(buy|sell)\s+(\d+(?:\.\d+)?)\s+(?:shares?\s+(?:of\s+)?)?([A-Za-z][A-Za-z0-9.-]{0,9})(?:[^;,\n]*?(?:limit|@|at)\s*\$?(\d+(?:\.\d+)?))?/gi;
   assert.deepEqual([...message.matchAll(demo)].map((m) => m.slice(1, 5)),
     [['buy', '2', 'VOO', '1612.00'], ['sell', '10', 'BND', '73.5']]);
+  // typed values are plain decimals only: an exponent form would reach the agent as written
   const bad = model.readModify(legs, [{ qty: '0', limit_price: 'abc' }, { qty: '-1', limit_price: '' }, { notional: '1e3' }]);
   assert.deepEqual(Object.keys(bad.errors).sort(), ['0.limit_price', '0.qty', '1.limit_price', '1.qty', '2.notional']);
   // the expired-ticket fallback sends the legs as they are
@@ -124,6 +140,9 @@ await test('the Modify message and its field checks', () => {
 await test('tool families, untrusted blocks and durations', () => {
   assert.equal(toolcard.familyOf('get_quotes'), 'market');
   assert.equal(toolcard.familyOf('propose_trades'), 'trading');
+  // the toolbox files the product-database tools under research (tests/test_web_app.py checks every tool)
+  assert.equal(toolcard.familyOf('screen_us_etfs'), 'research');
+  assert.equal(toolcard.familyOf('ask_product_database'), 'research');
   assert.equal(toolcard.familyOf('draft_mandate'), 'mandate');
   assert.equal(toolcard.familyOf('unknown_tool'), 'other');
   assert.equal(toolcard.familyOf('constructor'), 'other');
@@ -213,6 +232,108 @@ await test('poller: every 3 s, at most 60 s, stops when settled or when the card
   assert.deepEqual([gone.stopped, gone.reads.length], ['gone', 2]);
   const flaky = await run({ pendingFor: 4, failAt: 2 });
   assert.deepEqual([flaky.stopped, flaky.reads.length], ['settled', 4]); // a failed read is skipped
+});
+
+await test('order timeline: it stops polling when the chat changes or the card leaves the page', async () => {
+  const run = async (stopper) => {
+    const tk = ticket({ status: 'submitted' });
+    const pending = [{ client_order_id: 'c0', broker_order_id: 'o1', order: order({ status: 'new', filled_qty: '0' }) }];
+    net.routes = [{ method: 'GET', match: `/api/tickets/${tk.id}?`, status: 200, body: { ticket: tk, orders: pending } }];
+    net.calls.length = 0;
+    setState({ sessionId: 's1' });
+    const queue = [];
+    const view = timeline.createTimeline({
+      ticket: tk, sessionId: 's1', orders: pending,
+      timers: { now: () => 0, delay: (fn) => { queue.push(fn); return fn; }, cancel: () => {} },
+    });
+    document.body.appendChild(view.el);
+    await flush(); // the first read at once
+    const reads = () => net.calls.filter((c) => c.method === 'GET' && c.path.includes(tk.id)).length;
+    assert.equal(reads(), 1);
+    assert.equal(queue.length, 1, 'still pending: the next read is scheduled');
+    await queue.shift()();
+    assert.equal(reads(), 2, 'a scheduled read happens while the card is on screen in its chat');
+    stopper(view);
+    for (let i = 0; i < 5 && queue.length; i += 1) await queue.shift()(); // a poller that kept going would read here
+    await flush();
+    assert.equal(reads(), 2, 'no read after the chat changed or the card left');
+    view.el.remove();
+  };
+  await run(() => setState({ sessionId: 'another-chat' }));
+  await run((view) => view.el.remove());
+  setState({ sessionId: 's1' });
+});
+
+await test('kill switch: two steps, Cancel first; only the second button posts', async () => {
+  net.routes = [{ method: 'POST', match: '/api/kill-switch', status: 200,
+    body: { trading_enabled: false, suspend_broker: true, broker_connected: true, persisted: false } }];
+  net.calls.length = 0;
+  setState({ settings: { alpaca: 'connected', trading_enabled: true } });
+  const adopted = [];
+  const kill = createKillSwitch({ adopt: (body) => adopted.push(body) });
+  document.body.appendChild(kill.el);
+  const confirmBox = kill.el.querySelector('.kill-confirm');
+  assert.equal(confirmBox.hidden, true);
+  kill.el.querySelector('.btn-danger').click(); // step one: opens the confirmation only
+  await flush();
+  assert.equal(net.calls.length, 0);
+  assert.equal(confirmBox.hidden, false);
+  assert.equal(document.activeElement.textContent, 'Cancel', 'the safe choice gets the focus');
+  confirmBox.querySelector('input').checked = true;
+  confirmBox.querySelector('.btn-danger-solid').click(); // step two
+  await flush();
+  const posts = net.calls.filter((c) => c.method === 'POST');
+  assert.deepEqual(posts.map((c) => [c.path, c.body]), [['/api/kill-switch', { suspend_broker: true }]]);
+  assert.equal(kill.el.querySelector('.notice').hidden, false, 'persisted: false leaves a warning on screen');
+  assert.equal(adopted.at(-1).trading_enabled, false);
+  kill.update({ trading_enabled: false });
+  assert.equal(kill.el.querySelector('.notice').hidden, false, 'it stays while trading is off');
+  kill.update({ trading_enabled: true });
+  assert.equal(kill.el.querySelector('.notice').hidden, true);
+  kill.el.remove();
+});
+
+await test('links to other sites: http(s) only, no opener, no referrer, a new tab', () => {
+  const link = externalLink('https://www.sec.gov/a?b=c', 'x');
+  assert.equal(link.getAttribute('href'), 'https://www.sec.gov/a?b=c');
+  assert.equal(link.getAttribute('rel'), 'noopener noreferrer nofollow');
+  assert.equal(link.getAttribute('target'), '_blank');
+  assert.equal(link.getAttribute('referrerpolicy'), 'no-referrer');
+  for (const bad of ['javascript:alert(1)', 'data:text/html,x', '//evil.test/x', '/api/x', 'https://u:p@evil.test/', '']) {
+    assert.equal(externalLink(bad, 'x'), null, bad);
+  }
+});
+
+await test('orders panel: the newest load wins, and a long chat says how many tickets it shows', async () => {
+  const view = document.createElement('section');
+  document.body.appendChild(view);
+  panel('orders').mount(view);
+  setState({ sessionId: 'orders-chat' });
+  for (let i = 1; i <= 25; i += 1) noteTicket('orders-chat', `TK${i}`);
+  const rows = (id) => ({ ticket: { id, status: 'submitted' }, orders: [{ client_order_id: `c-${id}`, broker_order_id: id,
+    order: order({ id, symbol: id === 'TK25' ? 'NEW' : 'OLD' }) }] });
+  let releaseOld;
+  net.routes = [
+    { method: 'GET', match: '/api/portfolio', status: 200, body: { connected: true, account: {}, positions: [], open_orders: [] } },
+    // the first load's first read is slow and answers with stale data
+    { method: 'GET', match: '/api/tickets/TK25?', status: 200, once: true, gate: new Promise((r) => { releaseOld = r; }),
+      body: { ticket: { id: 'TK25', status: 'submitted' }, orders: [] } },
+    { method: 'GET', match: '/api/tickets/TK25?', status: 200, body: rows('TK25') },
+    { method: 'GET', match: '/api/tickets/TK', status: 200, body: { ticket: { id: 'x', status: 'submitted' }, orders: [] } },
+  ];
+  panel('orders').show(view); // load 1 (stuck on its first read)
+  await flush();
+  emit('portfolio:refresh'); // load 2
+  await flush();
+  releaseOld();
+  await flush();
+  const text = view.textContent;
+  assert.ok(text.includes('NEW'), 'the newest load is shown');
+  assert.ok(text.includes('Showing the last 20 of 25 tickets of this chat.'));
+  const reads = net.calls.filter((c) => c.path.startsWith('/api/tickets/')).map((c) => c.path.split('?')[0]);
+  assert.ok(!reads.includes('/api/tickets/TK5') && reads.includes('/api/tickets/TK6'), 'at most the last 20 tickets');
+  view.remove();
+  setState({ sessionId: 's1' });
 });
 
 await test('popover placement stays inside the viewport', () => {

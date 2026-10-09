@@ -102,7 +102,7 @@ export function ageParts(ms) {
 
 /* 272 -> "4:32" (a countdown). */
 export function clockText(totalSeconds) {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const seconds = Math.max(0, Math.floor(totalSeconds)); // not money: seconds
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 

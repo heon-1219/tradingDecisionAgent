@@ -2,7 +2,8 @@
  * model in use and the activity-log download. It replaces the shell's read-only view.
  *
  * Keys. The server never sends a key back, only status words, and this panel never keeps one: the
- * entry fields are password inputs with autocomplete off, they are never pre-filled, and they are
+ * entry fields are password inputs (`autocomplete="new-password"`, so the browser neither fills a
+ * saved password in nor stores one on its own), they are never pre-filled, and they are
  * emptied as soon as a save is answered, whatever the answer. A value goes from the input straight
  * into the PUT body: not into localStorage, not onto the bus, not into a log line or an error text.
  * The SEC contact (a name and an e-mail address, not a secret) uses a plain text input, with the
@@ -97,7 +98,7 @@ function connectionRow(spec) {
     const input = el('input', 'field-input');
     input.id = id;
     input.type = secret ? 'password' : 'text';
-    input.autocomplete = 'off';
+    input.autocomplete = secret ? 'new-password' : 'off';
     input.spellcheck = false;
     input.autocapitalize = 'off';
     input.maxLength = 256;

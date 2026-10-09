@@ -108,8 +108,9 @@ function row(tracked) {
 }
 
 /* Build the timeline for `ticket`. `orders` is what is known now (either API shape). It keeps
- * itself up to date and calls `onTicket(ticket)` when a read returns the ticket. */
-export function createTimeline({ ticket, sessionId, orders, onTicket }) {
+ * itself up to date and calls `onTicket(ticket)` when a read returns the ticket. `timers`
+ * ({now, delay, cancel}, for the tests) replaces the real clock of the poller. */
+export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) {
   const root = el('section', 'timeline');
   const list = el('ol', 'timeline-list');
   const foot = el('p', 'timeline-foot');
@@ -150,6 +151,7 @@ export function createTimeline({ ticket, sessionId, orders, onTicket }) {
         again.hidden = settled;
         emit('portfolio:refresh');
       },
+      ...(timers || {}),
     });
   }
 

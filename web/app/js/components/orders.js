@@ -1,8 +1,9 @@
 /* The Orders panel: the account's open orders, and the orders placed from this chat's tickets.
  *
  * Open orders come with the portfolio (`GET /api/portfolio` -> open_orders). The chat's own orders
- * are read per ticket (`GET /api/tickets/{id}?session_id=`), for the tickets seen in the open chat;
- * the server re-reads non-final orders from the broker on each call. A leg whose outcome the server
+ * are read per ticket (`GET /api/tickets/{id}?session_id=`) for the last 20 tickets seen in the open
+ * chat (the panel says so when there are more), and only the newest load is shown. The server
+ * re-reads non-final orders from the broker on each call. A leg whose outcome the server
  * could not establish has no order and is shown as "uncertain". It reloads when the tab is shown,
  * after a confirm, and from its refresh button.
  */
@@ -14,10 +15,11 @@ import { fillNode, orderStatusBadge, sideBadge, sizeNode, termsNode } from './or
 import { refreshPortfolio, snapshot } from './portfolio-store.js';
 import { ticketIds } from './ticket-store.js';
 
-const MAX_TICKETS = 6;
+const MAX_TICKETS = 20; // the newest tickets of the chat; the panel says when there are more
 let container = null;
 let shown = false; // the tab has been opened at least once
-let chat = { sessionId: null, groups: [], loading: false };
+let chat = { sessionId: null, groups: [], loading: false, total: 0 };
+let generation = 0; // only the newest load may write `chat`
 
 /* One order as a row. `tracked` is {client_order_id, broker_order_id, order} from a ticket, or
  * {order} for an open order. */
@@ -56,9 +58,11 @@ function section(headingKey, vars, ...children) {
 }
 
 async function loadChatOrders() {
+  const mine = ++generation;
   const sessionId = state.sessionId;
-  const ids = ticketIds(sessionId).slice(-MAX_TICKETS).reverse();
-  chat = { sessionId, groups: chat.sessionId === sessionId ? chat.groups : [], loading: ids.length > 0 };
+  const all = ticketIds(sessionId);
+  const ids = all.slice(-MAX_TICKETS).reverse();
+  chat = { sessionId, groups: chat.sessionId === sessionId ? chat.groups : [], loading: ids.length > 0, total: all.length };
   render();
   const groups = [];
   for (const id of ids) {
@@ -69,9 +73,10 @@ async function loadChatOrders() {
     } catch {
       /* a ticket that cannot be read is simply not listed */
     }
-    if (state.sessionId !== sessionId) return;
+    // A newer load (a refresh, another chat) started meanwhile: its answer is the one to show.
+    if (mine !== generation || state.sessionId !== sessionId) return;
   }
-  chat = { sessionId, groups, loading: false };
+  chat = { sessionId, groups, loading: false, total: all.length };
   render();
 }
 
@@ -113,6 +118,9 @@ function render() {
 
   const mine = chat.sessionId === state.sessionId ? chat.groups : [];
   const children = [];
+  if (chat.sessionId === state.sessionId && chat.total > MAX_TICKETS) {
+    children.push(label('p', 'panel-note', 'orders_more', { shown: MAX_TICKETS, total: chat.total }));
+  }
   if (mine.length === 0) {
     children.push(label('p', 'panel-note', chat.loading ? 'portfolio_loading' : 'orders_chat_empty'));
   }
@@ -152,6 +160,7 @@ on('session:loaded', () => {
   else render();
 });
 on('session:new', () => {
-  chat = { sessionId: null, groups: [], loading: false };
+  generation += 1;
+  chat = { sessionId: null, groups: [], loading: false, total: 0 };
   render();
 });

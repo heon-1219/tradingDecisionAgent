@@ -11,8 +11,9 @@ thread.id = 'thread';
 document.body.appendChild(thread);
 
 // --- a scripted fetch ---------------------------------------------------------------------------------
-// `net.routes` is [{method, match, status, body}]: the first route whose method matches and whose
-// `match` is part of the path answers; no route means a network failure. `net.calls` records every
+// `net.routes` is [{method, match, status, body, once?, gate?}]: the first route whose method matches
+// and whose `match` is part of the path answers (a `once` route is then removed, and a `gate`
+// promise is awaited before answering); no route means a network failure. `net.calls` records every
 // request as {method, path, body, headers}.
 export const net = { calls: [], routes: [] };
 globalThis.fetch = async (path, init = {}) => {
@@ -21,6 +22,8 @@ globalThis.fetch = async (path, init = {}) => {
   net.calls.push(call);
   const route = net.routes.find((r) => r.method === call.method && path.includes(r.match));
   if (!route) throw new TypeError(`no route for ${call.method} ${path}`);
+  if (route.once) net.routes.splice(net.routes.indexOf(route), 1);
+  if (route.gate) await route.gate;
   const text = JSON.stringify(route.body);
   return { ok: route.status >= 200 && route.status < 300, status: route.status,
     json: async () => JSON.parse(text), text: async () => text };
@@ -49,6 +52,7 @@ export const { changeParts } = await import('../web/app/js/components/portfolio.
 export const { refreshPortfolio } = await import('../web/app/js/components/portfolio-store.js');
 export const { settingsErrorText } = await import('../web/app/js/components/settings.js');
 await import('../web/app/js/components/ticket.js');
+await import('../web/app/js/components/orders.js');
 registerDefaultHandlers();
 
 // A manual clock for the shared ticker: no real interval is ever started.
@@ -85,7 +89,8 @@ export const decision = (index, legOver = {}, over = {}) => {
   return { index, verdict: 'accept', leg: l, original: l, reasons: [], est_price: '610.00', est_cost_usd: '1830.00', ...over };
 };
 let serial = 0;
-/* A proposed ticket quoted 12 s ago that expires in 4:48 (by the manual clock). */
+/* A proposed ticket quoted 12 s ago that expires in 4:48 (by the manual clock). Every ticket has
+ * its own hash, so a test can tell which card a confirm came from. */
 export function ticket(over = {}) {
   serial += 1;
   const decisions = over.decisions || [decision(0)];
@@ -95,7 +100,7 @@ export function ticket(over = {}) {
     thesis: 'Low-cost core holding [E1]', risks: 'Equity drawdowns', invalidation: 'Expense ratio rises',
     evidence_ids: ['E1', 'E9'], mandate_version: 1,
     quote_as_of: new Date(clock.time - 12000).toISOString(), created_at: new Date(clock.time - 12000).toISOString(),
-    expires_at: new Date(clock.time + 288000).toISOString(), hash: 'a'.repeat(64),
+    expires_at: new Date(clock.time + 288000).toISOString(), hash: serial.toString(16).padStart(64, '0'),
     client_order_ids: decisions.map((d, i) => `c${i}`), broker_order_ids: [], ...over,
   };
 }

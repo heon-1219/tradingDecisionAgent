@@ -29,10 +29,23 @@ test('parse: plain decimals only', () => {
   assert.deepEqual(parseDecimal('-0.5'), { int: -5n, scale: 1 });
   assert.deepEqual(parseDecimal(' 7 '), { int: 7n, scale: 0 });
   assert.deepEqual(parseDecimal('+3.0'), { int: 30n, scale: 1 });
-  for (const bad of ['', ' ', 'abc', '1e5', '1,000', '.5', '5.', '--1', 'NaN', 'Infinity', '0x10', '1.2.3',
+  for (const bad of ['', ' ', 'abc', '1,000', '.5', '5.', '--1', 'NaN', 'Infinity', '0x10', '1.2.3', 'e5', '1e',
+    '1e+', '1E+1.5', '1e999', '1e-999',
     null, undefined, 12.5, 12, true, {}, [], '１２']) {
     assert.equal(parseDecimal(bad), null, String(bad));
   }
+});
+
+test('exponent notation, as Python writes some Decimals ("1E+1"), parses exactly', () => {
+  assert.deepEqual(parseDecimal('1E+1'), { int: 10n, scale: 0 });
+  assert.deepEqual(parseDecimal('1.20E+2'), { int: 120n, scale: 0 });
+  assert.deepEqual(parseDecimal('2.5e-3'), { int: 25n, scale: 4 });
+  assert.deepEqual(parseDecimal('-3E-2'), { int: -3n, scale: 2 });
+  assert.deepEqual(parseDecimal('5E+0'), { int: 5n, scale: 0 });
+  assert.equal(toPlain('1E+1'), '10');
+  assert.equal(formatQty('1E+1'), '10');
+  assert.equal(formatMoney('6.1001E+2'), '$610.01');
+  assert.equal(plain(add('1E+1', '0.5')), '10.5');
 });
 
 test('add and sub are exact where floats are not', () => {
@@ -135,7 +148,8 @@ test('formatQty, formatFixed, formatPercent', () => {
 
 test('isPositiveDecimal', () => {
   for (const good of ['1', '0.01', '5000', '12.50']) assert.equal(isPositiveDecimal(good), true, good);
-  for (const bad of ['0', '0.00', '-1', '', 'abc', '1e3', '1,000']) assert.equal(isPositiveDecimal(bad), false, bad);
+  for (const bad of ['0', '0.00', '-1', '', 'abc', '1,000', '0E+3']) assert.equal(isPositiveDecimal(bad), false, bad);
+  assert.equal(isPositiveDecimal('1e3'), true);
 });
 
 test('3,000 random cases agree with independent BigInt arithmetic', () => {

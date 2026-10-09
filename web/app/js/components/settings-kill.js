@@ -1,10 +1,10 @@
 /* The kill switch in the Settings panel: stops trading at once (`POST /api/kill-switch`).
  *
- * Pressing the button does nothing by itself: it opens an inline confirmation (not a browser
- * dialog) with a checkbox for the stronger form, "also suspend at the broker and cancel open
- * orders", and a second button that does it. If the server could not save the change to its .env
- * file (`persisted: false`), trading is still off now, and a warning stays on screen until trading
- * is switched on again or the settings are saved, because the switch would not survive a restart.
+ * The first button only opens an inline confirmation (not a browser dialog): the question, a
+ * checkbox for the stronger form ("also suspend at the broker and cancel open orders") and a second
+ * button that stops trading; Cancel gets the focus. If the server could not save the change to its
+ * .env file (`persisted: false`), trading is off now but would be on again after a restart, so a
+ * warning stays on screen for as long as the settings report trading as off.
  */
 import { request } from '../api.js';
 import { bindText, t } from '../i18n.js';
