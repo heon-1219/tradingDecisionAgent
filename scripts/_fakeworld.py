@@ -43,11 +43,13 @@ from pathlib import Path
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-for _path in (ROOT / "src", pathlib.Path(__file__).resolve().parent):
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+# scripts/ (for `_demo_llm`) and the repo root (for `tests.fakes_trading`) go at the end, so that a
+# file here (scripts/trace.py) can never shadow a standard-library module.
+for _path in (pathlib.Path(__file__).resolve().parent, ROOT):
     if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
-if str(ROOT) not in sys.path:  # for `tests.fakes_trading`
-    sys.path.append(str(ROOT))
+        sys.path.append(str(_path))
 
 import httpx  # noqa: E402
 

@@ -17,10 +17,15 @@ What the last user message triggers, first match wins:
     options, futures, ...    a text-only refusal: out of scope
     "sell everything"        account, quotes, then sells of every open position
     "rebalance"              account, quotes, a bond screen, then one sell and one buy
-    anything else            `get_account` + `get_positions`, then `get_quotes` + `price_metrics`,
-                             then one research tool (`screen_us_etfs`, else `ask_product_database`,
-                             else `search_news`), then `propose_trades` (1-2 legs sized from the
-                             dollar amount in the message, $2,000 without one), then the answer
+    anything else            `get_account` + `get_positions`, then `get_quotes` + `price_metrics`
+                             with one research tool (`screen_us_etfs`, else `ask_product_database`,
+                             else `search_news`) in the same round, then `propose_trades` (1-2 legs
+                             sized from the dollar amount in the message, $2,000 without one), then
+                             the answer: four model calls, which fits shallow mode's four rounds
+
+The agent's budget nudge (any message starting "Budget reached", the plain and the shallow-mode
+one) is answered as the user's own request would be, from the tool results the turn already has,
+without calling a tool.
 
 A Korean message is answered in Korean. The first tool round also carries interim text, which the
 agent emits as `reasoning-delta`. Every number in an answer is copied from a tool output, and
@@ -39,7 +44,7 @@ from decimal import ROUND_FLOOR, Decimal
 _HERE = pathlib.Path(__file__).resolve().parent
 for _path in (_HERE.parent / "src", _HERE):
     if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+        sys.path.append(str(_path))  # at the end: scripts/trace.py must never shadow the stdlib `trace`
 
 from _demo_text import (  # noqa: E402,F401 - the readers are re-exported for the tests and the eval
     PLAIN_EN,
@@ -69,7 +74,7 @@ KNOWN_TICKERS = frozenset({
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "XYZ",
 })
 RESEARCH_TOOLS = ("screen_us_etfs", "ask_product_database", "search_news")
-_NUDGE_PREFIX = "Budget reached:"
+_NUDGE_PREFIX = "Budget reached"  # the agent's nudge, plain ("Budget reached: …") or shallow ("… (shallow mode …")
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 _AMOUNT_RE = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s?(?:달러|dollars?\b|USD\b)", re.I)
@@ -180,6 +185,7 @@ class DemoConversation:
         self._chat = "draft_mandate" in self._tools  # the chat tool set always has it
         self._messages: list[dict] = [{"role": "user", "content": user_text}]
         self._calls = 0
+        self._final = False  # answering a budget nudge: no tool may be called
 
     # the Conversation protocol
     async def step(self) -> Turn:
@@ -206,7 +212,10 @@ class DemoConversation:
     def _say(self, text: str) -> Turn:
         return Turn(text, [], "end_turn", self._usage(text))
 
-    def _call(self, calls: list[tuple[str, dict]], text: str = "") -> Turn:
+    def _call(self, calls: list[tuple[str, dict]], text: str = "") -> Turn | None:
+        """A tool round, or None when there is nothing to call or no tool may run (after the nudge)."""
+        if not calls or self._final:
+            return None
         out = []
         for name, args in calls:
             self._calls += 1
@@ -238,11 +247,25 @@ class DemoConversation:
         index = users[-1]
         raw = self._messages[index]["content"]
         if raw.startswith(_NUDGE_PREFIX):
-            _, ko = _split_user_text(self._messages[users[-2]]["content"]) if len(users) > 1 else ("", False)
-            return self._say("답변을 마무리할 예산이 부족했습니다. 범위를 좁혀 다시 요청해 주세요." if ko else
-                             "I ran out of budget before finishing. Please ask again with a narrower request.")
+            return self._nudged(users)
         message, ko = _split_user_text(raw)
-        done = self._done_since(index)
+        return self._respond(message, ko, self._done_since(index))
+
+    def _nudged(self, users: list[int]) -> Turn:
+        """The answer to the agent's budget nudge: the user's request before it, answered from the
+        tool results this turn already has, with no further tool call."""
+        message, ko = _split_user_text(self._messages[users[-2]]["content"]) if len(users) > 1 else ("", False)
+        self._final = True
+        try:
+            turn = self._respond(message, ko, self._done_since(users[-2])) if len(users) > 1 else None
+        finally:
+            self._final = False
+        if turn is not None and not turn.tool_calls:
+            return turn
+        return self._say("답변을 마무리할 예산이 부족했습니다. 범위를 좁혀 다시 요청해 주세요." if ko else
+                         "I ran out of budget before finishing. Please ask again with a narrower request.")
+
+    def _respond(self, message: str, ko: bool, done: list[Done]) -> Turn | None:
         low = message.lower()
         if "error" in low:
             return Turn("simulated model error", [], "error")
@@ -275,24 +298,24 @@ class DemoConversation:
                           "먼저 모의투자 계좌와 보유 종목을 확인하겠습니다." if ko else
                           "Checking the paper account and its positions before sizing anything.")
 
-    def _quote_round(self, called: set[str], symbols: list[str], metrics_for: str | None) -> Turn | None:
+    def _quote_calls(self, called: set[str], symbols: list[str], metrics_for: str | None) -> list[tuple[str, dict]]:
         if not self._has("get_quotes") or "get_quotes" in called:
-            return None
+            return []
         calls: list[tuple[str, dict]] = [("get_quotes", {"symbols": symbols[:10]})]
         if metrics_for and self._has("price_metrics"):
             calls.append(("price_metrics", {"symbol": metrics_for}))
-        return self._call(calls)
+        return calls
 
-    def _research_round(self, called: set[str], screen_args: dict, symbols: tuple[str, ...]) -> Turn | None:
+    def _research_calls(self, called: set[str], screen_args: dict, symbols: tuple[str, ...]) -> list[tuple[str, dict]]:
         if called & set(RESEARCH_TOOLS):
-            return None
+            return []
         if self._has("screen_us_etfs"):
-            return self._call([("screen_us_etfs", screen_args)])
+            return [("screen_us_etfs", screen_args)]
         if self._has("ask_product_database"):
-            return self._call([("ask_product_database", {"question": f"Expense ratio and size of {', '.join(symbols)}?"})])
+            return [("ask_product_database", {"question": f"Expense ratio and size of {', '.join(symbols)}?"})]
         if self._has("search_news"):
-            return self._call([("search_news", {"symbols": list(symbols), "limit": 3})])
-        return None
+            return [("search_news", {"symbols": list(symbols), "limit": 3})]
+        return []
 
     def _propose(self, legs: list[dict], done: list[Done], ko: bool, kind: str) -> Turn | None:
         """The `propose_trades` call, or None when it was already made, is not offered, there is
@@ -318,8 +341,9 @@ class DemoConversation:
         symbols, screen_args = _pick_symbols(message)
         if wanted:
             symbols = tuple(dict.fromkeys(w[2] for w in wanted))
-        step = (self._account_round(ko, called) or self._quote_round(called, list(symbols), symbols[0])
-                or self._research_round(called, screen_args, symbols))
+        # Market data and research in one round (independent calls): the flow fits shallow mode.
+        step = (self._account_round(ko, called) or self._call(
+            self._quote_calls(called, list(symbols), symbols[0]) + self._research_calls(called, screen_args, symbols)))
         if step:
             return step
         quoted = quotes(done)
@@ -342,7 +366,7 @@ class DemoConversation:
         if not held:
             return self._say("모의투자 계좌에 보유 종목이 없어 매도할 것이 없습니다." if ko else
                              "There are no open positions in the paper account, so there is nothing to sell.")
-        step = self._quote_round(called, list(held), None)
+        step = self._call(self._quote_calls(called, list(held), None))
         if step:
             return step
         quoted = quotes(done)
@@ -360,8 +384,8 @@ class DemoConversation:
         if not held:
             return self._say("보유 종목이 없어 리밸런싱할 것이 없습니다." if ko else
                              "There are no open positions to rebalance.")
-        step = (self._quote_round(called, list(dict.fromkeys([*held, "BND"])), "BND")
-                or self._research_round(called, {"asset_type": "Bond", "limit": 5}, ("BND",)))
+        step = self._call(self._quote_calls(called, list(dict.fromkeys([*held, "BND"])), "BND")
+                          + self._research_calls(called, {"asset_type": "Bond", "limit": 5}, ("BND",)))
         if step:
             return step
         legs = _rebalance_legs(message, held, quotes(done))

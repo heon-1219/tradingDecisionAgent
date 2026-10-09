@@ -21,9 +21,10 @@ from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal
 
 _HERE = pathlib.Path(__file__).resolve().parent
-for _path in (_HERE.parent / "src", _HERE):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+if str(_HERE.parent / "src") not in sys.path:
+    sys.path.insert(0, str(_HERE.parent / "src"))
+if str(_HERE) not in sys.path:
+    sys.path.append(str(_HERE))  # at the end: scripts/trace.py must never shadow the stdlib `trace`
 
 from _fakeworld import FakeBroker  # noqa: E402 - the very class `build_fake_world` checks against
 from finagent.trading.models import OrderLeg, OrderSnapshot, PositionSnapshot  # noqa: E402

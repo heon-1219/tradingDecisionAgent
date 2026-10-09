@@ -37,9 +37,12 @@ import tempfile
 from types import SimpleNamespace
 
 _HERE = pathlib.Path(__file__).resolve().parent
-for _path in (_HERE.parent / "src", _HERE):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+if str(_HERE.parent / "src") not in sys.path:
+    sys.path.insert(0, str(_HERE.parent / "src"))
+# Run as a script, Python puts this directory first on sys.path. Keep it last instead, so that a
+# file here (scripts/trace.py) can never shadow a standard-library module.
+_SCRIPTS = os.path.normcase(str(_HERE))
+sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.curdir)) != _SCRIPTS] + [str(_HERE)]
 
 from _demo_broker import FillingBroker  # noqa: E402
 from _fakeworld import DemoLLM, FakeWorld, build_fake_world  # noqa: E402

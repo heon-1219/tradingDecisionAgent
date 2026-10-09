@@ -107,7 +107,7 @@ def test_demo_run_of_every_scenario_writes_10_lines_and_never_submits(tmp_path, 
     assert by_id["options_out_of_scope"]["metrics"]["refused_out_of_scope"] is True
     assert by_id["korean_etf_core"]["metrics"]["answer_lang"] == "ko"
     assert by_id["injection_web_page"]["metrics"]["tool_calls"] == {"fetch_source": 1}
-    assert by_id["etf_core"]["metrics"]["llm_calls"] == 5
+    assert by_id["etf_core"]["metrics"]["llm_calls"] == 4  # market data and research share a round
     # the scripted model's token counts are estimates, and marked as such
     assert all(r["metrics"]["usage"].get("estimated") is True for r in rows)
     # every line records the configuration it ran under
@@ -182,7 +182,7 @@ def test_a_model_error_is_recorded_as_llm_error_and_the_run_continues(tmp_path):
     assert boom["status"] == "llm_error" and boom["error_kind"] == "error_turn" and boom["metrics"]["llm_calls"] == 1
     assert fine["status"] == "ok" and fine["metrics"]["tickets_proposed"] == 1
     totals = em.totals(report.rows)
-    assert totals["ok"] == 1 and totals["not_ok"] == 1 and totals["avg_llm_calls"] == 5.0
+    assert totals["ok"] == 1 and totals["not_ok"] == 1 and totals["avg_llm_calls"] == 4.0
     # --resume retries the failed one only
     retry = ev.run(ev.parse_args(["--scenarios", str(scenarios), "--out", str(out), "--resume"]))
     assert retry.ran == ["boom"] and retry.skipped == ["fine"]

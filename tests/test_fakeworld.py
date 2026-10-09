@@ -18,7 +18,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
-    sys.path.insert(0, str(ROOT / "scripts"))
+    sys.path.append(str(ROOT / "scripts"))  # at the end: scripts/trace.py must never shadow the stdlib
 
 import _demo_llm  # noqa: E402
 import _fakeworld as fw  # noqa: E402
@@ -392,8 +392,7 @@ async def test_grounded_option_adds_the_tool_and_emits_the_search_suggestions(tm
         # a rebuild (what saving a setting does) keeps the tool
         world.runtime.rebuild()
         assert "grounded_web_answer" in {s.name for s in world.runtime.toolbox.specs()}
-        # the provider is "gemini" here, declared paid: the agent stays in deep mode, so the default
-        # flow (five tool rounds) still reaches its proposal
+        # the provider is "gemini" here, declared paid: the agent stays in deep mode
         _sid, events, _text = await turn(world, CORE)
         assert events[-1]["mode"] == "deep" and not events[-1]["budget_exhausted"]
         assert len(of(events, "data-trade-proposal")) == 1 and world.broker.submits == 0
@@ -438,6 +437,42 @@ async def test_a_fake_broker_subclass_can_be_supplied_and_anything_else_is_refus
         with pytest.raises(TypeError, match="FakeBroker"):
             fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path / "b", broker_cls=bad)
     assert not (tmp_path / "b").exists()  # refused before anything was created
+
+
+async def test_a_shallow_world_still_gets_a_ticket_and_a_normal_cited_answer(tmp_path):
+    # Provider gemini without a paid key: shallow mode, four rounds. The default flow fits in them.
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path / "four", grounded=True,
+                                settings_over={"gemini_paid": False})
+    try:
+        _sid, events, text = await turn(world, CORE)
+        finish = events[-1]
+        assert finish["mode"] == "shallow" and finish["max_rounds"] == 4 and not finish["budget_exhausted"]
+        assert len(of(events, "data-trade-proposal")) == 1
+        assert text.startswith("**Proposal for your review**") and re.search(r"\[E\d+\]", text)
+        assert "can't help" not in text and of(events, "data-grounding-flags") == []
+        assert world.broker.submits == 0
+    finally:
+        await world.close()
+
+
+async def test_a_budget_nudge_is_answered_from_the_turns_results(tmp_path):
+    # Three rounds: account, market data and research, then the proposal; the answer step is cut
+    # off, and the agent's (shallow-mode) nudge must get the proposal answer, not a refusal.
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path / "three", grounded=True,
+                                settings_over={"gemini_paid": False, "shallow_max_rounds": 3})
+    try:
+        _sid, events, text = await turn(world, CORE)
+        assert events[-1]["mode"] == "shallow" and events[-1]["budget_exhausted"] is True
+        assert len(of(events, "data-trade-proposal")) == 1
+        assert "**Proposal for your review**" in text and re.search(r"\[E\d+\]", text)
+        assert "can't help" not in text and "Options, futures" not in text
+        # a nudge before anything could be proposed gets the honest "ran out of budget" reply
+        world.settings.shallow_max_rounds = 1
+        _sid, events, text = await turn(world, "Draft a mandate with a $5,000 budget.")
+        assert tools(events) == ["draft_mandate"] and "drafted a mandate" in text  # answered from the result
+        assert "can't help" not in text
+    finally:
+        await world.close()
 
 
 async def test_close_releases_the_sqlite_files_so_the_scratch_directory_can_be_removed(tmp_path):
