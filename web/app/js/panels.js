@@ -1,8 +1,8 @@
-/* Side-panel views owned by the shell.
+/* The shell's fallback Settings view.
  *
- * Portfolio, Orders and Mandate are static placeholders in index.html until Task 4.2 registers
- * real views with `registerPanel`. Settings shows read-only status from GET /api/settings: status
- * words only, never a key. A component that registered `settings` first is left in charge.
+ * The side panel's views (Portfolio, Orders, Mandate, Settings) are registered by the components
+ * (`js/components/`) with `registerPanel`. If no component registered `settings`, this read-only
+ * view is used instead: status words from GET /api/settings, never a key.
  */
 import { bindAttr, bindText } from './i18n.js';
 import { icon } from './icons.js';

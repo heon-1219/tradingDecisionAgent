@@ -1,10 +1,13 @@
-"""Smoke tests for the web app shell (`web/app`, Task 4.1).
+"""Smoke tests for the web app (`web/app`): the shell (Task 4.1) and the conversation components
+(Task 4.2, `js/components/`).
 
 What is checked without a browser: the page and its assets are served (with content types a
 browser will execute under `nosniff`), the CSP meta is in place and nothing is inline, nothing
-points at another origin, the scripts have no HTML-string sinks, every element id the scripts look
-up exists in the page, the vendored files match their recorded checksums, and (when Node is
-installed) the JavaScript parses and the i18n and SSE-parser checks pass.
+points at another origin, the scripts have no HTML-string sinks (the one `srcdoc`, for Google's
+search suggestions, is pinned to its sandbox), the components never put money through a float,
+every element id the scripts look up exists in the page, the vendored files match their recorded
+checksums, and (when Node is installed) the JavaScript parses and the Node checks pass (i18n, SSE
+parser, markdown, decimal arithmetic, shell and component logic).
 """
 from __future__ import annotations
 
@@ -23,6 +26,9 @@ from finagent.paths import ROOT
 WEB = ROOT / "web" / "app"
 JS_DIR = WEB / "js"
 JS_FILES = sorted(JS_DIR.rglob("*.js"))
+COMPONENTS_DIR = JS_DIR / "components"
+COMPONENT_FILES = sorted(COMPONENTS_DIR.glob("*.js"))
+CSS_FILES = ["app.css", "components.css"]
 VENDOR_FILES = ["vendor/purify.min.js", "vendor/streaming-markdown.min.js"]
 NODE = shutil.which("node")
 
@@ -54,9 +60,15 @@ def client():
 
 
 def test_the_expected_files_exist():
-    assert (WEB / "index.html").is_file() and (WEB / "app.css").is_file()
-    for name in ("main", "i18n", "api", "sse", "markdown", "state"):
+    assert (WEB / "index.html").is_file()
+    for name in CSS_FILES:
+        assert (WEB / name).is_file(), name
+    for name in ("main", "i18n", "api", "sse", "markdown", "state", "decimal", "strings-components-en",
+                 "strings-components-ko"):
         assert (JS_DIR / f"{name}.js").is_file(), name
+    for name in ("index", "toolcard", "thinking", "sources", "grounding", "mandate", "ticket", "portfolio",
+                 "orders", "settings"):
+        assert (COMPONENTS_DIR / f"{name}.js").is_file(), name
     for name in VENDOR_FILES:
         assert (WEB / name).is_file(), name
 
@@ -74,7 +86,7 @@ def test_root_serves_the_app_with_the_csp_meta(client):
     assert head.find("Content-Security-Policy") < first_resource
 
 
-@pytest.mark.parametrize("path", ["app.css", *[_rel(p) for p in JS_FILES], *VENDOR_FILES, "favicon.svg"])
+@pytest.mark.parametrize("path", [*CSS_FILES, *[_rel(p) for p in JS_FILES], *VENDOR_FILES, "favicon.svg"])
 def test_assets_are_served_with_a_usable_content_type(client, path):
     r = client.get(f"/app/{path}")
     assert r.status_code == 200, path
@@ -92,7 +104,8 @@ def test_assets_are_served_with_a_usable_content_type(client, path):
 
 @pytest.mark.parametrize("path", [
     "/", "/app/js/main.js", "/app/js/markdown.js", "/app/app.css", "/app/vendor/purify.min.js",
-    "/app/vendor/streaming-markdown.min.js",
+    "/app/vendor/streaming-markdown.min.js", "/app/components.css", "/app/js/decimal.js",
+    "/app/js/components/index.js", "/app/js/components/ticket.js",
 ])
 def test_the_page_and_its_assets_are_always_revalidated(client, path):
     # Without this a browser keeps running a stale module after an update (heuristic caching).
@@ -136,6 +149,7 @@ def test_vendored_files_match_their_recorded_checksums():
 
 def test_index_loads_only_local_scripts_and_none_inline():
     html = _index()
+    assert re.findall(r'<link rel="stylesheet" href="([^"]+)">', html) == ["/app/app.css", "/app/components.css"]
     scripts = re.findall(r"<script\b([^>]*)>(.*?)</script>", html, flags=re.S)
     assert [re.search(r'src="([^"]+)"', attrs).group(1) for attrs, _ in scripts] == [
         "/app/js/boot.js", "/app/vendor/purify.min.js", "/app/js/main.js",
@@ -157,11 +171,21 @@ def test_index_references_no_external_urls():
         assert not url.startswith("//")
 
 
-def test_css_requests_nothing():
-    css = (WEB / "app.css").read_text(encoding="utf-8")
+@pytest.mark.parametrize("name", CSS_FILES)
+def test_css_requests_nothing(name):
+    css = (WEB / name).read_text(encoding="utf-8")
     assert "@import" not in css
     assert "url(" not in css
     assert not re.search(r"https?://", css)
+
+
+def test_the_components_import_only_what_the_page_serves():
+    # `main.js` loads the components through one import; every import resolves to a served file.
+    assert "import './components/index.js';" in (JS_DIR / "main.js").read_text(encoding="utf-8")
+    for path in JS_FILES:
+        for target in re.findall(r"^\s*import\b[^'\"]*['\"]([^'\"]+)['\"]", path.read_text(encoding="utf-8"), re.M):
+            resolved = (path.parent / target).resolve()
+            assert resolved.is_file() and WEB.resolve() in resolved.parents, f"{_rel(path)}: {target}"
 
 
 def test_js_has_no_external_urls_and_only_relative_imports():
@@ -198,17 +222,90 @@ _HTML_ASSIGN = re.compile(r"\b(?:innerHTML|outerHTML)\s*\+?=(?!=)\s*(.*)")
 _SAFE_RHS = re.compile(r"""^(?:DOMPurify\.sanitize\(.*\)|'[^'$]*'|"[^"$]*"|``)\s*;?\s*$""")
 _FORBIDDEN = ("insertAdjacentHTML", "document.write", "eval(", "new Function", "setHTMLUnsafe",
               "createContextualFragment", "srcdoc")
+# The one place that may set `srcdoc`: Google's search-suggestions HTML, in a sandboxed iframe.
+SRCDOC_FILE = "js/components/grounding.js"
+
+
+def _code_lines(path):
+    """(line number, code without `//` comments) for every line that is not inside a comment block."""
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.lstrip().startswith(("*", "/*")):
+            yield number, line.split("//")[0], line
 
 
 def test_js_never_assigns_non_constant_html():
     for path in JS_FILES:
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            code = line.split("//")[0] if not line.lstrip().startswith(("*", "/*")) else ""
+        for number, code, line in _code_lines(path):
             m = _HTML_ASSIGN.search(code)
             if m:
                 assert _SAFE_RHS.match(m.group(1)), f"{_rel(path)}:{number}: {line.strip()}"
             for needle in _FORBIDDEN:
+                if needle == "srcdoc" and _rel(path) == SRCDOC_FILE:
+                    continue
                 assert needle not in code, f"{_rel(path)}:{number}: {needle}"
+
+
+def test_third_party_html_only_ever_goes_into_a_locked_sandbox():
+    # Google requires its search-suggestions HTML to be shown unmodified. It is never parsed into the
+    # page: one statement hands it to an iframe whose sandbox allows popups and nothing else.
+    lines = [(n, code.strip()) for n, code, _ in _code_lines(WEB / SRCDOC_FILE)]
+    code = "\n".join(c for _, c in lines)
+    # The only thing ever put in front of Google's HTML is a constant <base> that opens its links in
+    # a new tab (inside the sandbox they could otherwise only navigate the frame, which the CSP refuses).
+    assert [c for _, c in lines if "srcdoc" in c] == ["frame.srcdoc = NEW_TAB + html;"]
+    assert "const NEW_TAB = '<base target=\"_blank\">';" in code
+    assert "const SANDBOX = 'allow-popups allow-popups-to-escape-sandbox';" in code
+    assert "frame.setAttribute('sandbox', SANDBOX);" in code
+    assert "frame.setAttribute('referrerpolicy', 'no-referrer');" in code
+    for token in ("allow-scripts", "allow-same-origin", "allow-forms", "allow-top-navigation", "allow-modals"):
+        assert token not in code, token
+    assert code.index("frame.setAttribute('sandbox', SANDBOX);") < code.index("frame.srcdoc = NEW_TAB + html;")
+    assert code.count("'iframe'") == 1  # one frame is built, here
+    for path in JS_FILES:  # and no other script creates a frame
+        if _rel(path) != SRCDOC_FILE:
+            assert all("'iframe'" not in c and '"iframe"' not in c for _, c, _ in _code_lines(path)), _rel(path)
+    # the page's CSP still confines what a frame may load, and scripts stay same-origin only
+    assert "frame-src 'self'" in CSP and "script-src 'self'" in CSP
+
+
+# Money is a decimal string from the server and is never converted to a float: arithmetic and
+# formatting go through js/decimal.js (scaled BigInt). A line in the components that needs one of
+# these calls for something that is not money (seconds, pixels) says so in a `// not money:` comment.
+_FLOAT_CALLS = ("parseFloat(", "Number(", "parseInt(", ".toFixed(", "Math.round(")
+
+
+def test_components_never_put_money_through_a_float():
+    assert COMPONENT_FILES
+    for path in COMPONENT_FILES:
+        for number, code, line in _code_lines(path):
+            used = [call for call in _FLOAT_CALLS if call in code]
+            if used:
+                assert "// not money:" in line, f"{_rel(path)}:{number}: {used[0]} without a '// not money:' note"
+    decimal = (JS_DIR / "decimal.js").read_text(encoding="utf-8")
+    for call in ("parseFloat(", "Number(", "parseInt(", ".toFixed("):
+        assert call not in decimal, call
+    assert "BigInt(" in decimal
+
+
+def test_the_float_check_catches_what_it_should():
+    bad = ["const total = parseFloat(leg.qty) * parseFloat(leg.limit_price);", "x = Number(account.cash) - cost",
+           "cost.toFixed(2)", "Math.round(price * 100) / 100", "parseInt(value, 10)"]
+    good = ["const cost = mul(leg.qty, leg.limit_price);", "Number.isNaN(time)", "formatMoney(total)", "String(n)"]
+    for line in bad:
+        assert any(call in line for call in _FLOAT_CALLS), line
+    for line in good:
+        assert not any(call in line for call in _FLOAT_CALLS), line
+
+
+def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
+    for name in ("settings.js", "settings-kill.js"):
+        code = "\n".join(c for _, c, _ in _code_lines(COMPONENTS_DIR / name))
+        for sink in ("localStorage", "sessionStorage", "storage.", "console.", "document.cookie"):
+            assert sink not in code, f"{name}: {sink}"
+    settings = (COMPONENTS_DIR / "settings.js").read_text(encoding="utf-8")
+    assert "input.type = secret ? 'password' : 'text';" in settings and "input.autocomplete = 'off';" in settings
+    assert "for (const input of inputs) input.value = '';" in settings  # cleared after every save
+    assert "input.value =" not in settings.replace("input.value = '';", "")  # never pre-filled
 
 
 def test_the_html_sink_check_catches_what_it_should():
@@ -301,4 +398,24 @@ def test_markdown_dom_behaviour():
 @needs_node
 def test_shell_logic():
     result = _node("scripts/test_shell.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_decimal_arithmetic():
+    result = _node("scripts/test_decimal.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_component_logic():
+    # The ticket model, the tool cards, the poller, the shared ticker, the panels and the forms.
+    result = _node("scripts/test_components.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_ticket_card_through_every_confirm_answer():
+    # The real ticket card on the fake DOM: 200, 409 requote, 409 rejected, 410, 423, 503, 502, 404.
+    result = _node("scripts/test_ticket_card.mjs")
     assert result.returncode == 0, result.stdout + result.stderr

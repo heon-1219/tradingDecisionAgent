@@ -10,8 +10,13 @@
  * data-i18n-title-vars and data-i18n-placeholder-vars for the attributes.
  * Strings are plain text, never markup. `scripts/check_i18n.mjs` checks that both languages have
  * the same keys and no empty value.
+ *
+ * The shell's strings are below; the conversation components' strings live in
+ * `strings-components-en.js` and `strings-components-ko.js` and are merged into the same `dict`.
  */
 import { storage, STORAGE_KEYS, emit } from './state.js';
+import componentsEn from './strings-components-en.js';
+import componentsKo from './strings-components-ko.js';
 
 export const LANGS = ['en', 'ko'];
 export const DEFAULT_LANG = 'en';
@@ -54,10 +59,6 @@ export const dict = {
     tab_mandate: 'Mandate',
     tab_settings: 'Settings',
     panel_close: 'Close the panel',
-    soon_badge: 'Coming soon',
-    soon_portfolio: 'Positions, cash and buying power from your paper account will show here.',
-    soon_orders: 'Orders you confirm, with their fills and status, will show here.',
-    soon_mandate: 'Your investing rules (budget, position limits, allowed assets) will show here, ready to edit.',
     settings_heading: 'Connections',
     settings_alpaca: 'Alpaca paper account',
     settings_tavily: 'Tavily web search',
@@ -130,6 +131,7 @@ export const dict = {
     announce_stopped: 'Response stopped',
     announce_error: 'Response ended with an error',
     dismiss: 'Dismiss',
+    ...componentsEn,
   },
 
   ko: {
@@ -169,10 +171,6 @@ export const dict = {
     tab_mandate: '투자 원칙',
     tab_settings: '설정',
     panel_close: '패널 닫기',
-    soon_badge: '준비 중',
-    soon_portfolio: '모의 계좌의 보유 종목, 현금, 매수 가능 금액이 여기에 표시됩니다.',
-    soon_orders: '확인한 주문과 체결 상태가 여기에 표시됩니다.',
-    soon_mandate: '예산, 종목별 한도, 투자 가능 자산 같은 투자 원칙이 여기에 표시되며 바로 수정할 수 있습니다.',
     settings_heading: '연결 상태',
     settings_alpaca: 'Alpaca 모의 계좌',
     settings_tavily: 'Tavily 웹 검색',
@@ -245,6 +243,7 @@ export const dict = {
     announce_stopped: '응답 중지됨',
     announce_error: '오류로 응답이 끝났습니다',
     dismiss: '닫기',
+    ...componentsKo,
   },
 };
 

@@ -223,4 +223,37 @@ test('random markdown-ish text never opens math and never gains a backslash', ()
   }
 });
 
+// --- the vendored parser's shape -------------------------------------------------------------------
+
+test('the parser object is flat: primitives, typed arrays and the renderer', () => {
+  // `dollarOpensMath` probes a shallow copy of the parser (`{...parser}`, typed arrays sliced). A
+  // field holding any other object (a plain array, a Map, a nested state object) would be shared
+  // between the copy and the real parser, and the probe would corrupt the real one. If a vendor
+  // upgrade adds such a field, this fails loudly: deep-copy that field in markdown.js first.
+  const renderer = { data: null, add_token() {}, end_token() {}, add_text() {}, set_attr() {} };
+  const shapeOf = (parser) => {
+    const offenders = [];
+    for (const [key, value] of Object.entries(parser)) {
+      if (key === 'renderer') {
+        assert.equal(value, renderer, 'renderer is the object passed in');
+        continue;
+      }
+      const primitive = value === null || ['string', 'number', 'boolean', 'undefined', 'bigint'].includes(typeof value);
+      if (!primitive && !ArrayBuffer.isView(value)) offenders.push(`${key}: ${Object.prototype.toString.call(value)}`);
+    }
+    return offenders;
+  };
+  const parser = smd.parser(renderer);
+  assert.ok(Object.keys(parser).includes('renderer'));
+  assert.deepEqual(shapeOf(parser), [], 'a fresh parser');
+  // The same must hold in every state the parser passes through.
+  const sample = '# Title $x$ `code` [a](http://b)\n\n> quote\n\n|a|b|\n|-|-|\n|1|2|\n\n```js\nlet a\n```\n\n1. one\n   - [ ] two\n\n    indented\n';
+  for (const char of sample) {
+    smd.parser_write(parser, char);
+    assert.deepEqual(shapeOf(parser), [], `after writing ${JSON.stringify(char)}`);
+  }
+  smd.parser_end(parser);
+  assert.deepEqual(shapeOf(parser), [], 'after parser_end');
+});
+
 console.log(`\n${checks} markdown checks passed`);

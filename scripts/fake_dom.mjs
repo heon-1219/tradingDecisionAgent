@@ -7,6 +7,11 @@
 // comma lists). `installFakeDom()` puts a fresh document on globalThis and returns it;
 // `document.created` lists every tag ever created and `document.attached` every tag ever inserted,
 // so a test can prove an element (e.g. <img>) never existed.
+//
+// For the component tests (scripts/test_components.mjs) it also has: isConnected, insertBefore,
+// after, lastChild, matches / closest (same simple selectors), getElementById, and events:
+// addEventListener stores the listener, and `click()` / `dispatch(type, init)` call the listeners of
+// the element and then of its ancestors (bubbling), unless the element is disabled.
 
 class FakeNode {
   constructor(ownerDocument) {
@@ -31,6 +36,18 @@ class FakeNode {
     const fresh = nodes.map((n) => parent._adopt(n));
     parent.childNodes.splice(parent.childNodes.indexOf(this), 1, ...fresh);
     this.parentNode = null;
+  }
+
+  after(...nodes) {
+    const parent = this.parentNode;
+    if (!parent) return;
+    const fresh = nodes.map((n) => parent._adopt(n));
+    parent.childNodes.splice(parent.childNodes.indexOf(this) + 1, 0, ...fresh);
+  }
+
+  get isConnected() {
+    for (let n = this; n; n = n.parentNode) if (n === this.ownerDocument.documentElement) return true;
+    return false;
   }
 }
 
@@ -135,8 +152,16 @@ class FakeElement extends FakeNode {
     this.append(...nodes);
   }
 
+  insertBefore(node, reference) {
+    if (!reference) return this.appendChild(node);
+    const child = this._adopt(node);
+    this.childNodes.splice(this.childNodes.indexOf(reference), 0, child);
+    return node;
+  }
+
   get children() { return this.childNodes.filter((n) => n.nodeType === 1); }
   get firstChild() { return this.childNodes[0] || null; }
+  get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; }
   get firstElementChild() { return this.children[0] || null; }
 
   contains(node) {
@@ -185,9 +210,46 @@ class FakeElement extends FakeNode {
   }
 
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  addEventListener() {}
-  removeEventListener() {}
-  focus() {}
+  matches(selector) { return this._matches(compile(selector)); }
+  closest(selector) {
+    const rules = compile(selector);
+    for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n._matches(rules)) return n;
+    return null;
+  }
+
+  // --- events (bubbling only) ---
+  addEventListener(type, listener) {
+    if (!this._listeners) this._listeners = new Map();
+    if (!this._listeners.has(type)) this._listeners.set(type, []);
+    this._listeners.get(type).push(listener);
+  }
+
+  removeEventListener(type, listener) {
+    const list = this._listeners && this._listeners.get(type);
+    if (list && list.includes(listener)) list.splice(list.indexOf(listener), 1);
+  }
+
+  /* Call the `type` listeners of this element and its ancestors. Returns the event object. */
+  dispatch(type, init = {}) {
+    const event = {
+      type, target: this, defaultPrevented: false, stopped: false, ...init,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.stopped = true; },
+    };
+    for (let n = this; n && !event.stopped; n = n.parentNode) {
+      for (const listener of [...((n._listeners && n._listeners.get(type)) || [])]) listener(event);
+    }
+    return event;
+  }
+
+  click() {
+    if (this.disabled) return null; // a disabled control does not fire click
+    return this.dispatch('click');
+  }
+
+  focus() { this.ownerDocument.activeElement = this; }
+  scrollIntoView() {}
+  getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
 }
 
 export function installFakeDom() {
@@ -203,7 +265,11 @@ export function installFakeDom() {
       return new FakeElement(this, tag, namespace);
     },
     createTextNode(data) { return new FakeText(this, data); },
-    getElementById() { return null; },
+    getElementById(id) {
+      return this.documentElement.querySelectorAll('*').find((el) => el.getAttribute('id') === id) || null;
+    },
+    addEventListener() {},
+    activeElement: null,
   };
   document.documentElement = new FakeElement(document, 'html');
   document.body = document.documentElement.appendChild(new FakeElement(document, 'body'));

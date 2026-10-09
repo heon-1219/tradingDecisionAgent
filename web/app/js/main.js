@@ -6,14 +6,15 @@
  * latency of `finish`, and one polite announcement is made. Stop aborts the fetch; that is a clean
  * end, not an error. Nothing can be sent while a response streams or while a chat is loading.
  *
- * Task 4.2: add `import './components/index.js';` to the imports below. Components add listeners
- * with `registerEvent`, take over the tool rows and the Thoughts block with `replaceEvent`, attach
- * panel views with `registerPanel` (all in registry.js) and add markdown post-processors with
- * `addPostProcessor` (markdown.js). The shell's own listeners for the answer text, errors and
- * `finish` stay in place whatever a component registers.
+ * The conversation components (`components/index.js`) add listeners with `registerEvent`, take over
+ * the tool rows and the Thoughts block with `replaceEvent`, attach panel views with `registerPanel`
+ * (all in registry.js) and add markdown post-processors with `addPostProcessor` (markdown.js). The
+ * shell's own listeners for the answer text, errors and `finish` stay in place whatever a component
+ * registers.
  */
 import { api, isAbort } from './api.js';
 import { initCopyButtons } from './clipboard.js';
+import './components/index.js';
 import { initComposer } from './composer.js';
 import { applyI18n, bindText, getLang, t } from './i18n.js';
 import { hydrateIcons } from './icons.js';
@@ -76,7 +77,7 @@ initTopbar();
 initCopyButtons($('thread'));
 $('new-chat').addEventListener('click', () => newChat());
 
-// Hooks for components (Task 4.2).
+// Hooks for the components.
 on('chat:send', (text) => send(String(text ?? '')));
 on('panel:open', (name) => layout.openPanel(name));
 on('settings:refresh', () => refreshSettings());
@@ -142,9 +143,10 @@ async function openSession(id) {
   // Sending is blocked until this load settles: a message sent now would go to the chat that was
   // open before, and the history arriving afterwards would wipe its live turn.
   setState({ loadingSession: id });
-  layout.closeDrawer();
-  thread.showLoading();
   try {
+    // Inside the try: whatever throws here, `finally` lifts the block on sending.
+    layout.closeDrawer();
+    thread.showLoading();
     const detail = await api.getSession(id);
     if (!loads.isCurrent(token)) return; // a newer load, or New chat, took over
     const session = detail?.session || { id, title: '' };

@@ -9,6 +9,7 @@
   <title>FinAgent · Paper trading</title>
   <link rel="icon" type="image/svg+xml" href="/app/favicon.svg">
   <link rel="stylesheet" href="/app/app.css">
+  <link rel="stylesheet" href="/app/components.css">
   <script src="/app/js/boot.js"></script>
 </head>
 <body>
@@ -122,28 +123,10 @@
       </div>
 
       <div class="panel-body">
-        <!-- Task 4.2 mounts its views into these tab panels (registerPanel in js/registry.js). -->
-        <section class="tabpanel" role="tabpanel" id="tabpanel-portfolio" aria-labelledby="tab-portfolio" tabindex="0">
-          <div class="placeholder">
-            <span class="icon" data-icon="pie" data-icon-size="22"></span>
-            <p class="placeholder-badge" data-i18n="soon_badge">Coming soon</p>
-            <p class="placeholder-text" data-i18n="soon_portfolio">Positions, cash and buying power from your paper account will show here.</p>
-          </div>
-        </section>
-        <section class="tabpanel" role="tabpanel" id="tabpanel-orders" aria-labelledby="tab-orders" tabindex="0" hidden>
-          <div class="placeholder">
-            <span class="icon" data-icon="receipt" data-icon-size="22"></span>
-            <p class="placeholder-badge" data-i18n="soon_badge">Coming soon</p>
-            <p class="placeholder-text" data-i18n="soon_orders">Orders you confirm, with their fills and status, will show here.</p>
-          </div>
-        </section>
-        <section class="tabpanel" role="tabpanel" id="tabpanel-mandate" aria-labelledby="tab-mandate" tabindex="0" hidden>
-          <div class="placeholder">
-            <span class="icon" data-icon="shield" data-icon-size="22"></span>
-            <p class="placeholder-badge" data-i18n="soon_badge">Coming soon</p>
-            <p class="placeholder-text" data-i18n="soon_mandate">Your investing rules (budget, position limits, allowed assets) will show here, ready to edit.</p>
-          </div>
-        </section>
+        <!-- The components mount their views into these tab panels (registerPanel in js/registry.js). -->
+        <section class="tabpanel" role="tabpanel" id="tabpanel-portfolio" aria-labelledby="tab-portfolio" tabindex="0"></section>
+        <section class="tabpanel" role="tabpanel" id="tabpanel-orders" aria-labelledby="tab-orders" tabindex="0" hidden></section>
+        <section class="tabpanel" role="tabpanel" id="tabpanel-mandate" aria-labelledby="tab-mandate" tabindex="0" hidden></section>
         <section class="tabpanel" role="tabpanel" id="tabpanel-settings" aria-labelledby="tab-settings" tabindex="0" hidden></section>
       </div>
     </aside>
