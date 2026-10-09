@@ -256,6 +256,38 @@ def _name_before_separator(text: str, sep: int, floor: int) -> str:
     return text[i:end]
 
 
+_OPEN_BRACKETS = "[{("
+_CLOSE_BRACKETS = "]})"
+
+
+def _bracketed_value_end(text: str, start: int) -> int:
+    """The index just past the bracket that closes the one at `text[start]`, skipping quoted
+    strings (so a `]` inside `"..."` does not end the value). An unclosed bracket or quote runs to
+    the end of the text: failing safe beats leaking the rest. One forward pass, so linear."""
+    n = len(text)
+    depth = 0
+    quote = None
+    i = start
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in _QUOTE_CHARS:
+            quote = ch
+        elif ch in _OPEN_BRACKETS:
+            depth += 1
+        elif ch in _CLOSE_BRACKETS:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
 def _secret_value_span(text: str, sep: int, covered_end: int) -> tuple[int, int] | None:
     """The `[start, end)` span of the value after the separator `text[sep]` that should be
     redacted, or `None` if there's nothing new to redact. Scanning never starts before
@@ -269,6 +301,9 @@ def _secret_value_span(text: str, sep: int, covered_end: int) -> tuple[int, int]
       quote, as before."""
     n = len(text)
     value_start = _WHITESPACE_RE.match(text, sep + 1).end()
+    if covered_end <= value_start < n and text[value_start] in _OPEN_BRACKETS:
+        # A list or object value (`"api_key": ["sk-..."]`): redact through the matching bracket.
+        return value_start, _bracketed_value_end(text, value_start)
     quote_at = _BACKSLASHES_RE.match(text, value_start).end()
     if quote_at < n and text[quote_at] in _QUOTE_CHARS:
         quote = text[quote_at]

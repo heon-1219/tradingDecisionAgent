@@ -855,3 +855,30 @@ def test_known_secret_scrubbing_is_fast_on_a_100k_leaf():
     ledger.append("sess-1", "note", {"message": text})
     assert time.perf_counter() - start < 1.0
     assert "SECRETVALUE0007" not in _stored_text(db)
+
+
+# A list or object value after a secret-like name is redacted whole (it used to stop at the
+# first quote inside the brackets, leaking `"api_key": ["sk-..."]`).
+@pytest.mark.parametrize("text, secrets", [
+    ('{"api_key": ["sk-LISTSECRET-1"]}', ["sk-LISTSECRET-1"]),
+    ("api_key=[sk-LISTSECRET-2, sk-LISTSECRET-3]", ["sk-LISTSECRET-2", "sk-LISTSECRET-3"]),
+    ('"api_key": [["a"], "sk-LISTSECRET-4"]', ["sk-LISTSECRET-4"]),
+    ('"secret": {"inner": "sk-LISTSECRET-5"}', ["sk-LISTSECRET-5"]),
+    ('"api_key": ["sk-LISTSECRET-6"', ["sk-LISTSECRET-6"]),  # unclosed: fail safe to the end
+    ("token: (sk-LISTSECRET-7, x)", ["sk-LISTSECRET-7"]),
+])
+def test_bracketed_values_after_secret_names_are_redacted_whole(text, secrets):
+    out = _redact_free_text(text)
+    for secret in secrets:
+        assert secret not in out, out
+    assert "[REDACTED]" in out
+
+
+def test_bracketed_values_after_ordinary_names_are_kept():
+    text = '{"symbols": ["AAPL", "VOO"], "qty": [1, 2]}'
+    assert _redact_free_text(text) == text
+
+
+def test_bracketed_secret_values_stay_linear():
+    assert _time_redact_free_text('"api_key": [' * 20_000) < _REDOS_TIME_BUDGET_SEC
+    assert _time_redact_free_text('"api_key": ["x", ' * 10_000) < _REDOS_TIME_BUDGET_SEC
