@@ -113,6 +113,25 @@ await test('every answer of the ticket endpoints maps to one outcome', () => {
   assert.equal(kind('refresh', 410, { status: 'rejected' }), 'expired');
   assert.equal(kind('refresh', 502, {}, 'refresh_failed'), 'failed');
   assert.equal(kind('refresh', 0, {}, 'network_error'), 'failed');
+  // a refused refresh keeps the server's reason and block codes
+  const refused = model.interpretResult('refresh', { ok: false, status: 409, body: { status: 'rejected',
+    reason: 'no_executable_legs', block_codes: ['price_band'] } });
+  assert.deepEqual([refused.kind, refused.reason, refused.blockCodes], ['rejected', 'no_executable_legs', ['price_band']]);
+  // what each reason means for the card
+  const why = model.refusalKind;
+  assert.equal(why('not_newest', []), 'newer');
+  assert.equal(why('not_paper', []), 'not_paper');
+  assert.equal(why('no_executable_legs', ['price_band']), 'prices');
+  assert.equal(why('no_executable_legs', ['bad_tick', 'no_quote', 'price_band']), 'prices');
+  assert.equal(why('no_executable_legs', ['denied_symbol', 'price_band']), 'mandate');
+  for (const code of ['denied_symbol', 'order_type_not_allowed', 'max_positions', 'budget', 'orders_per_day']) {
+    assert.equal(why('no_executable_legs', [code]), 'mandate', code);
+  }
+  assert.equal(why('no_executable_legs', ['account_blocked', 'price_band']), 'other');
+  assert.equal(why('no_executable_legs', []), 'other');
+  assert.equal(why('ticket_state', []), 'other');
+  assert.equal(why(undefined, undefined), 'other', 'an older server: never "a newer ticket exists"');
+  assert.equal(why('no_executable_legs', 'price_band'), 'other');
 });
 
 await test('the Modify message and its field checks', () => {
@@ -133,6 +152,9 @@ await test('the Modify message and its field checks', () => {
   assert.deepEqual(Object.keys(bad.errors).sort(), ['0.limit_price', '0.qty', '1.limit_price', '1.qty', '2.notional']);
   // the expired-ticket fallback sends the legs as they are
   assert.equal(model.modifyMessage([legs[0]]), 'Modify: buy 3 VOO limit 612.00');
+  // an order the app cannot read is never turned into a buy
+  assert.equal(model.modifyMessage([leg({ side: 'short' })]), null);
+  assert.equal(model.modifyMessage([legs[0], leg({ side: undefined })]), null);
 });
 
 // --- pure: tool cards, mandate, orders, popover -----------------------------------------------------------

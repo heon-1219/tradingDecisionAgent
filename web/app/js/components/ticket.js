@@ -6,7 +6,8 @@
  * confirmed; `submitting` and `submitted` show the order timeline; `failed` shows what happened.
  * Only the newest ticket of a chat is confirmable: a new one retires the others on screen. An
  * expired card keeps Refresh quote: the server re-quotes the chat's newest ticket even after it
- * expired; for an older one it answers 409, and the card offers "Ask for a new ticket" instead.
+ * expired. A refused refresh (409) carries a `reason`, and the card says what it means
+ * (`refusedNotice` below): only `not_newest` claims that a newer ticket exists.
  *
  * Confirm sends the ticket's `hash` back, is disabled while a request is in flight, has no keyboard
  * shortcut and is never focused by the app. How each answer is handled is decided by
@@ -20,10 +21,12 @@ import { canSend, emit, on, state } from '../state.js';
 import { actionButton, ageParts, badge, clockText, el, iconSpan, label, str, timeOf } from './dom.js';
 import { ensurePortfolio, snapshot } from './portfolio-store.js';
 import { nowMs, onTick } from './ticker.js';
-import { confirmLabel, executableLegs, interpretResult, modifyMessage, requoteChanges, ticketState } from './ticket-model.js';
+import {
+  confirmLabel, executableLegs, interpretResult, modifyMessage, refusalKind, requoteChanges, ticketState,
+} from './ticket-model.js';
 import { createModifyForm } from './ticket-modify.js';
 import { noticeNodes, submittedNotice } from './ticket-notice.js';
-import { noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
+import { newerCard, noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
 import { createTimeline } from './ticket-timeline.js';
 import { ticketBody } from './ticket-view.js';
 
@@ -46,14 +49,47 @@ function panelLink(key, panel, iconName) {
   return button;
 }
 
-/* "Ask for a new ticket": the same legs, sent to the assistant as a Modify message. */
+/* "Ask for a new ticket": the same legs, sent to the assistant as a Modify message. Disabled, like
+ * Confirm, when the card cannot read an order of the ticket. */
 function askAgainButton(ticket) {
   const ask = actionButton('btn btn-small', 'ticket_ask_again', { iconName: 'refresh', iconSize: 14 });
+  const message = confirmLabel(ticket).safe ? modifyMessage(executableLegs(ticket), getLang()) : null;
+  ask.disabled = !message;
   ask.addEventListener('click', () => {
-    if (canSend(state)) emit('chat:send', modifyMessage(executableLegs(ticket), getLang()));
+    if (!message) return;
+    if (canSend(state)) emit('chat:send', message);
     else notify(t('ticket_modify_busy'));
   });
   return ask;
+}
+
+/* "Show the newer ticket": scroll to it and move the focus there. */
+function showButton(card) {
+  const show = actionButton('btn btn-quiet btn-small', 'ticket_show_newer', { iconName: 'ticket', iconSize: 14 });
+  show.addEventListener('click', () => {
+    card.el.scrollIntoView({ block: 'nearest' });
+    card.el.focus({ preventScroll: true });
+  });
+  return show;
+}
+
+/* The notice for a refused refresh (409), from the server's reason; `detail` is the server's text. */
+function refusedNotice(ticket, sessionId, outcome) {
+  const detail = outcome.message;
+  switch (refusalKind(outcome.reason, outcome.blockCodes)) {
+    case 'newer': {
+      const newer = newerCard(sessionId, ticket.id);
+      return { tone: 'warn', key: 'ticket_refresh_newer', actions: [...(newer ? [showButton(newer)] : []), askAgainButton(ticket)] };
+    }
+    case 'prices':
+      return { tone: 'warn', key: 'ticket_refresh_prices', detail, actions: [askAgainButton(ticket)] };
+    case 'mandate':
+      return { tone: 'warn', key: 'ticket_refresh_mandate', detail, actions: [panelLink('open_mandate', 'mandate', 'shield')] };
+    case 'not_paper':
+      return { tone: 'bad', key: 'ticket_refresh_not_paper', detail, actions: [panelLink('open_settings', 'settings', 'sliders')] };
+    default:
+      return { tone: 'bad', key: 'ticket_refresh_refused', detail };
+  }
 }
 
 export function createTicketCard(initial, { sessionId, orders = [] }) {
@@ -128,7 +164,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
       confirm.addEventListener('click', () => act('confirm'));
       if (!name.safe && executableLegs(ticket).length) row.appendChild(label('p', 'ticket-caveat', 'ticket_unreadable'));
       const modify = actionButton('btn btn-modify', 'ticket_modify');
-      modify.disabled = busy;
+      modify.disabled = busy || !name.safe; // a Modify message would have to guess the order
       modify.addEventListener('click', openModify);
       const reject = actionButton('btn btn-quiet', 'ticket_reject');
       reject.disabled = busy;
@@ -186,7 +222,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   }
 
   function openModify() {
-    if (busy || currentState() !== 'proposed') return;
+    if (busy || currentState() !== 'proposed' || !confirmLabel(ticket).safe) return;
     const form = createModifyForm({
       legs: executableLegs(ticket),
       onCancel() {
@@ -194,7 +230,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         root.querySelector('.ticket-actions .btn-modify')?.focus(); // back to where the fields were opened
       },
       onSend(message) {
-        if (!canSend(state)) return false;
+        if (!message || !canSend(state)) return false;
         modifyHost.replaceChildren();
         emit('chat:send', message);
         return true;
@@ -279,9 +315,9 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         announce(t('ticket_announce_rejected'));
         break;
       case 'rejected': // 409: the returned ticket says where things stand; the server says why
-        if (action === 'refresh' && ticket.status === 'expired') { // not the chat's newest ticket
-          replaced = true;
-          setNotice({ tone: 'warn', key: 'ticket_expired_late', actions: [askAgainButton(ticket)] });
+        if (action === 'refresh') {
+          if (outcome.reason === 'not_newest') replaced = true; // Refresh cannot help any more
+          setNotice(refusedNotice(ticket, sessionId, outcome));
           break;
         }
         setNotice({ tone: 'bad', key: ticket.status === 'proposed' ? 'ticket_changed' : 'ticket_conflict', detail: said });

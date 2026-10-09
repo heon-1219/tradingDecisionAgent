@@ -114,28 +114,96 @@ await test('countdown: one shared ticker; at expiry the card greys and offers Re
   clock.time -= 288000; // back to "now" for the following tests
 });
 
-await test('an expired ticket that is not the newest: 409, no second Refresh, "Ask for a new ticket"', async () => {
-  net.routes = [portfolio];
-  const tk = ticket({ status: 'expired' });
+/* Press Refresh quote on an expired card and have the server refuse it (409) with `reason`. */
+async function refuseRefresh(tk, reason, blockCodes, message) {
   const { card } = propose(tk);
   assert.equal(card.getAttribute('data-state'), 'expired');
   net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/refresh`, status: 409, body: { status: 'rejected',
-    message: 'ticket is expired and a newer ticket exists; nothing was re-quoted', ticket: tk, orders: [], new_ticket: null } }];
-  button(card, 'ticket-actions').querySelector('button').click();
+    message, ticket: tk, orders: [], new_ticket: null, ...(reason === undefined ? {} : { reason, block_codes: blockCodes }) } }];
+  card.querySelector('.ticket-actions').querySelector('button').click();
   await flush();
   assert.equal(card.getAttribute('data-state'), 'expired');
-  assert.ok(noticeText(card).includes('cannot be re-quoted: this chat has a newer ticket'));
-  assert.equal(card.querySelector('.ticket-actions'), null);
+  return card;
+}
+const noticeButtons = (card) => card.querySelector('.ticket-notice').querySelectorAll('button');
+const refreshLeft = (card) => Boolean(card.querySelector('.ticket-actions'));
+
+await test('refused refresh, a newer ticket exists: points to it and offers a new ticket, no second Refresh', async () => {
+  const tk = ticket({ status: 'expired' });
+  const { card } = propose(tk);
+  const newer = propose(ticket()).card; // the chat's newer ticket, further down
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/refresh`, status: 409, body: { status: 'rejected',
+    message: 'ticket is expired and a newer ticket exists; nothing was re-quoted', ticket: tk, orders: [], new_ticket: null,
+    reason: 'not_newest', block_codes: [] } }];
+  card.querySelector('.ticket-actions').querySelector('button').click();
+  await flush();
+  assert.ok(noticeText(card).includes('This chat has a newer ticket'));
+  assert.equal(serverDetail(card), null, 'the localized text says it all');
+  assert.equal(refreshLeft(card), false);
+  assert.deepEqual(noticeButtons(card).map((b) => b.textContent), ['Show the newer ticket', 'Ask for a new ticket']);
+  noticeButtons(card)[0].click();
+  assert.equal(document.activeElement, newer, 'the newer ticket gets the focus');
   const sent = [];
   const stop = on('chat:send', (text) => sent.push(text));
-  card.querySelector('.ticket-notice').querySelector('button').click();
+  noticeButtons(card)[1].click();
   stop();
   assert.deepEqual(sent, ['Modify: buy 3 VOO limit 612.00']);
-  // a 409 on refresh for any other reason is the ordinary conflict, without the offer
-  const other = ticket({ status: 'superseded' });
-  const second = propose(other).card;
+});
+
+await test('refused refresh, other reasons: neutral words, the server\'s reason in the detail row, the right offer', async () => {
+  // prices alone: Refresh stays (prices move), and a new ticket is offered
+  let card = await refuseRefresh(ticket({ status: 'expired' }), 'no_executable_legs', ['price_band'],
+    'No leg can be placed at current prices: leg 1 VOO: limit is 9% away from the last price');
+  assert.ok(noticeText(card).includes('price checks'));
+  assert.ok(!noticeText(card).includes('newer ticket'));
+  assert.ok(serverDetail(card).textContent.includes('9% away'));
+  assert.deepEqual(noticeButtons(card).map((b) => b.textContent), ['Ask for a new ticket']);
+  assert.equal(refreshLeft(card), true);
+  // the mandate (the reviewer's case): explain, link the Mandate panel, no new-ticket offer
+  card = await refuseRefresh(ticket({ status: 'expired' }), 'no_executable_legs', ['denied_symbol'],
+    "No leg can be placed at current prices: leg 1 VOO: VOO is on the mandate's deny list");
+  assert.ok(noticeText(card).includes('mandate does not allow'));
+  assert.ok(!noticeText(card).includes('newer ticket'));
+  assert.ok(serverDetail(card).textContent.includes('deny list'));
+  assert.deepEqual(noticeButtons(card).map((b) => b.textContent), ['Open Mandate']);
+  const opened = [];
+  const stop = on('panel:open', (name) => opened.push(name));
+  noticeButtons(card)[0].click();
+  // not a paper account: explain, link Settings
+  card = await refuseRefresh(ticket({ status: 'expired' }), 'not_paper', [],
+    'The connected Alpaca account is not a paper account, so nothing was re-quoted.');
+  assert.ok(noticeText(card).includes('not a paper account'));
+  assert.deepEqual(noticeButtons(card).map((b) => b.textContent), ['Open Settings']);
+  noticeButtons(card)[0].click();
+  stop();
+  assert.deepEqual(opened, ['mandate', 'settings']);
+  // anything else, and an older server without `reason`: neutral, never "a newer ticket"
+  for (const [reason, codes] of [['no_executable_legs', ['account_blocked']], ['ticket_state', []], [undefined, undefined]]) {
+    card = await refuseRefresh(ticket({ status: 'expired' }), reason, codes, 'No leg can be placed: the account cannot trade');
+    assert.ok(noticeText(card).includes('could not be re-quoted'), String(reason));
+    assert.ok(!noticeText(card).includes('newer ticket'), String(reason));
+    assert.ok(serverDetail(card).textContent.includes('cannot trade'));
+    assert.deepEqual(noticeButtons(card), []);
+  }
+});
+
+await test('a card whose order cannot be read offers neither Modify nor "Ask for a new ticket"', async () => {
   net.routes = [portfolio];
-  assert.equal(second.querySelector('.ticket-actions'), null);
+  const { card } = propose(ticket({ decisions: [decision(0, { side: 'short' })] }));
+  assert.equal(button(card, 'btn-confirm').disabled, true);
+  assert.equal(button(card, 'btn-modify').disabled, true);
+  button(card, 'btn-modify').click();
+  assert.equal(card.querySelector('.ticket-modify-host').children.length, 0, 'no Modify fields open');
+  const expired = await refuseRefresh(ticket({ status: 'expired', decisions: [decision(0, { qty: 'abc' })] }),
+    'no_executable_legs', ['price_band'], 'No leg can be placed at current prices');
+  const [ask] = noticeButtons(expired);
+  assert.equal(ask.textContent, 'Ask for a new ticket');
+  assert.equal(ask.disabled, true);
+  const sent = [];
+  const stop = on('chat:send', (text) => sent.push(text));
+  ask.click();
+  stop();
+  assert.deepEqual(sent, []);
 });
 
 await test('confirm 200: sends the hash once, shows the order timeline, no Confirm left', async () => {
@@ -479,27 +547,30 @@ await test('reload: a requoted, then confirmed ticket comes back with its orders
   setState({ sessionId: 's1' });
 });
 
-await test('reload: each unlisted ticket goes under the answer written before it, else the last answer', async () => {
+await test('reload: each unlisted ticket goes under the answer written before it; older ones under the first', async () => {
   thread.replaceChildren();
   const first = replayTurn('s1');
   const second = replayTurn('s1');
   const early = ticket({ status: 'expired', created_at: iso(-50000) });   // after the first answer
   const late = ticket({ status: 'expired', created_at: iso(-10000) });    // after the second
-  const before = ticket({ status: 'expired', created_at: iso(-99000) });  // older than every answer
+  const before = ticket({ status: 'expired', created_at: iso(-99000) });  // older than every answer (its turn was cut)
+  const own = ticket({ status: 'superseded', created_at: iso(-61000) });  // the first answer's own proposal
   const active = ticket({ created_at: iso(-5000) });                      // drawn from the body, no read
-  net.routes = [portfolio, ticketRead(early), ticketRead(late), ticketRead(before)];
+  net.routes = [portfolio, ticketRead(early), ticketRead(late), ticketRead(before), ticketRead(own)];
   net.calls.length = 0;
+  dispatch({ type: 'data-trade-proposal', ticket_id: own.id }, first);
   emit('session:loaded', {
     session: { id: 's1' }, messages: [answerRow(iso(-60000)), answerRow(iso(-20000))],
-    active_ticket: active, tickets: listedOf(before, early, late, active),
+    active_ticket: active, tickets: listedOf(before, own, early, late, active),
   });
   // the active ticket is drawn from the body at once (no read); the others start as placeholders
   assert.ok(byId(active.id).classList.contains('ticket'));
   assert.ok(byId(early.id).classList.contains('card-note'));
   await flush();
   const ids = (turn) => turn.slots.extras.querySelectorAll('.ticket').map((c) => c.getAttribute('data-ticket-id'));
-  assert.deepEqual(ids(first), [early.id]);
-  assert.deepEqual(ids(second), [before.id, late.id, active.id]);
+  // in time order: the cut turn's ticket first, under the first answer, never below the active one
+  assert.deepEqual(ids(first), [before.id, own.id, early.id]);
+  assert.deepEqual(ids(second), [late.id, active.id]);
   assert.equal(button(byId(active.id), 'btn-confirm').disabled, false);
   // a server without the list: the active ticket alone, under the last answer
   thread.replaceChildren();

@@ -7,8 +7,11 @@
  * A reloaded chat: `GET /api/sessions/{id}` lists every ticket of the chat (`tickets`, oldest first),
  * including the requotes that Refresh quote or a confirm made, which no turn's events mention. Each
  * one not on screen yet goes under the last answer written before it (by `created_at`; a requote
- * comes after the answer whose card was pressed), or under the last answer, in the listed order. So a
- * requoted and then confirmed ticket still shows, with its orders, after a reload.
+ * comes after the answer whose card was pressed), in the listed order. A ticket older than every
+ * loaded answer (its turn was cut from the 50-message history) goes under the first answer, before
+ * that answer's own cards, so old greyed cards never stack below the active one; without times, under
+ * the last answer. So a requoted and then confirmed ticket still shows, with its orders, after a
+ * reload.
  */
 import { request } from '../api.js';
 import { bindText } from '../i18n.js';
@@ -26,11 +29,12 @@ function mount(ticket, sessionId, orders) {
 
 const ticketPath = (id, sessionId) => `/api/tickets/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionId)}`;
 
-/* Append a placeholder for ticket `id` to `box`; it becomes the card once the ticket is read. */
-function placeholder(box, id, sessionId) {
+/* Put a placeholder for ticket `id` into `box` (before `before`, else at the end); it becomes the
+ * card once the ticket is read. */
+function placeholder(box, id, sessionId, before = null) {
   const waiting = label('p', 'card card-quiet card-note', 'ticket_loading');
   waiting.setAttribute('data-ticket-id', id);
-  box.appendChild(waiting);
+  box.insertBefore(waiting, before);
   request('GET', ticketPath(id, sessionId))
     .then((found) => {
       if (!waiting.isConnected || !found || !found.ticket) return;
@@ -69,11 +73,15 @@ function answersOf(thread, messages) {
     .filter((answer) => answer.extras);
 }
 
+/* {extras, early}: the answer a listed ticket goes under; `early` when it is older than every answer. */
 function anchorFor(item, answers) {
   const at = timeOf(item.created_at);
   let found = null;
   if (at !== null) for (const answer of answers) if (answer.at !== null && answer.at <= at) found = answer;
-  return (found || answers[answers.length - 1] || null)?.extras || null;
+  if (found) return { extras: found.extras, early: false };
+  const first = answers[0];
+  if (at !== null && first && first.at !== null) return { extras: first.extras, early: true };
+  return { extras: answers[answers.length - 1]?.extras || null, early: false };
 }
 
 on('session:loaded', (detail) => {
@@ -86,13 +94,16 @@ on('session:loaded', (detail) => {
     : (active ? [active] : []); // a server without the list: the active ticket only
   const answers = answersOf(thread, detail.messages);
   const shown = new Set([...thread.querySelectorAll('[data-ticket-id]')].map((node) => node.getAttribute('data-ticket-id')));
+  const heads = new Map(); // box -> its first card before the early tickets went in (they go before it)
   for (const item of listed) {
-    const extras = shown.has(item.id) ? null : anchorFor(item, answers);
+    const { extras, early } = shown.has(item.id) ? {} : anchorFor(item, answers);
     if (!extras) continue;
     shown.add(item.id);
     noteTicket(sessionId, item.id);
     const box = extraSection({ slots: { extras } }, 'ticket');
-    if (active && item.id === active.id) box.appendChild(mount(active, sessionId, []).el);
-    else placeholder(box, item.id, sessionId);
+    if (early && !heads.has(box)) heads.set(box, box.firstChild);
+    const before = early ? heads.get(box) : null;
+    if (active && item.id === active.id) box.insertBefore(mount(active, sessionId, []).el, before);
+    else placeholder(box, item.id, sessionId, before);
   }
 });

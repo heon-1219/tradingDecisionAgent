@@ -145,7 +145,8 @@ export function ticketState(ticket, nowMs) {
 export function interpretResult(action, result) {
   const body = result.body && typeof result.body === 'object' ? result.body : {};
   const message = text(body.message);
-  const base = { message, ticket: body.ticket || null, newTicket: body.new_ticket || null, orders: body.orders || [] };
+  const base = { message, ticket: body.ticket || null, newTicket: body.new_ticket || null, orders: body.orders || [],
+    reason: text(body.reason), blockCodes: Array.isArray(body.block_codes) ? body.block_codes : [] };
   const http = result.status;
   if (result.ok) {
     if (action === 'confirm') return { ...base, kind: 'submitted' };
@@ -164,13 +165,37 @@ export function interpretResult(action, result) {
   return { ...base, kind: 'failed' };
 }
 
+// Risk block codes (src/finagent/trading/risk.py) that come from the mandate, and those that only
+// say the prices do not fit right now. (One string each: scripts/check_i18n.mjs reads a quoted
+// `order_…` word as an i18n key.)
+const MANDATE_CODES = new Set('denied_symbol order_type_not_allowed max_positions budget orders_per_day'.split(' '));
+const PRICE_CODES = new Set('price_band no_quote bad_tick'.split(' '));
+
+/* Why a refresh was refused (409), from the result's `reason` and `block_codes`:
+ *   newer      the chat has a newer ticket (`not_newest`)
+ *   mandate    a mandate rule blocks a leg
+ *   prices     only the price checks block the legs (prices may move back)
+ *   not_paper  the connected account is not a paper account
+ *   other      anything else, or a server that gives no reason */
+export function refusalKind(reason, blockCodes) {
+  const codes = Array.isArray(blockCodes) ? blockCodes.filter((code) => typeof code === 'string') : [];
+  if (reason === 'not_newest') return 'newer';
+  if (reason === 'not_paper') return 'not_paper';
+  if (reason === 'no_executable_legs' && codes.length) {
+    if (codes.some((code) => MANDATE_CODES.has(code))) return 'mandate';
+    if (codes.every((code) => PRICE_CODES.has(code))) return 'prices';
+  }
+  return 'other';
+}
+
 /* The user message that asks the agent for a changed ticket. `edits` is one entry per executable
  * leg: {side, symbol, qty | notional, limit_price?}. It starts with "Modify:" in both languages (the
  * agent treats it as an instruction to re-propose); `lang === 'ko'` adds a Korean closing line so
- * the reply comes back in Korean. */
+ * the reply comes back in Korean. null when a leg's side cannot be read: it is never guessed. */
 export function modifyMessage(edits, lang = 'en') {
+  if (!edits.every((edit) => legSide(edit))) return null;
   const parts = edits.map((edit) => {
-    const side = legSide(edit) === 'sell' ? 'sell' : 'buy';
+    const side = legSide(edit);
     const size = edit.qty !== undefined && edit.qty !== null
       ? `${toTrimmed(edit.qty) ?? edit.qty} ${edit.symbol}`
       : `$${edit.notional} of ${edit.symbol}`;

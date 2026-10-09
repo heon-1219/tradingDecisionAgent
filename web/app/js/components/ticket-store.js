@@ -60,3 +60,13 @@ export function supersedeOthers(sessionId, keepId) {
 export function cardFor(ticketId) {
   return liveCards().find((card) => card.id === ticketId) || null;
 }
+
+/* The newest card on screen of a ticket of `sessionId` seen after `ticketId`, or null. */
+export function newerCard(sessionId, ticketId) {
+  const ids = ticketIds(sessionId);
+  for (const id of ids.slice(ids.indexOf(ticketId) + 1).reverse()) {
+    const card = cardFor(id);
+    if (card && card.sessionId === sessionId) return card;
+  }
+  return null;
+}
