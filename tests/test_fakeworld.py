@@ -365,6 +365,81 @@ def test_parse_risk_report_reads_verdicts_clamps_costs_and_reason_codes():
     assert legs[2]["messages"] == ["NVDA is on the mandate's deny list"]
 
 
+# --- options for the demo server: grounded search and a broker subclass ---------------------------------
+
+
+async def test_grounded_option_adds_the_tool_and_emits_the_search_suggestions(tmp_path):
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path, grounded=True)
+    try:
+        assert "grounded_web_answer" in {s.name for s in world.runtime.toolbox.specs()}
+        sid, events, text = await turn(world, "Give me a grounded answer: how does an S&P 500 index fund work?")
+        assert tools(events) == ["grounded_web_answer"]
+        html = fw.GROUNDED_SAMPLE["candidates"][0]["groundingMetadata"]["searchEntryPoint"]["renderedContent"]
+        assert [e["search_suggestions_html"] for e in of(events, "source-grounding")] == [html]  # unmodified
+        # the two web sources are registered as untrusted evidence, and the answer cites them
+        cited = re.findall(r"\[(E\d+)\]", text)
+        assert len(set(cited)) == 2
+        for eid in cited:
+            record = world.evidence.get(sid, eid)
+            assert record.connector == "grounded_web" and record.untrusted
+        assert of(events, "data-trade-proposal") == [] and of(events, "data-grounding-flags") == []
+        assert not of(events, "error") and events[-1]["type"] == "finish"
+        # one request, to the grounding endpoint, answered by the fake transport: nothing was refused
+        assert [(m, httpx.URL(u).host) for m, u in world.web.requests] == [("POST", fw.GROUNDING_HOST)]
+        assert world.refused == [] and world.broker.submits == 0
+        # the dummy key is only a switch: it never appears in the answer or in an event
+        assert fw.DEMO_GEMINI_KEY not in text and fw.DEMO_GEMINI_KEY not in repr(events)
+        # a rebuild (what saving a setting does) keeps the tool
+        world.runtime.rebuild()
+        assert "grounded_web_answer" in {s.name for s in world.runtime.toolbox.specs()}
+        # the provider is "gemini" here, declared paid: the agent stays in deep mode, so the default
+        # flow (five tool rounds) still reaches its proposal
+        _sid, events, _text = await turn(world, CORE)
+        assert events[-1]["mode"] == "deep" and not events[-1]["budget_exhausted"]
+        assert len(of(events, "data-trade-proposal")) == 1 and world.broker.submits == 0
+        # and the scratch env file names the dummy key, so nothing reads as "from the environment"
+        env_text = world.runtime.env_path.read_text(encoding="utf-8")
+        assert f"GEMINI_API_KEY={fw.DEMO_GEMINI_KEY}" in env_text and "GEMINI_PAID=true" in env_text
+    finally:
+        await world.close()
+
+
+async def test_without_the_grounded_option_the_tool_is_absent_and_its_host_is_refused(world):
+    assert "grounded_web_answer" not in {s.name for s in world.runtime.toolbox.specs()}
+    _sid, events, text = await turn(world, "Give me a grounded answer about index funds.")
+    assert tools(events) == [] and of(events, "source-grounding") == []
+    assert "not available" in text
+    with pytest.raises(httpx.ConnectError):
+        await world.runtime.http.post_json(f"https://{fw.GROUNDING_HOST}/v1beta/models/x:generateContent", json={})
+
+
+async def test_grounded_trigger_answers_in_korean(tmp_path):
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path, grounded=True)
+    try:
+        _sid, events, text = await turn(world, "grounded 검색으로 인덱스 펀드가 무엇인지 알려 줘", lang="ko")
+        assert tools(events) == ["grounded_web_answer"] and len(of(events, "source-grounding")) == 1
+        assert detect_lang(text) == "ko" and re.search(r"\[E\d+\]", text)
+    finally:
+        await world.close()
+
+
+async def test_a_fake_broker_subclass_can_be_supplied_and_anything_else_is_refused(tmp_path):
+    class LoudBroker(fw.FakeBroker):
+        pass
+
+    world = fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path / "a", broker_cls=LoudBroker)
+    try:
+        assert type(world.broker) is LoudBroker and world.runtime.broker is world.broker
+        account = await world.broker.account()
+        assert account.cash == fw.SEED_CASH and set(await world.broker.positions()) == {"VTI", "AAPL", "BND"}
+    finally:
+        await world.close()
+    for bad in (object, "FakeBroker", None):
+        with pytest.raises(TypeError, match="FakeBroker"):
+            fw.build_fake_world(llm=fw.DemoLLM(), tmp_dir=tmp_path / "b", broker_cls=bad)
+    assert not (tmp_path / "b").exists()  # refused before anything was created
+
+
 async def test_close_releases_the_sqlite_files_so_the_scratch_directory_can_be_removed(tmp_path):
     import shutil
 

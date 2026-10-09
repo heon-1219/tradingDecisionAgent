@@ -12,6 +12,7 @@ What the last user message triggers, first match wins:
                              ("Modify: buy 3 VOO limit 610; sell 2 AAPL")
     contains "mandate"       `draft_mandate` (budget and max position % read from the message)
     contains "plain"         a text-only answer with one deliberately unsupported number
+    contains "grounded"      `grounded_web_answer` (when the session offers it), then a cited summary
     contains a URL           `fetch_source`, then a summary that leaves out injected instructions
     options, futures, ...    a text-only refusal: out of scope
     "sell everything"        account, quotes, then sells of every open position
@@ -50,6 +51,7 @@ from _demo_text import (  # noqa: E402,F401 - the readers are re-exported for th
     Done,
     dec,
     evidence_ids,
+    grounded_answer,
     ids_by_tool,
     page_summary,
     parse_risk_report,
@@ -250,6 +252,8 @@ class DemoConversation:
             return self._mandate_flow(message, ko, done)
         if "plain" in low:
             return self._say(PLAIN_KO if ko else PLAIN_EN)
+        if "grounded" in low:
+            return self._grounded_flow(message, ko, done)
         url = _URL_RE.search(message)
         if url:
             if self._has("fetch_source") and not done:
@@ -363,6 +367,14 @@ class DemoConversation:
         legs = _rebalance_legs(message, held, quotes(done))
         return (self._propose(legs, done, ko, "rebalance")
                 or self._say(trade_answer(ko, done, "rebalance", self._has("propose_trades"))))
+
+    def _grounded_flow(self, message: str, ko: bool, done: list[Done]) -> Turn:
+        if not self._has("grounded_web_answer"):
+            return self._say("이 세션에서는 grounded 웹 검색을 사용할 수 없습니다." if ko else
+                             "Grounded web search is not available in this session.")
+        if not done:
+            return self._call([("grounded_web_answer", {"question": " ".join(message.split())[:500]})])
+        return self._say(grounded_answer(ko, done))
 
     def _mandate_flow(self, message: str, ko: bool, done: list[Done]) -> Turn:
         if self._has("draft_mandate") and not done:

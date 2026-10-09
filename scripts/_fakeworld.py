@@ -17,6 +17,12 @@ ChatRuntime`: sessions, evidence, tickets, ledger, executor, toolbox, agent) to
 All state (the app DB, the env file, the product DB) lives under `tmp_dir`; the real `.env` and
 `data/store/` are never written. Prices, positions, bars and news are made-up demo values.
 
+Two options exist for the demo server. `grounded=True` switches on the real `GroundedWeb` connector
+(the settings get the provider "gemini" and a dummy key, declared paid so the chat agent stays in
+deep mode) and the fake transport answers its one `generateContent` request with `GROUNDED_SAMPLE`,
+so `grounded_web_answer` works offline and emits a `source-grounding` event. `broker_cls` swaps in
+a `FakeBroker` subclass (e.g. one whose orders fill).
+
 Used by `scripts/eval_scenarios.py` and by the demo server. `DemoLLM` (see `_demo_llm.py`) is the
 scripted model that goes with it.
 """
@@ -58,6 +64,40 @@ from tests.fakes_trading import FakeBroker, FakeData, make_account, make_asset, 
 
 DEMO_KEY_ID = "demo-key-id"  # not secrets: they only make the runtime build a (fake) broker
 DEMO_SECRET = "demo-secret-key"
+DEMO_GEMINI_KEY = "demo-gemini-key"  # only makes the runtime build its grounded-search connector
+GROUNDING_HOST = "generativelanguage.googleapis.com"
+# A canned Gemini `generateContent` answer with Google Search grounding metadata, in the shape
+# `research/grounding.py` parses. The search-suggestions HTML is a small made-up sample: a style
+# block and plain links without `target`, like the real `searchEntryPoint.renderedContent`.
+GROUNDED_SAMPLE: dict = {
+    "candidates": [{
+        "content": {"role": "model", "parts": [{"text": (
+            "An S&P 500 index fund holds the stocks of the index in the same proportions, so its return follows "
+            "the index before costs. Funds that track the same index differ mainly in their expense ratio and in "
+            "how closely they follow the index. This is demo text served by the fake world, not a web result."
+        )}]},
+        "groundingMetadata": {
+            "webSearchQueries": ["how does an S&P 500 index fund work", "index fund expense ratio"],
+            "groundingChunks": [
+                {"web": {"uri": "https://www.investor.gov/introduction-investing/investing-basics/glossary/index-fund",
+                         "title": "investor.gov"}},
+                {"web": {"uri": "https://funds.example.com/guide/index-funds", "title": "funds.example.com"}},
+            ],
+            "searchEntryPoint": {"renderedContent": (
+                "<style>.demo-sg{display:flex;align-items:center;gap:8px;padding:8px 10px;font:13px/1.4 Arial,sans-serif;"
+                "color:#1f1f1f;background:#fafafa;border:1px solid #d2d2d2;border-radius:8px;overflow-x:auto;"
+                "white-space:nowrap}.demo-sg b{color:#5e5e5e;font-weight:500}.demo-sg a{padding:5px 12px;"
+                "border:1px solid #d2d2d2;border-radius:16px;background:#fff;color:#0b57d0;text-decoration:none}"
+                "@media (prefers-color-scheme:dark){.demo-sg{color:#e3e3e3;background:#1f1f1f;border-color:#444}"
+                ".demo-sg a{background:#2c2c2c;border-color:#3c4043;color:#a8c7fa}}</style>"
+                '<div class="demo-sg"><b>Search (demo)</b>'
+                '<a href="https://www.google.com/search?q=how+does+an+S%26P+500+index+fund+work">how does an S&amp;P 500 '
+                "index fund work</a>"
+                '<a href="https://www.google.com/search?q=index+fund+expense+ratio">index fund expense ratio</a></div>'
+            )},
+        },
+    }],
+}
 ETF_BASE_DATE = "2026-08-22"
 
 # symbol -> (demo last price, name). Made-up prices, not market data.
@@ -207,8 +247,9 @@ class DemoData(FakeData):
                 {"symbol": "SPY", "volume": 48_000_000, "trade_count": 520_000}][:top]
 
 
-def seeded_broker(now: datetime) -> FakeBroker:
-    """A paper account with $100,000 cash and three positions (VTI, AAPL, BND), market open."""
+def seeded_broker(now: datetime, cls: type[FakeBroker] = FakeBroker) -> FakeBroker:
+    """A paper account with $100,000 cash and three positions (VTI, AAPL, BND), market open. `cls`
+    is `FakeBroker` or a subclass of it."""
     positions = {}
     for symbol, qty, entry in SEED_POSITIONS:
         q, avg, price = Decimal(qty), Decimal(entry), Decimal(UNIVERSE[symbol][0])
@@ -224,8 +265,7 @@ def seeded_broker(now: datetime) -> FakeBroker:
     clock = ClockInfo(is_open=True, timestamp=now.strftime(stamp),
                       next_close=(now + timedelta(hours=4)).strftime(stamp),
                       next_open=(now + timedelta(hours=21)).strftime(stamp))
-    return FakeBroker(account=account, positions=positions, assets={s: make_asset(s) for s in UNIVERSE},
-                      clock=clock)
+    return cls(account=account, positions=positions, assets={s: make_asset(s) for s in UNIVERSE}, clock=clock)
 
 
 # --- HTTP: only the given pages -------------------------------------------------------------------------
@@ -235,10 +275,12 @@ class FakeWeb:
     """The fake world's whole internet. `pages` maps a URL to its HTML/markdown; they are served to
     the Jina Reader path (`GET https://r.jina.ai/<url>`) and to Tavily extract and search. A page that
     is not there is a 404, any other host is refused with `httpx.ConnectError`; both are listed in
-    `refused`, and every request in `requests`, as (method, url)."""
+    `refused`, and every request in `requests`, as (method, url). With `grounded` (a canned response
+    body) it also answers Gemini's `generateContent` POST, the one request `GroundedWeb` makes."""
 
-    def __init__(self, pages: dict[str, str] | None = None):
+    def __init__(self, pages: dict[str, str] | None = None, grounded: dict | None = None):
         self.pages = dict(pages or {})
+        self.grounded = grounded
         self.requests: list[tuple[str, str]] = []
         self.refused: list[tuple[str, str]] = []
 
@@ -261,6 +303,9 @@ class FakeWeb:
                 hits = [{"title": u, "url": u, "content": text[:1000]} for u, text in self.pages.items()
                         if words & set(re.findall(r"\w{4,}", text.lower()))]
                 return httpx.Response(200, json={"results": hits[: int(body.get("max_results") or 5)]})
+        elif host == GROUNDING_HOST and self.grounded is not None:
+            if request.method == "POST" and path.endswith(":generateContent"):
+                return httpx.Response(200, json=self.grounded)
         else:
             self.refused.append((request.method, url))
             raise httpx.ConnectError("fake world: no network", request=request)
@@ -414,9 +459,14 @@ class FakeWorld:
 
 
 def build_fake_world(*, llm, tmp_dir, real_products: bool = False, web_pages: dict[str, str] | None = None,
-                     settings_over: dict | None = None) -> FakeWorld:
+                     settings_over: dict | None = None, grounded: bool = False,
+                     broker_cls: type[FakeBroker] = FakeBroker) -> FakeWorld:
     """Build the offline world; see the module docstring. `settings_over` overrides `Settings`
-    fields (e.g. `chat_max_rounds`); state paths must stay under `tmp_dir`."""
+    fields (e.g. `chat_max_rounds`); state paths must stay under `tmp_dir`. `grounded` adds the
+    `grounded_web_answer` tool, answered by `GROUNDED_SAMPLE`; `broker_cls` must be `FakeBroker` or
+    a subclass."""
+    if not (isinstance(broker_cls, type) and issubclass(broker_cls, FakeBroker)):
+        raise TypeError("broker_cls must be FakeBroker or a subclass: the fake world never builds a real broker")
     tmp = Path(tmp_dir).resolve()
     if tmp == ROOT or ROOT / "data" in (tmp, *tmp.parents):
         raise ValueError("fake-world state must live in a scratch directory, never under data/ or the repo root")
@@ -427,20 +477,24 @@ def build_fake_world(*, llm, tmp_dir, real_products: bool = False, web_pages: di
         tavily_api_key=None, gemini_api_key=None, anthropic_api_key=None, openai_api_key=None,
         sec_user_agent=None, trading_enabled=True, app_db_path=tmp / "app.db", api_allow_remote=False,
     )
+    env_lines = [f"ALPACA_API_KEY_ID={DEMO_KEY_ID}", f"ALPACA_API_SECRET_KEY={DEMO_SECRET}", "TRADING_ENABLED=true"]
+    if grounded:
+        # The runtime builds GroundedWeb only for the provider "gemini" with a key (the model itself
+        # is still `llm`). `gemini_paid` keeps the chat agent in deep mode: the scripted model's
+        # default flow needs more tool rounds than shallow mode allows.
+        fields.update(llm_provider="gemini", gemini_api_key=DEMO_GEMINI_KEY, gemini_paid=True)
+        env_lines += ["LLM_PROVIDER=gemini", f"GEMINI_API_KEY={DEMO_GEMINI_KEY}", "GEMINI_PAID=true"]
     fields.update(settings_over or {})
     settings = Settings(_env_file=None, **fields)
     if tmp not in Path(settings.app_db_path).resolve().parents:
         raise ValueError("app_db_path must stay under tmp_dir")
     env_path = tmp / ".env"
-    env_path.write_text(
-        "# fake world: dummy values, no real keys\n"
-        f"ALPACA_API_KEY_ID={DEMO_KEY_ID}\nALPACA_API_SECRET_KEY={DEMO_SECRET}\nTRADING_ENABLED=true\n",
-        encoding="utf-8")
+    env_path.write_text("# fake world: dummy values, no real keys\n" + "\n".join(env_lines) + "\n", encoding="utf-8")
 
     now = _utcnow()
-    broker = seeded_broker(now)
+    broker = seeded_broker(now, broker_cls)
     data = DemoData({symbol: make_quote(symbol, price) for symbol, (price, _name) in UNIVERSE.items()})
-    web = FakeWeb(web_pages)
+    web = FakeWeb(web_pages, grounded=GROUNDED_SAMPLE if grounded else None)
     registry, orchestrator = build_products(tmp, llm=llm, real_products=real_products)
     runtime = ChatRuntime(
         settings, llm=llm, registry=registry, orchestrator=orchestrator, env_path=env_path,

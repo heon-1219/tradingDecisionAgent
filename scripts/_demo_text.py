@@ -192,6 +192,23 @@ def page_summary(ko: bool, done: list[Done]) -> str:
     return text + "\n\nNo trade was proposed."
 
 
+def grounded_answer(ko: bool, done: list[Done]) -> str:
+    """The answer after `grounded_web_answer`: the first sentences of the grounded text, cited with
+    the evidence ids of its sources, and a reminder that it is unverified web content."""
+    block = _UNTRUSTED_RE.search(done[-1].text) if done and not done[-1].is_error else None
+    if block is None:
+        return ("웹 검색 결과를 가져오지 못했습니다." if ko else "The grounded web search returned nothing I can use.")
+    cites = "".join(f"[{i}]" for i in block[1].split(",") if _EVIDENCE_RE.fullmatch(f"[{i}]"))
+    body = re.sub(r"\s*\(search queries: .*\)\s*$", "", block[2].strip(), flags=re.S)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+    summary = " ".join([s for s in sentences if not _INJECTION_RE.search(s)][:2])
+    if ko:
+        return (f"웹 검색 결과 {cites}: {summary}\n\n공개 웹에서 가져온 내용이므로 확인되지 않은 정보로 보고, 중요한 수치는 "
+                "1차 자료와 대조해 주세요. 거래는 제안하지 않았습니다.")
+    return (f"From a grounded web search {cites}: {summary}\n\nThis comes from the open web, so treat it as "
+            "unverified and check key numbers against primary sources. No trade was proposed.")
+
+
 def _facts(ko: bool, done: list[Done]) -> list[str]:
     """Cited one-line facts for the thesis: last prices, 1y metrics and the screen's expense ratios."""
     lines: list[str] = []
