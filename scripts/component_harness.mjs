@@ -51,7 +51,7 @@ export const { placePopover } = await import('../web/app/js/components/popover.j
 export const { changeParts } = await import('../web/app/js/components/portfolio.js');
 export const { refreshPortfolio } = await import('../web/app/js/components/portfolio-store.js');
 export const { settingsErrorText } = await import('../web/app/js/components/settings.js');
-await import('../web/app/js/components/ticket.js');
+await import('../web/app/js/components/ticket-thread.js');
 await import('../web/app/js/components/orders.js');
 registerDefaultHandlers();
 

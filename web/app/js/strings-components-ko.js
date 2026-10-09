@@ -153,7 +153,7 @@ export default {
   ticket_requote_refresh: '현재 가격으로 다시 계산했습니다. 아래 새 티켓을 검토해 주세요.',
   ticket_conflict: '이 티켓은 더 이상 승인할 수 없습니다.',
   ticket_expired_note: '티켓이 만료되어 아무것도 전송하지 않았습니다.',
-  ticket_expired_late: '이 티켓은 이미 만료되어 시세를 새로 받을 수 없습니다. 어시스턴트에게 새 티켓을 요청해 주세요.',
+  ticket_expired_late: '이 대화에 더 새로운 티켓이 있어 만료된 이 티켓은 시세를 다시 받을 수 없습니다. 새 티켓을 이용하거나 어시스턴트에게 새 티켓을 요청해 주세요.',
   ticket_ask_again: '새 티켓 요청',
   ticket_disabled: '거래 기능이 꺼져 있어 아무것도 전송하지 않았습니다. 설정에서 켜면 티켓을 승인할 수 있습니다.',
   ticket_no_broker: '모의 계좌가 연결되어 있지 않습니다. 설정에서 Alpaca 모의투자 키를 입력해 주세요.',

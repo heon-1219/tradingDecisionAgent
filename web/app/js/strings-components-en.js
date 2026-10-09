@@ -154,7 +154,7 @@ export default {
   ticket_requote_refresh: 'Re-quoted at current prices. Review the new ticket below.',
   ticket_conflict: 'This ticket can no longer be confirmed.',
   ticket_expired_note: 'This ticket expired, so nothing was submitted.',
-  ticket_expired_late: 'This ticket had already expired, and an expired ticket cannot be re-quoted. Ask the assistant for a new one.',
+  ticket_expired_late: 'This expired ticket cannot be re-quoted: this chat has a newer ticket. Use that one, or ask the assistant for a new one.',
   ticket_ask_again: 'Ask for a new ticket',
   ticket_disabled: 'Trading is disabled, so nothing was submitted. Switch it on in Settings to confirm tickets.',
   ticket_no_broker: 'The paper account is not connected. Add your Alpaca paper keys in Settings.',

@@ -1,12 +1,12 @@
-/* The trade ticket card: where a person approves paper orders.
- *
- * `data-trade-proposal {ticket}` draws the card in the turn; in history the event carries only
- * `ticket_id`, and the ticket is read from `GET /api/tickets/{id}?session_id=`.
+/* The trade ticket card: where a person approves paper orders. Where cards go in the thread (live,
+ * history, a reloaded chat) is ticket-thread.js.
  *
  * States (the ticket's stored status, plus the clock): `proposed` shows Confirm, Modify and Reject
  * with a countdown; `expired`, `superseded` and `rejected_by_user` are greyed and can no longer be
  * confirmed; `submitting` and `submitted` show the order timeline; `failed` shows what happened.
- * Only the newest ticket of a chat is confirmable: a new one retires the others on screen.
+ * Only the newest ticket of a chat is confirmable: a new one retires the others on screen. An
+ * expired card keeps Refresh quote: the server re-quotes the chat's newest ticket even after it
+ * expired; for an older one it answers 409, and the card offers "Ask for a new ticket" instead.
  *
  * Confirm sends the ticket's `hash` back, is disabled while a request is in flight, has no keyboard
  * shortcut and is never focused by the app. How each answer is handled is decided by
@@ -16,9 +16,8 @@ import { ApiError, request } from '../api.js';
 import { cmp, formatMoney } from '../decimal.js';
 import { bindText, getLang, t } from '../i18n.js';
 import { announce, notify } from '../notify.js';
-import { registerEvent } from '../registry.js';
 import { canSend, emit, on, state } from '../state.js';
-import { actionButton, ageParts, badge, clockText, el, extraSection, iconSpan, label, str, timeOf } from './dom.js';
+import { actionButton, ageParts, badge, clockText, el, iconSpan, label, str, timeOf } from './dom.js';
 import { ensurePortfolio, snapshot } from './portfolio-store.js';
 import { nowMs, onTick } from './ticker.js';
 import { confirmLabel, executableLegs, interpretResult, modifyMessage, requoteChanges, ticketState } from './ticket-model.js';
@@ -47,6 +46,16 @@ function panelLink(key, panel, iconName) {
   return button;
 }
 
+/* "Ask for a new ticket": the same legs, sent to the assistant as a Modify message. */
+function askAgainButton(ticket) {
+  const ask = actionButton('btn btn-small', 'ticket_ask_again', { iconName: 'refresh', iconSize: 14 });
+  ask.addEventListener('click', () => {
+    if (canSend(state)) emit('chat:send', modifyMessage(executableLegs(ticket), getLang()));
+    else notify(t('ticket_modify_busy'));
+  });
+  return ask;
+}
+
 export function createTicketCard(initial, { sessionId, orders = [] }) {
   const root = el('article', 'card ticket');
   root.tabIndex = -1; // focusable by script only: where focus lands when a pressed button is replaced
@@ -57,6 +66,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   let ticket = initial;
   let override = null; // a state the UI knows before (or apart from) the stored status
   let busy = false;
+  let replaced = false; // the server refused to re-quote this expired ticket: a newer one exists
   let timeline = null;
   let body = null;
   let clockNodes = null;
@@ -124,7 +134,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
       reject.disabled = busy;
       reject.addEventListener('click', () => act('reject'));
       row.append(confirm, modify, reject);
-    } else if (current === 'expired') {
+    } else if (current === 'expired' && !replaced) {
       const again = actionButton('btn', 'ticket_refresh', { iconName: 'refresh' });
       again.disabled = busy;
       again.addEventListener('click', () => act('refresh'));
@@ -254,7 +264,8 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         const lines = requoteChanges(ticket, outcome.newTicket)
           .filter((change) => change.from && change.to && cmp(change.from, change.to) !== 0)
           .map((change) => `${change.symbol}: ${formatMoney(change.from)} → ${formatMoney(change.to)}`);
-        override = 'superseded';
+        replaced = true;
+        override = ticket.status === 'expired' ? 'expired' : 'superseded'; // a re-quoted expired ticket stays expired
         setNotice({ tone: 'warn', key: action === 'confirm' ? 'ticket_requote_confirm' : 'ticket_requote_refresh', lines });
         render();
         addSuccessor(outcome.newTicket);
@@ -268,22 +279,18 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         announce(t('ticket_announce_rejected'));
         break;
       case 'rejected': // 409: the returned ticket says where things stand; the server says why
+        if (action === 'refresh' && ticket.status === 'expired') { // not the chat's newest ticket
+          replaced = true;
+          setNotice({ tone: 'warn', key: 'ticket_expired_late', actions: [askAgainButton(ticket)] });
+          break;
+        }
         setNotice({ tone: 'bad', key: ticket.status === 'proposed' ? 'ticket_changed' : 'ticket_conflict', detail: said });
         if (action === 'confirm') announce(t('ticket_announce_not_placed'));
         break;
-      case 'expired': // 410: grey the card; a refresh that came too late offers a new proposal
+      case 'expired': // 410 (confirm, reject): grey the card; Refresh quote can still re-quote it
         override = 'expired';
-        if (action === 'refresh') {
-          const ask = actionButton('btn btn-small', 'ticket_ask_again', { iconName: 'refresh', iconSize: 14 });
-          ask.addEventListener('click', () => {
-            if (canSend(state)) emit('chat:send', modifyMessage(executableLegs(ticket), getLang()));
-            else notify(t('ticket_modify_busy'));
-          });
-          setNotice({ tone: 'warn', key: 'ticket_expired_late', actions: [ask] });
-        } else {
-          setNotice({ tone: 'warn', key: 'ticket_expired_note' });
-          if (action === 'confirm') announce(t('ticket_announce_not_placed'));
-        }
+        setNotice({ tone: 'warn', key: 'ticket_expired_note' });
+        if (action === 'confirm') announce(t('ticket_announce_not_placed'));
         break;
       case 'disabled': // 423: trading is off (kill switch)
         setNotice({ tone: 'warn', key: 'ticket_disabled', actions: [panelLink('open_settings', 'settings', 'sliders')] });
@@ -341,51 +348,3 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   });
   return card;
 }
-
-function mount(ticket, sessionId, orders) {
-  const card = createTicketCard(ticket, { sessionId, orders });
-  registerCard(card);
-  return card;
-}
-
-const ticketPath = (id, sessionId) => `/api/tickets/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionId)}`;
-
-registerEvent('data-trade-proposal', (event, turn) => {
-  const sessionId = turn.sessionId;
-  const box = extraSection(turn, 'ticket');
-  if (event.ticket && typeof event.ticket === 'object' && typeof event.ticket.id === 'string') {
-    noteTicket(sessionId, event.ticket.id);
-    box.replaceChildren(mount(event.ticket, sessionId, []).el);
-    supersedeOthers(sessionId, event.ticket.id);
-    return;
-  }
-  const id = str(event.ticket_id);
-  if (!id || !sessionId) return;
-  // History: only the id was stored.
-  noteTicket(sessionId, id);
-  const waiting = label('p', 'card card-quiet card-note', 'ticket_loading');
-  waiting.setAttribute('data-ticket-id', id);
-  box.replaceChildren(waiting);
-  request('GET', ticketPath(id, sessionId))
-    .then((found) => {
-      if (!waiting.isConnected || !found || !found.ticket) return;
-      waiting.replaceWith(mount(found.ticket, sessionId, found.orders || []).el);
-    })
-    .catch(() => {
-      if (waiting.isConnected) bindText(waiting, 'ticket_unavailable');
-    });
-});
-
-// A reloaded chat: the active ticket may be a requote, which no turn's events mention. Show it under
-// the last answer so that it can still be confirmed.
-on('session:loaded', (detail) => {
-  const active = detail?.active_ticket;
-  const sessionId = detail?.session?.id;
-  if (!active || typeof active.id !== 'string' || !sessionId) return;
-  noteTicket(sessionId, active.id);
-  const thread = document.getElementById('thread');
-  const shown = [...thread.querySelectorAll('[data-ticket-id]')].some((n) => n.getAttribute('data-ticket-id') === active.id);
-  const last = [...thread.querySelectorAll('.turn-assistant .turn-extras')].pop();
-  if (shown || !last) return;
-  extraSection({ slots: { extras: last } }, 'ticket').appendChild(mount(active, sessionId, []).el);
-});

@@ -7,10 +7,11 @@
 // the card ends in, and that no state offers a blind retry. The setup is scripts/component_harness.mjs.
 import assert from 'node:assert/strict';
 import {
-  advance, clock, decision, dispatch, document, finish, flush, leg, liveTurn, net, on, order, replayTurn, setState,
-  sources, test, ticker, ticket,
+  advance, clock, decision, dispatch, document, emit, finish, flush, leg, liveTurn, net, on, order, panel, replayTurn,
+  setState, sources, test, thread, ticker, ticket,
 } from './component_harness.mjs';
 import { setLang } from '../web/app/js/i18n.js';
+import { ticketIds } from '../web/app/js/components/ticket-store.js';
 
 const { calls } = net;
 const cardOf = (turn) => turn.slots.extras.querySelector('.ticket');
@@ -94,18 +95,47 @@ await test('countdown: one shared ticker; at expiry the card greys and offers Re
   assert.equal(button(card, 'btn-confirm'), null);
   const actions = card.querySelector('.ticket-actions').querySelectorAll('button');
   assert.deepEqual(actions.map((b) => b.textContent), ['Refresh quote']);
-  // An expired ticket cannot be re-quoted by the server (410): the card offers a new proposal.
-  net.routes = [{ method: 'POST', match: `/api/tickets/${tk.id}/refresh`, status: 410, body: { status: 'rejected', message: 'ticket is expired', ticket: { ...tk, status: 'expired' }, orders: [], new_ticket: null } }];
+  // The chat's newest ticket is re-quoted even after it expired (200): it stays expired, and the
+  // new ticket follows it with its own Confirm.
+  const next = ticket({ decisions: [decision(0, {}, { est_price: '611.00', est_cost_usd: '1833.00' })] });
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/refresh`, status: 200, body: { status: 'requote',
+    message: 'Re-quoted at current prices; review the new ticket.', ticket: { ...tk, status: 'expired' }, orders: [], new_ticket: next } }];
   actions[0].click();
   await flush();
   assert.equal(card.getAttribute('data-state'), 'expired');
-  assert.ok(noticeText(card).includes('cannot be re-quoted'));
+  assert.equal(card.querySelector('.ticket-actions'), null, 'no second Refresh quote: a newer ticket exists');
+  assert.ok(noticeText(card).includes('Re-quoted at current prices'));
+  const inBox = card.parentNode.querySelectorAll('.ticket');
+  const fresh = inBox[inBox.indexOf(card) + 1]; // right after the expired card
+  assert.equal(fresh.getAttribute('data-ticket-id'), next.id);
+  assert.equal(fresh.getAttribute('data-state'), 'proposed');
+  assert.equal(button(fresh, 'btn-confirm').disabled, false);
+  fresh.remove();
+  clock.time -= 288000; // back to "now" for the following tests
+});
+
+await test('an expired ticket that is not the newest: 409, no second Refresh, "Ask for a new ticket"', async () => {
+  net.routes = [portfolio];
+  const tk = ticket({ status: 'expired' });
+  const { card } = propose(tk);
+  assert.equal(card.getAttribute('data-state'), 'expired');
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/refresh`, status: 409, body: { status: 'rejected',
+    message: 'ticket is expired and a newer ticket exists; nothing was re-quoted', ticket: tk, orders: [], new_ticket: null } }];
+  button(card, 'ticket-actions').querySelector('button').click();
+  await flush();
+  assert.equal(card.getAttribute('data-state'), 'expired');
+  assert.ok(noticeText(card).includes('cannot be re-quoted: this chat has a newer ticket'));
+  assert.equal(card.querySelector('.ticket-actions'), null);
   const sent = [];
   const stop = on('chat:send', (text) => sent.push(text));
   card.querySelector('.ticket-notice').querySelector('button').click();
   stop();
   assert.deepEqual(sent, ['Modify: buy 3 VOO limit 612.00']);
-  clock.time -= 288000; // back to "now" for the following tests
+  // a 409 on refresh for any other reason is the ordinary conflict, without the offer
+  const other = ticket({ status: 'superseded' });
+  const second = propose(other).card;
+  net.routes = [portfolio];
+  assert.equal(second.querySelector('.ticket-actions'), null);
 });
 
 await test('confirm 200: sends the hash once, shows the order timeline, no Confirm left', async () => {
@@ -395,6 +425,89 @@ await test('history: the ticket is read by id and shown in its stored state', as
   dispatch({ type: 'data-trade-proposal', ticket_id: 'MISSING' }, gone);
   await flush();
   assert.equal(gone.slots.extras.textContent, 'This ticket could not be loaded.');
+});
+
+// --- a reloaded chat -------------------------------------------------------------------------------------------
+
+const answerRow = (createdAt) => ({ role: 'assistant', content: 'answer', meta: {}, created_at: createdAt });
+const listedOf = (...tickets) => tickets.map((tk) => ({ id: tk.id, status: tk.status, created_at: tk.created_at }));
+const iso = (ms) => new Date(clock.time + ms).toISOString();
+const byId = (id) => thread.querySelectorAll('[data-ticket-id]').find((node) => node.getAttribute('data-ticket-id') === id);
+
+await test('reload: a requoted, then confirmed ticket comes back with its orders, after its original', async () => {
+  thread.replaceChildren();
+  const view = document.createElement('section');
+  document.body.appendChild(view);
+  panel('orders').mount(view);
+  setState({ sessionId: 'reload-chat' });
+  const original = ticket({ session_id: 'reload-chat', status: 'superseded', created_at: iso(-60000) });
+  const requote = ticket({ session_id: 'reload-chat', status: 'submitted', created_at: iso(-30000), broker_order_ids: ['o9'],
+    decisions: [decision(0, { symbol: 'QQQ' })] });
+  const placed = [{ client_order_id: 'c0', broker_order_id: 'o9', order: order({ id: 'o9', symbol: 'QQQ', status: 'filled' }) }];
+  const later = ticket({ session_id: 'reload-chat', status: 'expired', created_at: iso(-20000) });
+  net.routes = [portfolio, ticketRead(original), ticketRead(requote, placed), ticketRead(later)];
+  // what thread.js draws from the history: two answers and their proposal events (no requote)
+  const answer = replayTurn('reload-chat');
+  dispatch({ type: 'data-trade-proposal', ticket_id: original.id }, answer);
+  const next = replayTurn('reload-chat');
+  dispatch({ type: 'data-trade-proposal', ticket_id: later.id }, next);
+  const user = (createdAt) => ({ role: 'user', content: 'Buy QQQ', meta: null, created_at: createdAt });
+  emit('session:loaded', {
+    session: { id: 'reload-chat', title: '' },
+    messages: [user(iso(-90000)), answerRow(iso(-59000)), user(iso(-25000)), answerRow(iso(-19000))],
+    active_ticket: null, tickets: listedOf(original, requote, later), mandate: {}, mandate_saved: false,
+  });
+  await flush();
+  const cards = answer.slots.extras.querySelectorAll('.ticket');
+  assert.deepEqual(cards.map((c) => [c.getAttribute('data-ticket-id'), c.getAttribute('data-state')]),
+    [[original.id, 'superseded'], [requote.id, 'submitted']]);
+  assert.ok(cards[1].querySelector('.timeline-status').textContent.includes('Filled'));
+  assert.deepEqual(next.slots.extras.querySelectorAll('.ticket').map((c) => c.getAttribute('data-ticket-id')), [later.id]);
+  // the chat's tickets in the server's order (the history alone would put the requote last)
+  assert.deepEqual(ticketIds('reload-chat'), [original.id, requote.id, later.id]);
+  // the Orders panel's "From this chat" reads the same list
+  panel('orders').show(view);
+  await flush();
+  assert.ok(view.textContent.includes('QQQ'), 'the requote\'s order is listed');
+  // loading the same chat again draws nothing twice
+  emit('session:loaded', { session: { id: 'reload-chat' }, messages: [answerRow(iso(-59000)), answerRow(iso(-19000))],
+    active_ticket: null, tickets: listedOf(original, requote, later) });
+  await flush();
+  assert.equal(thread.querySelectorAll('.ticket').length, 3);
+  view.remove();
+  thread.replaceChildren();
+  setState({ sessionId: 's1' });
+});
+
+await test('reload: each unlisted ticket goes under the answer written before it, else the last answer', async () => {
+  thread.replaceChildren();
+  const first = replayTurn('s1');
+  const second = replayTurn('s1');
+  const early = ticket({ status: 'expired', created_at: iso(-50000) });   // after the first answer
+  const late = ticket({ status: 'expired', created_at: iso(-10000) });    // after the second
+  const before = ticket({ status: 'expired', created_at: iso(-99000) });  // older than every answer
+  const active = ticket({ created_at: iso(-5000) });                      // drawn from the body, no read
+  net.routes = [portfolio, ticketRead(early), ticketRead(late), ticketRead(before)];
+  net.calls.length = 0;
+  emit('session:loaded', {
+    session: { id: 's1' }, messages: [answerRow(iso(-60000)), answerRow(iso(-20000))],
+    active_ticket: active, tickets: listedOf(before, early, late, active),
+  });
+  // the active ticket is drawn from the body at once (no read); the others start as placeholders
+  assert.ok(byId(active.id).classList.contains('ticket'));
+  assert.ok(byId(early.id).classList.contains('card-note'));
+  await flush();
+  const ids = (turn) => turn.slots.extras.querySelectorAll('.ticket').map((c) => c.getAttribute('data-ticket-id'));
+  assert.deepEqual(ids(first), [early.id]);
+  assert.deepEqual(ids(second), [before.id, late.id, active.id]);
+  assert.equal(button(byId(active.id), 'btn-confirm').disabled, false);
+  // a server without the list: the active ticket alone, under the last answer
+  thread.replaceChildren();
+  const only = replayTurn('s1');
+  const live = ticket();
+  emit('session:loaded', { session: { id: 's1' }, messages: [], active_ticket: live });
+  assert.deepEqual(ids(only), [live.id]);
+  thread.replaceChildren();
 });
 
 finish('ticket card checks');

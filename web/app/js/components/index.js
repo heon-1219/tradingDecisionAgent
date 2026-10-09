@@ -7,7 +7,7 @@
  *   sources     [E#] chips, the Sources row, the source popover, GET /api/sources/{session}
  *   grounding   source-grounding (sandboxed iframe), data-grounding-flags (advisory note)
  *   mandate     data-mandate (draft card), the Mandate panel
- *   ticket      data-trade-proposal: the trade ticket card and its order timeline
+ *   ticket      data-trade-proposal and a reloaded chat's tickets: the ticket card, its timeline
  *   portfolio   the Portfolio panel
  *   orders      the Orders panel
  *   settings    the Settings panel (keys, trading switch, kill switch)
@@ -17,7 +17,7 @@ import './thinking.js';
 import './sources.js';
 import './grounding.js';
 import './mandate.js';
-import './ticket.js';
+import './ticket-thread.js';
 import './portfolio.js';
 import './orders.js';
 import './settings.js';

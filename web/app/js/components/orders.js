@@ -1,8 +1,9 @@
 /* The Orders panel: the account's open orders, and the orders placed from this chat's tickets.
  *
  * Open orders come with the portfolio (`GET /api/portfolio` -> open_orders). The chat's own orders
- * are read per ticket (`GET /api/tickets/{id}?session_id=`) for the last 20 tickets seen in the open
- * chat (the panel says so when there are more), and only the newest load is shown. The server
+ * are read per ticket (`GET /api/tickets/{id}?session_id=`) for the last 20 tickets of the open chat
+ * (ticket-store.js: the server's list when the chat was opened, requotes included, plus the ones
+ * since; the panel says so when there are more), and only the newest load is shown. The server
  * re-reads non-final orders from the broker on each call. A leg whose outcome the server
  * could not establish has no order and is shown as "uncertain". It reloads when the tab is shown,
  * after a confirm, and from its refresh button.
