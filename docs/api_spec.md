@@ -391,11 +391,11 @@ All three answer with the same result body:
 | `ticket` | The ticket as it stands now, or `null` |
 | `orders` | The orders that were placed (order objects), else `[]` |
 | `new_ticket` | The replacement ticket for `requote`, else `null` |
-| `reason` | Why a refresh was refused, else `null`: `not_newest` (an expired ticket that is no longer the session's newest ticket: a later proposal, or this ticket's own requote, replaced it), `ticket_state` (the ticket is neither `proposed` nor `expired`), `not_paper` (the account is not a paper account) or `no_executable_legs` (the risk check blocks every leg at current prices under the current mandate) |
+| `reason` | Why a refresh was refused, else `null`: `not_newest` (an expired ticket that is no longer the session's newest ticket: a later proposal, or this ticket's own requote, replaced it), `ticket_state` (the ticket is neither `proposed` nor `expired`, or a confirm, reject or expiry moved it while the refresh was re-evaluating, so its stored status, `expired` included, is in `ticket`), `not_paper` (the account is not a paper account) or `no_executable_legs` (the risk check blocks every leg at current prices under the current mandate) |
 | `block_codes` | For `no_executable_legs`, the distinct risk block codes of the legs, sorted (for example `denied_symbol`, `price_band`, `account_blocked`), else `[]` |
 
 ```json
-{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {"id": "T4HQ7ZB2NAK", "status": "submitted", "...": "..."}, "orders": [{"id": "61e69015-8549-4bfd-b9c3-01e75843f47d", "status": "accepted", "...": "..."}], "new_ticket": null}
+{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {"id": "T4HQ7ZB2NAK", "status": "submitted", "...": "..."}, "orders": [{"id": "61e69015-8549-4bfd-b9c3-01e75843f47d", "status": "accepted", "...": "..."}], "new_ticket": null, "reason": null, "block_codes": []}
 ```
 
 Before the executor runs, these can happen instead:
@@ -598,7 +598,7 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/api/tickets/T4H
 ```
 
 ```text
-{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {...}, "orders": [{...}], "new_ticket": null}
+{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {...}, "orders": [{...}], "new_ticket": null, "reason": null, "block_codes": []}
 HTTP 200
 ```
 
@@ -983,11 +983,11 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `ticket` | 현재 시점의 티켓, 없으면 `null` |
 | `orders` | 접수된 주문(주문 객체), 없으면 `[]` |
 | `new_ticket` | `requote`일 때 대체 티켓, 그 밖에는 `null` |
-| `reason` | refresh가 거절된 이유, 그 밖에는 `null`: `not_newest`(더 이상 세션의 가장 최근 티켓이 아닌 만료된 티켓. 이후의 제안이나 이 티켓의 재호가가 대체함), `ticket_state`(티켓이 `proposed`도 `expired`도 아님), `not_paper`(모의투자 계좌가 아님), `no_executable_legs`(현재 가격과 현재 투자 원칙에서 위험 검사가 모든 레그를 막음) |
+| `reason` | refresh가 거절된 이유, 그 밖에는 `null`: `not_newest`(더 이상 세션의 가장 최근 티켓이 아닌 만료된 티켓. 이후의 제안이나 이 티켓의 재호가가 대체함), `ticket_state`(티켓이 `proposed`도 `expired`도 아니거나, refresh가 다시 평가하는 동안 confirm, reject, 만료가 먼저 티켓을 옮김. 이때 저장된 상태는 `expired`일 수도 있으며 `ticket`에 담김), `not_paper`(모의투자 계좌가 아님), `no_executable_legs`(현재 가격과 현재 투자 원칙에서 위험 검사가 모든 레그를 막음) |
 | `block_codes` | `no_executable_legs`일 때 레그들의 위험 차단 코드를 중복 없이 정렬한 목록(예: `denied_symbol`, `price_band`, `account_blocked`), 그 밖에는 `[]` |
 
 ```json
-{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {"id": "T4HQ7ZB2NAK", "status": "submitted", "...": "..."}, "orders": [{"id": "61e69015-8549-4bfd-b9c3-01e75843f47d", "status": "accepted", "...": "..."}], "new_ticket": null}
+{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {"id": "T4HQ7ZB2NAK", "status": "submitted", "...": "..."}, "orders": [{"id": "61e69015-8549-4bfd-b9c3-01e75843f47d", "status": "accepted", "...": "..."}], "new_ticket": null, "reason": null, "block_codes": []}
 ```
 
 실행기가 동작하기 전에 다음 응답이 나올 수 있습니다.
@@ -1190,7 +1190,7 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST http://127.0.0.1:8000/api/tickets/T4H
 ```
 
 ```text
-{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {...}, "orders": [{...}], "new_ticket": null}
+{"status": "submitted", "message": "1 of 1 orders placed. Leg 1 BUY 4 VOO @ limit $500.00: placed (status accepted).", "ticket": {...}, "orders": [{...}], "new_ticket": null, "reason": null, "block_codes": []}
 HTTP 200
 ```
 

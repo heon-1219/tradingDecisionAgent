@@ -168,7 +168,8 @@ export function interpretResult(action, result) {
 // Risk block codes (src/finagent/trading/risk.py) that come from the mandate, and those that only
 // say the prices do not fit right now. (One string each: scripts/check_i18n.mjs reads a quoted
 // `order_…` word as an i18n key.)
-const MANDATE_CODES = new Set('denied_symbol order_type_not_allowed max_positions budget orders_per_day'.split(' '));
+const MANDATE_CODES = new Set(('denied_symbol order_type_not_allowed max_positions budget orders_per_day '
+  + 'max_order_usd max_position_pct').split(' '));
 const PRICE_CODES = new Set('price_band no_quote bad_tick'.split(' '));
 
 /* Why a refresh was refused (409), from the result's `reason` and `block_codes`:

@@ -124,7 +124,9 @@ await test('every answer of the ticket endpoints maps to one outcome', () => {
   assert.equal(why('no_executable_legs', ['price_band']), 'prices');
   assert.equal(why('no_executable_legs', ['bad_tick', 'no_quote', 'price_band']), 'prices');
   assert.equal(why('no_executable_legs', ['denied_symbol', 'price_band']), 'mandate');
-  for (const code of ['denied_symbol', 'order_type_not_allowed', 'max_positions', 'budget', 'orders_per_day']) {
+  assert.equal(why('no_executable_legs', ['max_position_pct', 'price_band']), 'mandate', 'a mandate cap links Mandate');
+  for (const code of ['denied_symbol', 'order_type_not_allowed', 'max_positions', 'budget', 'orders_per_day',
+    'max_order_usd', 'max_position_pct']) {
     assert.equal(why('no_executable_legs', [code]), 'mandate', code);
   }
   assert.equal(why('no_executable_legs', ['account_blocked', 'price_band']), 'other');
