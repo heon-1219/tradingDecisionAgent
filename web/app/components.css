@@ -2033,9 +2033,12 @@ button.source-item[aria-expanded="true"] {
 
 /* The mode chip in the top bar: the word carries the meaning, the colour only hints. */
 .chip-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: none;
   height: 24px;
-  padding: 0 10px;
+  padding: 0 10px 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: transparent;
@@ -2055,6 +2058,24 @@ button.source-item[aria-expanded="true"] {
 .chip-mode[aria-expanded="true"] {
   border-color: var(--border-strong);
   color: var(--text);
+}
+
+.chip-mode-icon {
+  display: inline-flex;
+}
+
+/* A phone has no room for the words: the chip is its icon (one wave or three), the name stays the
+   accessible name and the popover says it in full. */
+@media (max-width: 760px) {
+  .chip-mode {
+    justify-content: center;
+    width: 30px;
+    padding: 0;
+  }
+
+  .chip-mode-label {
+    display: none;
+  }
 }
 
 .mode-explain {

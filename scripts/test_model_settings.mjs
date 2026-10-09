@@ -33,8 +33,15 @@ chip.hidden = true;
 topbar.appendChild(chip);
 const toasts = document.createElement('div');
 toasts.id = 'toasts';
-document.body.append(topbar, toasts);
+const announcer = document.createElement('div');
+announcer.id = 'announcer';
+document.body.append(topbar, toasts, announcer);
+const announced = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 90)); // notify.js sets the text after 60 ms
+  return announcer.textContent;
+};
 const { modeExplanation } = await import('../web/app/js/components/mode.js');
+const { createModelSection } = await import('../web/app/js/components/settings-model.js');
 
 const SHALLOW = {
   alpaca: 'connected', tavily: 'set', sec_user_agent: 'missing', gemini: 'set', trading_enabled: true,
@@ -63,6 +70,11 @@ await test('pure: what a save sends, where an error goes, the key links', () => 
   assert.deepEqual(save({ provider: 'anthropic', model: 'claude-opus-5-5', paid: true }).body,
     { llm_provider: 'anthropic', llm_model: 'claude-opus-5-5' }, 'the paid switch is Gemini only');
   assert.deepEqual(save({ effort: 'turbo' }), { body: {} });
+  // OpenAI models ignore effort: the select is off for OpenAI, and a save there never sends it
+  assert.deepEqual(llm.saveBody(DEEP_OPENAI, { provider: 'openai', key: '', model: 'gpt-6', paid: false, effort: 'max' }),
+    { body: {} });
+  assert.equal(llm.usesEffort('openai'), false);
+  assert.equal(llm.usesEffort('gemini') && llm.usesEffort('anthropic'), true);
   assert.deepEqual(save({ model: 'x'.repeat(257) }), { error: 'llm_model_too_long' });
   assert.equal(llm.checksTheKey({ gemini_paid: true, llm_effort: 'low' }), false);
   for (const body of [{ llm_model: 'm' }, { llm_provider: 'openai' }, { anthropic_key: 'k' }]) assert.equal(llm.checksTheKey(body), true);
@@ -74,6 +86,9 @@ await test('pure: what a save sends, where an error goes, the key links', () => 
   assert.equal(llm.errorSpot('invalid_value', 'llm_model'), 'model');
   assert.equal(llm.errorSpot('llm_unreachable'), 'save');
   assert.equal(llm.errorSpot('settings_not_saved'), 'save');
+  assert.deepEqual(llm.errorMessage('llm_invalid_key', 'server words'), { key: 'settings_llm_err_invalid_key' });
+  assert.deepEqual(llm.errorMessage('settings_not_saved', 'The settings could not be saved.'), { raw: 'The settings could not be saved.' });
+  assert.deepEqual(llm.errorMessage('network_error'), { key: 'err_generic' });
   assert.deepEqual(llm.modelOptions([{ id: 'a', label: 'A' }, { id: 'a' }, { id: '' }, { id: 7 }, null, { id: 'b' }]),
     [{ id: 'a', label: 'A (a)' }, { id: 'b', label: 'b' }]);
   assert.deepEqual(llm.depthOf({ mode: 'shallow', max_rounds: 4, time_budget_sec: 150 }), { mode: 'shallow', rounds: 4, seconds: 150 });
@@ -386,6 +401,155 @@ await test('an answer cut by the shallow budget gets the Settings link; the fini
   assert.equal(b.slots.status.querySelector('.mode-hint'), null);
   assert.equal(thread.querySelectorAll('.mode-note').length, 1, 'a reopened chat gets the note too');
   thread.replaceChildren();
+});
+
+await test('a model list that answers after the provider changed is dropped, success or error', async () => {
+  // A fresh section each time: nothing loaded or cached yet.
+  const fresh = () => {
+    const made = createModelSection({ adopt: (body) => setState({ settings: body }) });
+    document.body.appendChild(made.el);
+    made.update(SHALLOW);
+    const root = made.el;
+    const pick = (provider) => {
+      const input = root.querySelectorAll('input').find((i) => i.type === 'radio' && i.value === provider);
+      input.checked = true;
+      input.dispatch('change');
+    };
+    const status = () => root.querySelector('.model-list-status');
+    const shownErrors = () => root.querySelectorAll('.field-error').filter((e) => !e.hidden).map((e) => e.textContent);
+    return { root, pick, status, shownErrors };
+  };
+  const hint = 'Enter this provider’s API key, then load its models.';
+
+  // success: Anthropic's list arrives after OpenAI (no key, so no load of its own) was chosen
+  let release;
+  let s = fresh();
+  net.routes = [models('anthropic', { gate: new Promise((r) => { release = r; }) })];
+  s.pick('anthropic');
+  await flush();
+  s.pick('openai');
+  assert.equal(s.status().textContent, hint);
+  release();
+  await flush();
+  assert.equal(s.status().textContent, hint, 'the late list does not touch OpenAI\'s state');
+  assert.deepEqual(s.root.querySelector('select').querySelectorAll('option').map((o) => o.value), []);
+  s.root.remove();
+
+  // error: Anthropic's refusal arrives after OpenAI was chosen
+  s = fresh();
+  net.routes = [{ method: 'POST', match: '/api/llm/models', status: 400, gate: new Promise((r) => { release = r; }),
+    body: { error: 'llm_invalid_key', message: 'x' } }];
+  s.pick('anthropic');
+  await flush();
+  s.pick('openai');
+  release();
+  await flush();
+  assert.deepEqual(s.shownErrors(), [], 'no stale error at OpenAI\'s key field');
+  assert.equal(s.status().textContent, hint);
+  s.root.remove();
+  setState({ settings: SHALLOW });
+});
+
+await test('opening the panel loads the saved provider\'s models once per opening', async () => {
+  // the form follows the server again
+  net.routes = [{ method: 'PUT', match: '/api/settings', status: 200, body: SHALLOW }];
+  setState({ settings: { ...SHALLOW, effort: 'low' } });
+  await flush();
+  setState({ settings: SHALLOW });
+  section().querySelector('.btn-primary').click(); // nothing to save, but the form is in sync
+  await flush();
+  net.calls.length = 0;
+  net.routes = [{ method: 'POST', match: '/api/llm/models', status: 200,
+    body: { provider: 'gemini', models: [{ id: 'gemini-3.8-pro' }, { id: 'gemini-3.8-flash' }], suggested: 'gemini-3.8-flash' } },
+  { method: 'GET', match: '/api/settings', status: 200, body: SHALLOW }];
+  panel('settings').show(view);
+  await flush();
+  const lists = () => net.calls.filter((c) => c.path === '/api/llm/models');
+  assert.deepEqual(lists().map((c) => c.body), [{ provider: 'gemini' }], 'once, with the saved key');
+  assert.deepEqual(selects()[0].querySelectorAll('option').map((o) => o.value), ['gemini-3.8-pro', 'gemini-3.8-flash']);
+  assert.equal(selects()[0].value, 'gemini-3.8-flash');
+  setState({ settings: { ...SHALLOW } }); // a settings refresh is not an opening
+  await flush();
+  assert.equal(lists().length, 1);
+  panel('settings').show(view);
+  await flush();
+  assert.equal(lists().length, 2, 'the next opening loads again');
+  // no saved key for the provider in use: nothing is loaded
+  setState({ settings: { ...SHALLOW, providers: { gemini: 'missing', openai: 'missing', anthropic: 'missing' } } });
+  panel('settings').show(view);
+  await flush();
+  assert.equal(lists().length, 2);
+  setState({ settings: SHALLOW });
+});
+
+await test('effort is off for OpenAI, with a note; on for the others', () => {
+  setState({ settings: SHALLOW });
+  const effortHelp = () => section().querySelector('.effort-help');
+  assert.equal(selects()[1].disabled, false);
+  assert.equal(effortHelp().hidden, true);
+  choose('openai');
+  assert.equal(selects()[1].disabled, true);
+  assert.equal(effortHelp().hidden, false);
+  assert.equal(effortHelp().textContent, 'OpenAI models ignore this setting.');
+  choose('anthropic');
+  assert.equal(selects()[1].disabled, false);
+  assert.deepEqual(selects()[1].querySelectorAll('option').map((o) => o.value), ['low', 'medium', 'high', 'xhigh', 'max']);
+  setState({ settings: SHALLOW });
+});
+
+await test('messages follow a language switch, and failures are announced', async () => {
+  setState({ settings: DEEP_OPENAI });
+  net.routes = [{ method: 'PUT', match: '/api/settings', status: 400, body: { error: 'llm_invalid_key', message: 'x' } }];
+  keyInput().value = 'sk-bad';
+  saveButton().click();
+  await flush();
+  assert.deepEqual(errors(), [dict.en.settings_llm_err_invalid_key]);
+  assert.equal(await announced(), dict.en.settings_llm_err_invalid_key, 'a failed save is announced');
+  setLang('ko');
+  assert.deepEqual(errors(), [dict.ko.settings_llm_err_invalid_key]);
+  setLang('en');
+  // the message under Save
+  net.routes = [{ method: 'PUT', match: '/api/settings', status: 502, body: { error: 'llm_unreachable', message: 'x' } }];
+  keyInput().value = 'sk-bad';
+  saveButton().click();
+  await flush();
+  setLang('ko');
+  assert.equal(message().textContent, dict.ko.settings_llm_err_unreachable);
+  setLang('en');
+  // a server message the app has no words for stays as the server wrote it, in any language
+  net.routes = [{ method: 'PUT', match: '/api/settings', status: 500, body: { error: 'settings_not_saved', message: 'The settings could not be saved.' } }];
+  keyInput().value = 'sk-bad';
+  saveButton().click();
+  await flush();
+  setLang('ko');
+  assert.equal(message().textContent, 'The settings could not be saved.');
+  setLang('en');
+  // the model list's status line, and its announcement
+  setState({ settings: SHALLOW });
+  choose('anthropic');
+  net.routes = [{ method: 'POST', match: '/api/llm/models', status: 502, body: { error: 'llm_list_failed', message: 'x' } }];
+  loadButton().click();
+  await flush();
+  assert.equal(await announced(), dict.en.settings_llm_err_list_failed, 'a failed list load is announced');
+  setLang('ko');
+  assert.equal(section().querySelector('.model-list-status').textContent, dict.ko.settings_llm_err_list_failed);
+  setLang('en');
+  setState({ settings: SHALLOW });
+});
+
+await test('the mode chip carries its name for every width: an icon, a label and the accessible name', () => {
+  setState({ settings: SHALLOW });
+  assert.equal(chip.getAttribute('aria-label'), 'Shallow mode');
+  assert.equal(chip.querySelector('.chip-mode-label').textContent, 'Shallow mode');
+  assert.ok(chip.querySelector('.chip-mode-icon'));
+  const shallowIcon = chip.querySelector('.chip-mode-icon').getAttribute('data-icon');
+  setState({ settings: DEEP_OPENAI });
+  assert.equal(chip.getAttribute('aria-label'), 'Deep mode');
+  assert.notEqual(chip.querySelector('.chip-mode-icon').getAttribute('data-icon'), shallowIcon, 'the shape differs, not only the colour');
+  setLang('ko');
+  assert.equal(chip.getAttribute('aria-label'), '심층 리서치 모드');
+  setLang('en');
+  setState({ settings: SHALLOW });
 });
 
 await test('no typed key is ever written to storage', () => {

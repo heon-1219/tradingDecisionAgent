@@ -282,6 +282,7 @@ registerPanel('settings', {
   },
   show() {
     emit('settings:refresh');
+    if (view) view.model.opened(); // the model list, once per opening
   },
 });
 

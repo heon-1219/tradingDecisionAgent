@@ -1604,8 +1604,13 @@ button {
   }
 
   .topbar {
-    gap: 6px;
+    gap: 4px;
     padding: 0 6px 0 12px;
+  }
+
+  /* The title keeps room for a few words where the bar allows it (it still shrinks below 350 px). */
+  .session-title {
+    min-width: min(56px, max(0px, calc(100vw - 304px)));
   }
 
   .chip-model,

@@ -28,6 +28,9 @@ const text = (value) => (typeof value === 'string' ? value : '');
 
 export const isProvider = (value) => PROVIDERS.includes(value);
 
+/* Whether the provider's models use `llm_effort` (OpenAI's do not: the app does not send it). */
+export const usesEffort = (provider) => provider !== 'openai';
+
 /* The models of a `POST /api/llm/models` answer the select can show: `{id, label}` with a string id
  * of at most MODEL_MAX characters, without duplicates. `label` falls back to the id. */
 export function modelOptions(models) {
@@ -66,7 +69,7 @@ export function saveBody(settings, form) {
   if (provider === 'gemini' && typeof form.paid === 'boolean' && form.paid !== Boolean(s.gemini_paid)) {
     body.gemini_paid = form.paid;
   }
-  if (EFFORTS.includes(form.effort) && form.effort !== s.effort) body.llm_effort = form.effort;
+  if (usesEffort(provider) && EFFORTS.includes(form.effort) && form.effort !== s.effort) body.llm_effort = form.effort;
   return { body };
 }
 
@@ -88,6 +91,13 @@ export const LLM_ERRORS = {
   llm_list_failed: 'settings_llm_err_list_failed',
   invalid_value: 'settings_err_invalid_value',
 };
+
+/* What an error code says, never with anything that was typed: {key} for a code the app knows,
+ * else {raw}, the server's own fixed message, else the generic {key}. */
+export function errorMessage(code, serverMessage) {
+  if (LLM_ERRORS[code]) return { key: LLM_ERRORS[code] };
+  return typeof serverMessage === 'string' && serverMessage ? { raw: serverMessage } : { key: 'err_generic' };
+}
 
 /* Which field an error belongs next to: 'key', 'model' or 'save' (under the Save button). */
 export function errorSpot(code, field) {

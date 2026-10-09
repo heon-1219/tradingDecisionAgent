@@ -8,8 +8,13 @@
  *
  * The model list comes from the app's own `POST /api/llm/models` (the server asks the provider):
  * it is loaded when another provider whose key is saved is chosen, and by "Load models" (with the
- * typed key, if any). Only the newest load is shown. A model id the list does not have can be
- * typed in "Custom model id"; it wins over the list.
+ * typed key, if any), and once each time the panel opens when the provider's key is saved. A list
+ * is shown only if it is the newest load and its provider is still the one chosen, whether it
+ * succeeded or failed. A model id the list does not have can be typed in "Custom model id"; it wins
+ * over the list. Effort is off for OpenAI, whose models ignore it.
+ *
+ * Every message is set from an i18n key, so it follows a language switch; only a server message the
+ * app has no words for is shown as the server wrote it. A failed save or list load is announced.
  *
  * The form follows the server's settings until the person changes something; from then on it keeps
  * what they chose (only the status words and the summary follow), until a save succeeds.
@@ -19,44 +24,13 @@ import { bindText, formatNumber, t } from '../i18n.js';
 import { announce, notify } from '../notify.js';
 import { on } from '../state.js';
 import { actionButton, el, externalLink, label, uid } from './dom.js';
+import { field, setFieldError, setMessage, textOf } from './form-fields.js';
 import {
-  checksTheKey, depthOf, EFFORTS, errorSpot, isProvider, KEY_LINKS, LLM_ERRORS, MODEL_MAX, modelOptions,
-  PROVIDER_NAMES, PROVIDERS, saveBody,
+  checksTheKey, depthOf, EFFORTS, errorMessage, errorSpot, isProvider, KEY_LINKS, MODEL_MAX, modelOptions,
+  PROVIDER_NAMES, PROVIDERS, saveBody, usesEffort,
 } from './llm-model.js';
 
 const MODE_KEYS = { shallow: 'mode_shallow', deep: 'mode_deep' };
-
-/* A field: caption, the control (or a `holder` around it), an optional help line and an error line
- * (hidden until used). */
-function field(captionKey, control, { help, holder } = {}) {
-  const wrap = el('div', 'field');
-  const caption = label('label', 'field-label', captionKey);
-  control.id = uid('llm');
-  caption.setAttribute('for', control.id);
-  const error = el('p', 'field-error');
-  error.id = uid('llm-error');
-  error.hidden = true;
-  wrap.append(caption, holder || control, ...(help ? [help] : []), error);
-  return { wrap, caption, control, error };
-}
-
-function setFieldError(spot, text) {
-  spot.error.hidden = !text;
-  spot.error.textContent = text || '';
-  if (text) {
-    spot.control.setAttribute('aria-invalid', 'true');
-    spot.control.setAttribute('aria-describedby', spot.error.id);
-  } else {
-    spot.control.removeAttribute('aria-invalid');
-    spot.control.removeAttribute('aria-describedby');
-  }
-}
-
-/* What an error code says, never with anything that was typed. */
-function errorText(code, serverMessage) {
-  const key = LLM_ERRORS[code];
-  return key ? t(key) : (serverMessage || t('err_generic'));
-}
 
 export function createModelSection({ adopt }) {
   let settings = null;
@@ -64,6 +38,7 @@ export function createModelSection({ adopt }) {
   let touched = false; // the person changed the form since it last followed the server
   let busy = false;
   let generation = 0; // only the newest model-list load may write
+  let openLoad = false; // the panel was just opened: load the list once, when the settings allow it
   const lists = new Map(); // provider -> [{id, label}] loaded while the panel is open
   const suggested = new Map(); // provider -> the model the server suggests for it
   const picked = new Map(); // provider -> the model the person picked in the list
@@ -136,7 +111,9 @@ export function createModelSection({ adopt }) {
     option.value = value;
     effortSelect.appendChild(option);
   }
-  const effort = field('settings_effort', effortSelect);
+  const effortHelp = label('p', 'field-help effort-help', 'settings_effort_openai');
+  effortHelp.hidden = true;
+  const effort = field('settings_effort', effortSelect, { help: effortHelp });
 
   const save = actionButton('btn btn-primary btn-small', 'settings_llm_save');
   const saveLabel = save.querySelector('.btn-label') || save;
@@ -147,28 +124,31 @@ export function createModelSection({ adopt }) {
 
   root.append(heading, summary, group, key.wrap, model.wrap, custom.wrap, paid, effort.wrap, actions, message);
 
-  function say(textKey, tone, raw) {
-    message.hidden = !textKey && !raw;
-    message.textContent = raw || (textKey ? t(textKey) : '');
+  /* The line under Save: a message ({key} or {raw}) with a tone, or nothing. */
+  function say(text, tone) {
+    message.hidden = !text;
+    setMessage(message, text);
     message.setAttribute('data-tone', tone || 'muted');
   }
 
   function clearErrors() {
-    for (const spot of [key, model, custom]) setFieldError(spot, '');
+    for (const spot of [key, model, custom]) setFieldError(spot, null);
     say(null);
   }
 
+  /* An error next to its field (or under Save), announced once. */
   function showError(code, fieldName, serverMessage) {
-    const text = errorText(code, serverMessage);
+    const text = errorMessage(code, serverMessage);
     const spot = errorSpot(code, fieldName);
     if (spot === 'key') setFieldError(key, text);
     else if (spot === 'model') setFieldError(customInput.value.trim() ? custom : model, text);
-    else say(null, 'bad', text);
+    else say(text, 'bad');
+    announce(textOf(text));
   }
 
-  function setListStatus(textKey, tone) {
-    listStatus.hidden = !textKey;
-    listStatus.textContent = textKey ? t(textKey) : '';
+  function setListStatus(text, tone) {
+    listStatus.hidden = !text;
+    setMessage(listStatus, text);
     listStatus.setAttribute('data-tone', tone || 'muted');
     listStatus.classList.toggle('is-loading', tone === 'loading');
   }
@@ -192,6 +172,7 @@ export function createModelSection({ adopt }) {
   function setDisabled() {
     for (const control of [save, load, keyInput, customInput, paidBox, effortSelect]) control.disabled = !settings || busy;
     for (const { radio } of radios) radio.disabled = !settings || busy;
+    if (!usesEffort(selected)) effortSelect.disabled = true;
     select.disabled = busy || !settings || select.querySelectorAll('option').length === 0;
   }
 
@@ -205,7 +186,10 @@ export function createModelSection({ adopt }) {
       keyHelp.append(label('span', '', 'settings_llm_key_help'), link);
     }
     paid.hidden = selected !== 'gemini';
+    effortHelp.hidden = usesEffort(selected);
+    if (!usesEffort(selected) && settings && EFFORTS.includes(settings.effort)) effortSelect.value = settings.effort;
     renderModels();
+    setDisabled();
   }
 
   async function loadModels() {
@@ -213,8 +197,8 @@ export function createModelSection({ adopt }) {
     const provider = selected;
     const mine = ++generation;
     const typed = keyInput.value.trim();
-    setFieldError(key, '');
-    setListStatus('settings_llm_loading', 'loading');
+    setFieldError(key, null);
+    setListStatus({ key: 'settings_llm_loading' }, 'loading');
     load.disabled = true;
     try {
       // The typed key goes in the body of this one request and nowhere else.
@@ -222,20 +206,20 @@ export function createModelSection({ adopt }) {
       if (mine !== generation || provider !== selected) return;
       lists.set(provider, modelOptions(body?.models));
       if (typeof body?.suggested === 'string') suggested.set(provider, body.suggested);
-      setListStatus(lists.get(provider).length ? null : 'settings_llm_none', 'muted');
+      setListStatus(lists.get(provider).length ? null : { key: 'settings_llm_none' }, 'muted');
       renderModels();
     } catch (err) {
-      if (mine !== generation) return;
+      // An answer for a provider that is no longer chosen is dropped, like a successful one.
+      if (mine !== generation || provider !== selected) return;
       const code = err?.error || '';
+      const text = code === 'llm_key_required' ? { key: 'settings_llm_err_list_key' } : errorMessage(code, err?.message);
       if (errorSpot(code, err?.body?.field) === 'key') {
         setListStatus(null);
-        setFieldError(key, code === 'llm_key_required' ? t('settings_llm_err_list_key') : errorText(code, err?.message));
+        setFieldError(key, text);
       } else {
-        listStatus.hidden = false;
-        listStatus.textContent = errorText(code, err?.message);
-        listStatus.setAttribute('data-tone', 'bad');
-        listStatus.classList.remove('is-loading');
+        setListStatus(text, 'bad');
       }
+      announce(textOf(text));
     } finally {
       if (mine === generation) load.disabled = busy || !settings;
     }
@@ -250,7 +234,15 @@ export function createModelSection({ adopt }) {
     setListStatus(null);
     renderProvider();
     if (settings?.providers?.[provider] === 'set' && !lists.has(provider)) loadModels();
-    else if (!lists.has(provider) && provider !== settings?.provider) setListStatus('settings_llm_enter_key', 'muted');
+    else if (!lists.has(provider) && provider !== settings?.provider) setListStatus({ key: 'settings_llm_enter_key' }, 'muted');
+  }
+
+  /* The panel opened: load the chosen provider's list once if its key is saved (now, or as soon as
+   * the settings are known). */
+  function loadOnOpen() {
+    if (!openLoad || !settings || busy || !isProvider(selected)) return;
+    openLoad = false;
+    if (settings.providers?.[selected] === 'set') loadModels();
   }
 
   async function submit() {
@@ -267,7 +259,7 @@ export function createModelSection({ adopt }) {
     }
     if (!Object.keys(body).length) {
       keyInput.value = '';
-      say('settings_llm_nothing', 'muted');
+      say({ key: 'settings_llm_nothing' }, 'muted');
       return;
     }
     busy = true;
@@ -281,7 +273,7 @@ export function createModelSection({ adopt }) {
       customInput.value = '';
       adopt(fresh);
       const done = warning === 'llm_rate_limited' ? 'settings_llm_saved_rate_limited' : 'settings_llm_saved';
-      say(done, warning ? 'warn' : 'ok');
+      say({ key: done }, warning ? 'warn' : 'ok');
       if (!warning) notify(t('settings_llm_saved'), { kind: 'success' });
       announce(t(done));
     } catch (err) {
@@ -339,6 +331,7 @@ export function createModelSection({ adopt }) {
       renderModels();
     }
     setDisabled();
+    loadOnOpen();
   }
 
   // The summary's mode name is a variable: say it again in the new language.
@@ -348,6 +341,10 @@ export function createModelSection({ adopt }) {
   return {
     el: root,
     update,
+    opened() {
+      openLoad = true;
+      loadOnOpen();
+    },
     focus() {
       root.scrollIntoView({ block: 'start' });
       heading.focus({ preventScroll: true });

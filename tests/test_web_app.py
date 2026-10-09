@@ -480,7 +480,7 @@ def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
     assert re.findall(r"keyInput\.value = ([^;]+);", model) and all(
         value == "''" for value in re.findall(r"keyInput\.value = ([^;]+);", model)), "the key field is only ever emptied"
     assert "keyInput.value.trim()" in model  # read only to build a request body
-    for name in ("settings.js", "settings-kill.js", "settings-model.js", "llm-model.js"):
+    for name in ("settings.js", "settings-kill.js", "settings-model.js", "llm-model.js", "form-fields.js"):
         code = "\n".join(c for _, c, _ in _code_lines(COMPONENTS_DIR / name))
         for sink in ("localStorage", "sessionStorage", "storage.", "document.cookie"):
             assert sink not in code, f"{name}: {sink}"

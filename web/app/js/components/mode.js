@@ -12,13 +12,15 @@
  * When an answer stopped at its budget in shallow mode, the server's text already says why, so the
  * hint under it is only the mode's name and the link.
  */
-import { bindText, formatNumber } from '../i18n.js';
+import { bindAttr, bindText, formatNumber } from '../i18n.js';
 import { emit, on, state, storage, STORAGE_KEYS } from '../state.js';
 import { actionButton, el, iconButton, iconSpan, label } from './dom.js';
 import { depthOf } from './llm-model.js';
 import { closePopover, initPopovers } from './popover.js';
 
 const MODE_KEYS = { shallow: 'mode_shallow', deep: 'mode_deep' };
+// One wave for shallow, three for deep: the chip's shape says the mode where its label does not fit.
+const MODE_ICONS = { shallow: 'depth_shallow', deep: 'depth_deep' };
 const DISMISSED = 'dismissed';
 
 let depth = null; // {mode, rounds, seconds}: the newest of the settings and the last finish event
@@ -65,7 +67,11 @@ function renderChip() {
   if (!depth) return;
   chip.setAttribute('data-mode', depth.mode);
   chip.classList.toggle('is-shallow', depth.mode === 'shallow');
-  bindText(chip, MODE_KEYS[depth.mode]);
+  // On a phone only the icon shows (components.css); the name stays the accessible name.
+  const icon = iconSpan(MODE_ICONS[depth.mode], 14, 'icon chip-mode-icon');
+  icon.setAttribute('data-icon', MODE_ICONS[depth.mode]);
+  chip.replaceChildren(icon, label('span', 'chip-mode-label', MODE_KEYS[depth.mode]));
+  bindAttr(chip, 'aria-label', MODE_KEYS[depth.mode]);
 }
 
 function renderEmpty() {
@@ -89,8 +95,9 @@ function noteDismissed() {
   return storage.get(STORAGE_KEYS.shallowNote) === DISMISSED;
 }
 
-/* The one-line shallow note above the chat's first answer: added when a chat's first turn starts
- * or a chat is opened, updated or removed when the mode changes, never added twice. */
+/* The one-line shallow note above the chat's first answer: shown once per chat, on purpose. It is
+ * added when a chat's first turn starts or a chat is opened, updated or removed when the mode
+ * changes, and never added twice to the same chat. */
 function renderNote({ add = false } = {}) {
   const thread = document.getElementById('thread');
   if (!thread) return;
