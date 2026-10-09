@@ -185,11 +185,11 @@ async def fetch_models(provider: str, api_key: str, settings: Any, *, http_clien
     out: list[dict] = []
     if provider == "anthropic":
         client = _anthropic_client(api_key, settings, http_client)
-        pages = client.models.list(limit=100)
     else:
         client = _openai_client(provider, api_key, settings, http_client)
-        pages = client.models.list()
     try:
+        # Created inside the `try`: `list(...)` may raise when it is called, before any page.
+        pages = client.models.list(limit=100) if provider == "anthropic" else client.models.list()
         async with asyncio.timeout(deadline_sec):
             async for model in pages:
                 model_id = getattr(model, "id", None)

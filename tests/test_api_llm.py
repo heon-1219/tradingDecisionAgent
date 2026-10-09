@@ -17,7 +17,7 @@ import pytest
 from types import SimpleNamespace
 
 from fakes_trading import make_account
-from finagent.agent.llm import LLMHandle, StubConversation, StubLLM, Turn
+from finagent.agent.llm import LLMHandle, StubConversation, StubLLM, ToolCall, Turn
 from finagent.app_state import ENV_NAMES
 from finagent.config import Settings
 from finagent.trading.broker import BrokerError
@@ -787,6 +787,39 @@ def test_proposing_on_a_live_account_creates_no_ticket(tmp_path):
         assert world.total_submits() == 0
 
 
+def test_the_get_account_tool_on_a_live_account_drops_the_broker(tmp_path):
+    """The chat tool reads the account too: a `paper: false` answer there is refused and, as at the
+    executor, the runtime drops the broker (the runtime wires `on_not_paper` into its toolbox)."""
+    world = ApiWorld(tmp_path)
+    with world.client() as client:
+        broker = world.runtime.broker
+        broker.account_snapshot = make_account(paper=False)
+        world.llm._factory = lambda user_text: [
+            Turn("", [ToolCall("c1", "get_account", {})], "tool_use"), Turn("Done.", [], "end_turn")]
+        sid = new_session(client)
+        events = chat(client, sid, "How is my account doing?")
+        [out] = [e for e in events if e["type"] == "tool-output-available"]
+        assert out["isError"] is True
+        assert "not a paper account" in out["output"] and "Trading is disabled" in out["output"]
+        assert "100,000" not in out["output"]  # the account's figures are not shown
+        assert world.runtime.broker is None and world.runtime.executor is None
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        assert client.get("/api/portfolio").json() == {"connected": False}
+        assert world.total_submits() == 0
+
+
+def test_the_get_account_tool_on_an_account_that_does_not_say_keeps_the_broker(tmp_path):
+    world = ApiWorld(tmp_path)  # the default fake account: `paper` is None
+    with world.client() as client:
+        world.llm._factory = lambda user_text: [
+            Turn("", [ToolCall("c1", "get_account", {})], "tool_use"), Turn("Done.", [], "end_turn")]
+        events = chat(client, new_session(client), "How is my account doing?")
+        [out] = [e for e in events if e["type"] == "tool-output-available"]
+        assert out["isError"] is False and "Alpaca PAPER trading account (simulated money)" in out["output"]
+        assert world.runtime.broker is not None
+        assert client.get("/api/settings").json()["alpaca"] == "connected"
+
+
 def test_a_refresh_on_a_live_account_creates_nothing(tmp_path):
     world = ApiWorld(tmp_path)
     with world.client() as client:
@@ -817,6 +850,88 @@ def test_get_settings_rechecks_an_unsettled_alpaca_status_at_most_once_a_minute(
         now[0] += 600
         assert client.get("/api/settings").json()["alpaca"] == "connected"  # settled: not re-checked
         assert broker.calls.count("account") == checks + 1
+
+
+def _gate_account(broker):
+    """Make `broker.account()` wait for the gate, so a check stays in flight; returns the gate."""
+    gate = asyncio.Event()
+
+    async def slow_account():
+        broker.calls.append("account")
+        await gate.wait()
+        return broker.account_snapshot
+
+    broker.account = slow_account
+    return gate
+
+
+async def _let_tasks_run() -> None:
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+async def test_concurrent_settings_gets_share_one_alpaca_check(tmp_path):
+    """While Alpaca is slow, GETs that fall due together wait on one `account()` call."""
+    from finagent.api_chat import get_settings_status
+
+    world = ApiWorld(tmp_path)
+    runtime = world.state().chat  # never checked: every GET is due
+    try:
+        broker = runtime.broker
+        gate = _gate_account(broker)
+        first = asyncio.create_task(get_settings_status(runtime))
+        second = asyncio.create_task(get_settings_status(runtime))
+        await _let_tasks_run()
+        assert broker.calls.count("account") == 1  # both are waiting on the same call
+        assert not first.done() and not second.done()
+        gate.set()
+        responses = await asyncio.gather(first, second)
+        assert broker.calls.count("account") == 1
+        assert [json.loads(r.body)["alpaca"] for r in responses] == ["connected", "connected"]
+        assert runtime.alpaca_status == "connected"
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_caller_that_goes_away_does_not_cancel_the_shared_alpaca_check(tmp_path):
+    world = ApiWorld(tmp_path)
+    runtime = world.state().chat
+    try:
+        broker = runtime.broker
+        gate = _gate_account(broker)
+        gone = asyncio.create_task(runtime.refresh_alpaca_status_if_due())
+        stays = asyncio.create_task(runtime.refresh_alpaca_status_if_due())
+        await _let_tasks_run()
+        gone.cancel()
+        await _let_tasks_run()
+        assert gone.cancelled() and not stays.done()
+        gate.set()
+        assert await stays == "connected"
+        assert broker.calls.count("account") == 1 and runtime.alpaca_status == "connected"
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_finished_shared_check_does_not_block_the_next_one(tmp_path):
+    world = ApiWorld(tmp_path)
+    now = [1000.0]
+    world.monotonic = lambda: now[0]
+    runtime = world.state().chat
+    try:
+        broker = runtime.broker
+        broker.account_error = BrokerError(503, None, "service unavailable")
+        tasks = [asyncio.create_task(runtime.refresh_alpaca_status_if_due()) for _ in range(2)]
+        assert await asyncio.gather(*tasks) == ["unreachable", "unreachable"]
+        assert broker.calls.count("account") == 1
+        now[0] += 30
+        assert await runtime.refresh_alpaca_status_if_due() == "unreachable"  # checked under a minute ago
+        assert broker.calls.count("account") == 1
+        now[0] += 31
+        broker.account_error = None  # Alpaca answers again: the next due check is a new one
+        assert await runtime.refresh_alpaca_status_if_due() == "connected"
+        assert broker.calls.count("account") == 2
+    finally:
+        await runtime.shutdown()
 
 
 def test_get_settings_recheck_drops_an_account_that_turned_out_live(tmp_path):
@@ -864,6 +979,56 @@ def test_keys_once_found_live_work_again_when_a_later_check_says_paper(tmp_path)
         r = client.put("/api/settings", json={"alpaca_key_id": LIVE_ID, "alpaca_secret": LIVE_SECRET})
         assert r.status_code == 200 and r.json()["alpaca"] == "connected", r.text
         assert world.runtime.broker is not None and world.runtime.executor is not None
+        # the mark is gone for good: a later unrelated write keeps the broker
+        assert client.put("/api/settings", json={"tavily_key": ""}).status_code == 200
+        assert world.runtime.broker is not None and world.runtime.executor is not None
+
+
+def test_a_put_that_saves_nothing_does_not_clear_the_not_paper_mark(tmp_path):
+    """The reviewer's probe. The keys are marked not-paper; a PUT sends the same pair, whose check
+    now says `paper: None`, plus a Gemini key the provider rejects. The PUT answers 400 and saves
+    nothing, so the mark must stay: a later unrelated PUT rebuilds, and no broker may come back
+    while `GET /api/settings` still says `not_paper`."""
+    world = gemini_world(tmp_path, alpaca_api_key_id=LIVE_ID, alpaca_api_secret_key=LIVE_SECRET)
+    with world.client() as client:
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        rt = world.runtime
+        assert rt.broker is None
+        world.live_paper = None  # the account no longer says: the candidate check passes
+        before = world.env_path.read_bytes()
+        r = client.put("/api/settings", json={"alpaca_key_id": LIVE_ID, "alpaca_secret": LIVE_SECRET,
+                                              "gemini_key": BAD_LLM_KEY})
+        assert r.status_code == 400 and r.json()["error"] == "llm_invalid_key", r.text
+        assert world.env_path.read_bytes() == before and world.settings.gemini_api_key == GEMINI
+        assert rt.broker is None and rt.executor is None
+        r = client.put("/api/settings", json={"tavily_key": ""})  # rebuilds the connectors
+        assert r.status_code == 200 and r.json()["alpaca"] == "not_paper", r.text
+        assert rt.broker is None and rt.executor is None and rt.data is None
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        assert "propose_trades" not in {s.name for s in rt.toolbox.specs()}
+        # the same pair saved for real (nothing else wrong) does bring the broker back
+        r = client.put("/api/settings", json={"alpaca_key_id": LIVE_ID, "alpaca_secret": LIVE_SECRET})
+        assert r.status_code == 200 and r.json()["alpaca"] == "connected", r.text
+        assert rt.broker is not None and rt.executor is not None
+
+
+async def test_checking_candidate_keys_leaves_the_not_paper_mark_alone(tmp_path):
+    world = ApiWorld(tmp_path, alpaca_api_key_id=LIVE_ID, alpaca_api_secret_key=LIVE_SECRET)
+    runtime = world.state().chat
+    try:
+        await runtime.refresh_alpaca_status()
+        assert runtime.broker is None and runtime.alpaca_status == "not_paper"
+        world.live_paper = True
+        assert await runtime.check_alpaca_keys(LIVE_ID, LIVE_SECRET) == "connected"
+        runtime.rebuild()  # a check is not a write: still no broker for the marked pair
+        assert runtime.broker is None
+        await runtime.apply_settings({"alpaca_api_key_id": LIVE_ID, "alpaca_api_secret_key": LIVE_SECRET},
+                                     alpaca_status="connected")
+        assert runtime.broker is not None and runtime.alpaca_status == "connected"
+        runtime.rebuild()
+        assert runtime.broker is not None
+    finally:
+        await runtime.shutdown()
 
 
 # --- fix round 1, minor 3: two settings writes at once ------------------------------------------------------------

@@ -308,6 +308,32 @@ async def test_listing_has_an_overall_deadline_across_pages():
     assert 2 <= pages["n"] <= 10
 
 
+@pytest.mark.parametrize("provider, factory", [
+    ("anthropic", "_anthropic_client"), ("openai", "_openai_client"), ("gemini", "_openai_client")])
+async def test_a_listing_that_fails_before_the_first_page_still_closes_the_client(monkeypatch, provider, factory):
+    """`models.list(...)` may raise when it is called (before any page is fetched): the client made
+    for the listing is closed all the same."""
+    class ListingFailed(Exception):
+        pass
+
+    closed: list[bool] = []
+
+    class Models:
+        def list(self, **kwargs):
+            raise ListingFailed()
+
+    class Client:
+        models = Models()
+
+        async def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(llm_admin, factory, lambda *args, **kwargs: Client())
+    with pytest.raises(ListingFailed):
+        await fetch_models(provider, ANTHROPIC_KEY, settings("gemini", "g"))
+    assert closed == [True]
+
+
 def test_the_current_model_is_never_cut_by_the_cap():
     items = raw(*[f"gpt-{n}" for n in range(200)])
     out = filter_models("openai", items, keep="gpt-3")

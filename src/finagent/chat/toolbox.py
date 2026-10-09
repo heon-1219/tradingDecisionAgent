@@ -20,6 +20,10 @@ Rules every tool follows:
   from our own data (quotes, bar metrics, account, product DB) are not wrapped.
 - Research tools register `SourceRecord`s in the session's `EvidenceStore` and cite them as `[E#]`;
   `propose_trades` only accepts evidence ids that exist in that session.
+- `get_account` checks the account's paper flag as the executor's market context does: an account
+  that says it is not a paper account (`paper is False`) is refused with an error that shows none
+  of its figures, and `on_not_paper` (the runtime's drop of this broker) is told. `None` (the
+  response did not say) keeps the tool as it is.
 - With a `ledger`, every call appends a `tool_call` audit entry (hashes only), every created ticket
   a `proposal` entry and every `propose_trades` call that ends without a ticket, whatever the cause,
   a `proposal_rejected` entry (see `chat/audit.py`). An audit write that fails is logged by type and
@@ -862,6 +866,7 @@ class ChatToolbox:
         turn_slots: OrderedDict[tuple[str, str], str] | None = None,
         ledger=None,
         known_secrets: Iterable[str] = (),
+        on_not_paper: Callable[[], Any] | None = None,
     ):
         self._registry = registry
         self._orchestrator = orchestrator
@@ -887,6 +892,9 @@ class ChatToolbox:
         # Secret values to blank out of broker messages besides the current settings' keys: the
         # owner's accumulated list, so a key that was replaced is still scrubbed.
         self._known_secrets = tuple(known_secrets)
+        # The owner's drop of this broker, as the executor's `on_not_paper`: told (synchronously) when
+        # `get_account` finds that the account is not a paper account.
+        self._on_not_paper = on_not_paper
 
     # --- specs ---------------------------------------------------------------------------------
 
@@ -1020,6 +1028,14 @@ class ChatToolbox:
 
     async def _t_get_account(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
         a = await self._broker.account()
+        if getattr(a, "paper", None) is False:  # `None` (the response did not say) keeps the label
+            self._not_paper()
+            return ToolOutput(
+                "The connected Alpaca account is not a paper account. Trading is disabled: this app works "
+                "with paper accounts only, so the broker has been disconnected and the account is not shown. "
+                "Tell the user to save paper-trading keys in Settings. You cannot place orders.",
+                is_error=True,
+            )
         lines = [
             "Alpaca PAPER trading account (simulated money):",
             f"- status: {_token(a.status)}",
@@ -1031,6 +1047,16 @@ class ChatToolbox:
             f"trading suspended by user: {_yn(a.trade_suspended_by_user)}; shorting enabled: {_yn(a.shorting_enabled)}",
         ]
         return ToolOutput("\n".join(lines))
+
+    def _not_paper(self) -> None:
+        """Tell the owner that this broker's account is not a paper account (it drops the broker).
+        The refusal itself must still happen, so a failing callback is only logged, by type."""
+        log.warning("get_account: the broker's account is not a paper account")
+        if self._on_not_paper is not None:
+            try:
+                self._on_not_paper()
+            except Exception as exc:  # noqa: BLE001
+                log.error("the not-paper callback failed (%s)", type(exc).__name__)
 
     async def _t_get_positions(self, session_id: str, args: dict, turn_id: str) -> ToolOutput:
         positions = list((await self._broker.positions()).values())

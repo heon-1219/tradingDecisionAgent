@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fakes_trading import FakeBroker, FakeData, make_open_order
+from fakes_trading import FakeBroker, FakeData, make_account, make_open_order
 from finagent.agent.tools import ToolResult
 from finagent.chat.audit import args_sha256
 from finagent.chat.sessions import SessionStore
@@ -536,6 +536,42 @@ async def test_get_account(world):
     assert "$100,000.00" in out.text and "$50,000.00" in out.text
     assert "paper" in out.text.lower()
     assert "account_number" not in out.text
+
+
+async def test_get_account_refuses_an_account_that_is_not_paper_and_drops_the_broker(world):
+    world.broker.account_snapshot = make_account(paper=False)
+    dropped = []
+    tb = world.toolbox(on_not_paper=lambda: dropped.append("dropped"))
+    out = await world.run("get_account", toolbox=tb)
+    assert out.is_error
+    assert "not a paper account" in out.text and "Trading is disabled" in out.text
+    assert "simulated money" not in out.text and "$100,000.00" not in out.text  # nothing about the account
+    assert dropped == ["dropped"]  # the same drop the executor triggers
+    assert world.broker.submits == 0
+
+
+async def test_get_account_refusal_survives_a_failing_drop_and_a_missing_one(world):
+    world.broker.account_snapshot = make_account(paper=False)
+
+    def broken():
+        raise RuntimeError("rebuild failed")
+
+    for tb in (world.toolbox(on_not_paper=broken), world.toolbox()):
+        out = await world.run("get_account", toolbox=tb)
+        assert out.is_error and "not a paper account" in out.text
+        assert "Tool error" not in out.text
+
+
+@pytest.mark.parametrize("paper", [True, None])
+async def test_get_account_keeps_the_paper_label_when_the_account_is_paper_or_does_not_say(world, paper):
+    world.broker.account_snapshot = make_account(paper=paper)
+    dropped = []
+    tb = world.toolbox(on_not_paper=lambda: dropped.append("dropped"))
+    out = await world.run("get_account", toolbox=tb)
+    assert not out.is_error
+    assert out.text.startswith("Alpaca PAPER trading account (simulated money):")
+    assert "$100,000.00" in out.text
+    assert dropped == []
 
 
 async def test_get_positions(world):

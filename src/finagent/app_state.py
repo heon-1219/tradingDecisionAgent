@@ -29,14 +29,16 @@ conversation) and has the agent drop its cached provider conversations (`reset_c
 
 **Paper only.** `AccountSnapshot.paper` is read wherever the account is: the status check
 (`refresh_alpaca_status` at startup, and from `GET /api/settings` while the status is unsettled,
-at most once a minute), `check_alpaca_keys` for candidate keys, the portfolio route, and the
-executor's market context, which every proposal, confirm re-check and refresh builds first (it
-refuses to trade and calls back `_drop_non_paper`). `False` means a live account: the status is
-`not_paper` and the runtime rebuilds without a broker, executor or market data, exactly as if the
-keys were missing, and remembers that key pair so that no later rebuild brings them back (a later
-check of the same pair that says otherwise clears it). Only the broker that read the account is
-dropped: one already replaced is left alone. `None` (the response did not say) keeps the broker:
-the hard-coded paper host is still the first line of defence.
+at most once a minute; concurrent callers share one check), `check_alpaca_keys` for candidate
+keys, the portfolio route, the chat tool `get_account` and the executor's market context, which
+every proposal, confirm re-check and refresh builds first. The executor and the toolbox refuse
+(to trade, or to show the account) and call back `_drop_non_paper`. `False` means a live account:
+the status is `not_paper` and the runtime rebuilds without a broker, executor or market data,
+exactly as if the keys were missing, and remembers that key pair so that no later rebuild brings
+them back. Only a write that applies the same pair again (`apply_settings`, after a check that
+says otherwise) clears that mark: a check alone does not, since the write may still fail. Only the
+broker that read the account is dropped: one already replaced is left alone. `None` (the response
+did not say) keeps the broker: the hard-coded paper host is still the first line of defence.
 
 **Retired model clients** are closed only after the longest turn the settings allow (either
 mode), plus the nudge grace, one model call and a margin (`_llm_grace_sec`), so a deep turn that
@@ -47,8 +49,9 @@ shared (a failure retires what it made and changes nothing); `_swap()` puts them
 without awaiting, and closes the old HTTP clients only after `close_grace_sec` (120 s), so turns
 and confirms already in flight finish on the old objects. `apply_settings()` is all or nothing:
 build for the new values, write the env file, and only then update the settings in place and swap.
-`lock` serialises rebuilds against confirm, reject, refresh and the kill switch; chat turns do not
-take it.
+`lock` serialises settings rebuilds against confirm, reject, refresh and the kill switch; chat
+turns do not take it. The one rebuild that may run without it is the not-paper drop from a chat
+tool or a proposal (see `rebuild`).
 
 `startup()` (from the app lifespan) warns, by name only, about writable settings that the process
 environment-only settings (`config.env_fallbacks`), expires stale tickets, settles tickets stuck in
@@ -65,6 +68,7 @@ only to list models) joins that list before the call is made, whether or not it 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections import OrderedDict
@@ -121,6 +125,7 @@ SECRET_FIELDS = (
     "alpaca_api_key_id", "alpaca_api_secret_key", "gemini_api_key", "tavily_api_key",
     "anthropic_api_key", "openai_api_key",
 )
+_ALPACA_PAIR = frozenset({"alpaca_api_key_id", "alpaca_api_secret_key"})
 # Settings that only the model client reads: changing them needs a new client (`_needs_new_llm`).
 _LLM_CLIENT_FIELDS = frozenset({"llm_provider", "llm_model", "llm_effort"})
 # Changing any of these needs new connectors, a new ledger and a new toolbox (they capture keys,
@@ -234,6 +239,8 @@ class ChatRuntime:
         self._close_sleep = close_sleep or asyncio.sleep  # the grace-close wait (tests: virtual time)
         self._monotonic = monotonic or time.monotonic
         self._alpaca_checked_at: float | None = None
+        # The status check for `GET /api/settings` that is in flight, shared by concurrent callers.
+        self._status_check: asyncio.Task | None = None
         self._retired: list[Any] = []
         self._close_tasks: set[asyncio.Task] = set()
         self._secrets_seen: set[str] = set()
@@ -261,9 +268,15 @@ class ChatRuntime:
         return sorted(self._secrets_seen)
 
     def rebuild(self) -> None:
-        """(Re)create the rebuildable components from the current settings and swap them in. Call
-        it under `lock` once the app is running. Old clients are closed after the grace delay. If
-        building fails nothing is swapped."""
+        """(Re)create the rebuildable components from the current settings and swap them in. Old
+        clients are closed after the grace delay. If building fails nothing is swapped.
+
+        It is synchronous (no await), so it runs to the end without another task in between, and
+        it does not need `lock`: `_drop_non_paper` calls it with the lock held (a confirm) and
+        without it (the propose path, the `get_account` tool). That is safe because no lock-holder
+        carries state across an await that a rebuild would invalidate: `apply_settings` builds,
+        writes and swaps with no await between them, and a confirm or the kill switch keeps the
+        executor it started with, whose clients stay open for the grace delay."""
         self._swap(self._build())
 
     def _build(self, overrides: dict[str, Any] | None = None) -> "_Built":
@@ -294,20 +307,27 @@ class ChatRuntime:
             # Gemini search grounding needs only a Gemini key: it is a research connector of its
             # own, whichever provider runs the chat.
             grounded = GroundedWeb(http, gemini_key, s.grounding_model) if gemini_key else None
-            broker = data = executor = None
-            if key_id and secret and (key_id, secret) != self._not_paper_keys:
+            # A write that applies a key pair has checked it: the mark of a non-paper pair does not
+            # hold that pair back (`apply_settings` clears the mark once the write is in).
+            applies_pair = bool(overrides) and bool(_ALPACA_PAIR & overrides.keys())
+            blocked = None if applies_pair else self._not_paper_keys
+            broker = data = executor = on_not_paper = None
+            if key_id and secret and (key_id, secret) != blocked:
                 broker = self._broker_factory(key_id, secret)
                 made.append(broker)
                 data = self._data_factory(key_id, secret, http)
                 extra = {"sleep": self._sleep} if self._sleep is not None else {}
+                # Told by the executor, and by the toolbox's `get_account`, when this broker's account
+                # is not a paper account: drops this broker, if it is still the one in service.
+                on_not_paper = functools.partial(self._drop_non_paper, broker)
                 executor = Executor(broker, data, self.tickets, ledger, s,
-                                    mandate_for=self._mandate_for,
-                                    on_not_paper=lambda b=broker: self._drop_non_paper(b), **extra)
+                                    mandate_for=self._mandate_for, on_not_paper=on_not_paper, **extra)
             toolbox = ChatToolbox(
                 registry=self.registry, orchestrator=self.orchestrator, broker=broker, data=data,
                 edgar=edgar, web=web, grounded=grounded, evidence=self.evidence,
                 sessions=self.sessions, tickets=self.tickets, executor=executor, settings=s,
                 turn_slots=self.turn_slots, ledger=ledger, known_secrets=known_secrets,
+                on_not_paper=on_not_paper,
             )
         except BaseException:
             self._retire(made)
@@ -391,6 +411,8 @@ class ChatRuntime:
         await self.refresh_alpaca_status()
 
     async def shutdown(self) -> None:
+        if self._status_check is not None:
+            self._status_check.cancel()  # a no-op once it is done
         for task in list(self._close_tasks):
             task.cancel()
         for component in [*self._retired, self.http, self.broker, self.llm.current]:
@@ -424,23 +446,41 @@ class ChatRuntime:
 
     async def refresh_alpaca_status_if_due(self) -> str | None:
         """For `GET /api/settings`: check now if never checked; re-check an unsettled status
-        (`unreachable`, `invalid`, `missing`) at most once every `ALPACA_RECHECK_SEC`."""
+        (`unreachable`, `invalid`, `missing`) at most once every `ALPACA_RECHECK_SEC`.
+
+        One check at a time: while one is in flight (Alpaca can take the broker's whole timeout to
+        answer), a caller that finds the status unsettled awaits that same task instead of making
+        its own `account()` call. The task is shielded: a caller that goes away (a closed request)
+        neither cancels it nor stops the others from getting its result."""
         status = self.alpaca_status
         if status in SETTLED_ALPACA:
             return status
-        checked = self._alpaca_checked_at
-        if status is not None and checked is not None and self._monotonic() - checked < ALPACA_RECHECK_SEC:
-            return status
-        return await self.refresh_alpaca_status()
+        check = self._status_check
+        if check is None or check.done():
+            checked = self._alpaca_checked_at
+            if status is not None and checked is not None and self._monotonic() - checked < ALPACA_RECHECK_SEC:
+                return status
+            check = self._status_check = asyncio.ensure_future(self.refresh_alpaca_status())
+            check.add_done_callback(self._status_check_done)
+        return await asyncio.shield(check)
+
+    def _status_check_done(self, check: asyncio.Task) -> None:
+        if self._status_check is check:
+            self._status_check = None
+        if not check.cancelled():
+            check.exception()  # marks it retrieved: the callers awaiting it get the error
 
     def _alpaca_keys(self) -> tuple[Any, Any]:
         return (getattr(self.settings, "alpaca_api_key_id", None),
                 getattr(self.settings, "alpaca_api_secret_key", None))
 
     def _drop_non_paper(self, broker: Any) -> bool:
-        """Synchronous core of `drop_non_paper_broker`, also the executor's `on_not_paper` callback
-        (a confirm calls it while holding the lock). Drops only `broker`, and only while it is
-        still the one in service; returns whether it did."""
+        """Synchronous core of `drop_non_paper_broker`, also the `on_not_paper` callback of the
+        executor and of the toolbox's `get_account`. A confirm calls it while holding the lock; the
+        propose path and the chat tool call it without. That is safe because `rebuild` is
+        synchronous and no lock-holder carries state across an await that a rebuild would
+        invalidate (see `rebuild`). Drops only `broker`, and only while it is still the one in
+        service; returns whether it did."""
         if broker is None or broker is not self.broker:
             return False  # already replaced (new keys were saved meanwhile): nothing to drop
         self._not_paper_keys = self._alpaca_keys()
@@ -460,7 +500,9 @@ class ChatRuntime:
 
     async def check_alpaca_keys(self, key_id: str, secret: str) -> str:
         """Try candidate keys with a temporary broker (`account()` on the paper host) and close it.
-        Returns connected, invalid, unreachable or not_paper (a live account's keys)."""
+        Returns connected, invalid, unreachable or not_paper (a live account's keys). It changes
+        nothing: a mark on a non-paper pair is cleared only by `apply_settings`, once the write that
+        applies the pair is in (the rest of the request may still fail)."""
         try:
             broker = self._broker_factory(key_id, secret)
         except ValueError:
@@ -473,8 +515,6 @@ class ChatRuntime:
             return status
         finally:
             await _aclose(broker)
-        if status == "connected" and self._not_paper_keys == (key_id, secret):
-            self._not_paper_keys = None  # this pair says otherwise now: it may get a broker again
         return status
 
     # --- the model provider ------------------------------------------------------------------------
@@ -590,7 +630,11 @@ class ChatRuntime:
                 log.info("model client swapped: %s", new_llm.name)
             if _CONVERSATION_FIELDS & set(changes):
                 self.agent.reset_conversations()
-            if {"alpaca_api_key_id", "alpaca_api_secret_key"} & set(changes):
+            if _ALPACA_PAIR & set(changes):
+                if self._not_paper_keys == self._alpaca_keys():
+                    # This pair is applied now (the caller's check said it is no longer a live
+                    # account, and the build above did not hold it back): it may have a broker.
+                    self._not_paper_keys = None
                 # The caller has just checked the new keys; without keys there is no broker.
                 self.alpaca_status = "missing" if self.broker is None else alpaca_status
                 self._alpaca_checked_at = self._monotonic()

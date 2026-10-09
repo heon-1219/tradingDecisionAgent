@@ -28,8 +28,8 @@ without a result gets an error result, so the provider history stays valid. Then
 nudged once to answer without tools (a short grace step allowed past the budget); if it still gives
 no text, a fallback lists the tools that ran. `finish.budget_exhausted` says the turn ended that
 way. In shallow mode the user is told why: the fallback names the shallow-mode limit, and an
-answer the nudged model did write gets a one-line note appended; both say that a paid API key in
-Settings allows deeper research.
+answer the nudged model did write gets a one-line note appended; both say that adding a paid API
+key, or marking the Gemini key as paid, in Settings allows deeper research.
 
 Conversations are cached per session in memory, keyed by the tool-name set, the limits (they are in
 the system prompt) and the model client in use. A missing entry (a new `ChatAgent`, e.g. after a

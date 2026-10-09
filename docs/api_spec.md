@@ -426,7 +426,7 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 
 ## Settings
 
-**`GET /api/settings`** returns connection status. It never returns a secret. An unsettled `alpaca` status (anything but `connected` and `not_paper`) is checked again when this is called, at most once a minute.
+**`GET /api/settings`** returns connection status. It never returns a secret. An unsettled `alpaca` status (anything but `connected` and `not_paper`) is checked again when this is called, at most once a minute; calls that arrive while a check is running wait for that same check.
 
 | Field | Values |
 |---|---|
@@ -1016,7 +1016,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 ## 설정
 
-**`GET /api/settings`**는 연결 상태를 돌려줍니다. 비밀값은 절대 반환하지 않습니다. 확정되지 않은 `alpaca` 상태(`connected`와 `not_paper`가 아닌 것)는 이 호출 때 다시 확인하며, 최대 1분에 한 번입니다.
+**`GET /api/settings`**는 연결 상태를 돌려줍니다. 비밀값은 절대 반환하지 않습니다. 확정되지 않은 `alpaca` 상태(`connected`와 `not_paper`가 아닌 것)는 이 호출 때 다시 확인하며, 최대 1분에 한 번입니다. 확인이 진행 중일 때 들어온 호출은 그 확인이 끝나기를 함께 기다립니다.
 
 | 필드 | 값 |
 |---|---|
