@@ -376,8 +376,13 @@ _FLOAT_PATTERNS = (
     re.compile(r"\.toFixed\("),
     re.compile(r"\.toPrecision\("),
     re.compile(r"\bMath\.round\("),
-    re.compile(r"\bMath\.(?:floor|trunc|ceil)\([^;]*\b" + _MONEY_WORD, re.I),
-    re.compile(r"\*\s*1(?![\w.])"),  # `x * 1`: a coercion to a number
+    re.compile(r"\bMath\.(?:floor|trunc|ceil|abs|min|max)\([^;]*\b" + _MONEY_WORD, re.I),
+    # coercions to a number: `x * 1`, `x * 1.0`, `x / 1`, `x - 0`, `x | 0` (not `||` or `|=`), `~~x`
+    re.compile(r"\*\s*1(?:\.0+)?(?![\w.])"),
+    re.compile(r"/\s*1(?:\.0+)?(?![\w.])"),
+    re.compile(r"-\s*0(?:\.0+)?(?![\w.])"),
+    re.compile(r"(?<!\|)\|(?![|=])\s*0(?![\w.])"),
+    re.compile(r"~~"),
     re.compile(r"NumberFormat\([^;]*\)\s*\.format\("),
     # unary plus on a value: `+x`, `(+x)`, `= +x`, `return +x` (not `a + b`, `x++` or `+=`)
     re.compile(r"(?:^|[=(,:?!&|{\[;]|\breturn|\btypeof)\s*\+(?![+=])\s*[A-Za-z_$(]"),
@@ -405,16 +410,18 @@ def test_the_float_check_catches_what_it_should():
         "cost.toFixed(2)", "Math.round(price * 100) / 100", "parseInt(value, 10)", "const p = +leg.limit_price;",
         "show(+quote.ask)", "return +cost;", "const c = price * 1;", "Math.floor(order.notional / 2)",
         "Math.trunc(buyingPower)", "new Intl.NumberFormat('en-US').format(cash)", "x.toPrecision(4)",
-        "`${+amount}`",
+        "`${+amount}`", "const n = qty - 0;", "price / 1", "cost * 1.0", "~~shares", "notional | 0",
+        "Math.abs(change.amount)", "Math.min(cash, budget)", "Math.max(0, equity)",
     ]
     good = [
         "const cost = mul(leg.qty, leg.limit_price);", "Number.isNaN(time)", "formatMoney(total)", "String(n)",
         "const label = 'a' + b;", "i += 1;", "count++;", "a + +1 === b", "x * 10", "Math.floor(ms / 1000)",
-        "Math.max(0, seconds)", "const sum = a + b + c;",
+        "Math.max(0, seconds)", "const sum = a + b + c;", "x / 10", "a - 0.5", "count || 0", "flags |= 0",
+        "const i = list.length - 1;", "Math.min(index, rows.length)",
     ]
     for line in bad:
         assert _float_uses(line), line
-    for line in good[:-3] + good[-2:]:
+    for line in good:
         assert not _float_uses(line), line
 
 
