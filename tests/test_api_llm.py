@@ -14,9 +14,13 @@ import time
 
 import pytest
 
+from types import SimpleNamespace
+
+from fakes_trading import make_account
 from finagent.agent.llm import LLMHandle, StubConversation, StubLLM, Turn
 from finagent.app_state import ENV_NAMES
 from finagent.config import Settings
+from finagent.trading.broker import BrokerError
 from test_api_chat import (
     ALPACA_ID,
     ALPACA_SECRET,
@@ -32,13 +36,13 @@ from test_api_chat import (
     NEW_GEMINI,
     NEW_ID,
     NEW_SECRET,
+    ODD_LLM_KEY,
     OPENAI,
     PAPER_ID,
     PAPER_SECRET,
     SECRETS,
     TAVILY,
     ApiWorld,
-    SwitchedLLM,
     assert_no_secrets,
     chat,
     confirm,
@@ -348,21 +352,6 @@ def test_a_failed_env_write_changes_nothing_and_retires_the_new_client(world, mo
         assert built.closed  # made for the switch, never put in service
 
 
-def test_the_old_client_is_closed_after_the_grace_delay(tmp_path):
-    world = gemini_world(tmp_path)
-    world.llm = SwitchedLLM("gemini", GEMINI_MODEL)  # a client with aclose()
-    with world.client() as client:
-        old = world.runtime.llm.current
-        assert old is world.llm and not old.closed
-        r = client.put("/api/settings", json={"llm_model": "gemini-3.8-pro"})
-        assert r.status_code == 200
-        for _ in range(100):  # the zero-second grace task runs on the loop thread of the app
-            if old.closed:
-                break
-            time.sleep(0.01)
-        assert old.closed and not world.runtime.llm.current.closed
-
-
 # --- secrets and connectors after a switch ------------------------------------------------------------------
 
 
@@ -477,6 +466,80 @@ async def test_a_turn_in_flight_finishes_on_the_client_it_started_with(tmp_path)
     assert old.closed  # shutdown closes what the grace delay had not yet
 
 
+class Timeline:
+    """Virtual time for the runtime's grace-close sleeps (`close_sleep`): `sleep(d)` returns once
+    `advance` has moved the clock to its deadline. `requested` keeps every delay asked for."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.waiters: list[tuple[float, asyncio.Future]] = []
+        self.requested: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.requested.append(seconds)
+        future = asyncio.get_running_loop().create_future()
+        self.waiters.append((self.now + seconds, future))
+        await future
+
+    async def advance(self, seconds: float) -> None:
+        self.now += seconds
+        for due, future in list(self.waiters):
+            if due <= self.now:
+                self.waiters.remove((due, future))
+                if not future.done():
+                    future.set_result(None)
+        for _ in range(20):  # let the woken close tasks run to the end
+            await asyncio.sleep(0)
+
+
+async def test_the_swapped_client_outlives_the_longest_turn(tmp_path):
+    """The old client is closed only after the longest turn the settings allow, plus the nudge
+    and one model call: a deep turn (300 s) that started on it must be able to finish."""
+    world = gemini_world(tmp_path)
+    timeline = Timeline()
+    world.close_sleep = timeline.sleep
+    old = world.llm = GatedLLM()
+    runtime = world.state().chat
+    try:
+        sid = runtime.sessions.create()["id"]
+        turn = asyncio.create_task(runtime.agent.run_turn(sid, "first", lambda event: None))
+        await asyncio.wait_for(old.entered.wait(), 5)
+        await runtime.apply_settings({"llm_provider": "anthropic", "llm_model": "claude-test-opus",
+                                      "anthropic_api_key": ANTHROPIC})
+        await timeline.advance(0)  # let the close tasks start their waits
+        s = runtime.settings
+        grace = max(timeline.requested)
+        assert grace >= max(s.chat_time_budget_sec, s.shallow_time_budget_sec) + 20 + s.llm_timeout_sec
+        await timeline.advance(130)  # past the old fixed 120 s grace
+        assert not old.closed
+        await timeline.advance(grace - 140)  # 10 s before the deadline
+        assert not old.closed
+        old.gate.set()
+        assert await asyncio.wait_for(turn, 5) == "Answer from the old model."
+        await timeline.advance(20)
+        assert old.closed and not runtime.llm.current.closed
+    finally:
+        await runtime.shutdown()
+
+
+async def test_http_clients_and_brokers_keep_their_own_grace(tmp_path):
+    world = gemini_world(tmp_path)
+    timeline = Timeline()
+    world.close_sleep = timeline.sleep
+    world.close_grace_sec = 7.0
+    runtime = world.state().chat
+    try:
+        old_broker = runtime.broker
+        await runtime.apply_settings({"alpaca_api_key_id": NEW_ID, "alpaca_api_secret_key": NEW_SECRET},
+                                     alpaca_status="connected")
+        await timeline.advance(0)
+        assert timeline.requested == [7.0]
+        await timeline.advance(7)
+        assert old_broker.closed
+    finally:
+        await runtime.shutdown()
+
+
 # --- POST /api/llm/models ---------------------------------------------------------------------------------------
 
 
@@ -532,6 +595,7 @@ def test_the_model_list_is_capped_at_sixty(world):
     (BAD_LLM_KEY, 400, "llm_invalid_key"),
     (LIMITED_LLM_KEY, 429, "llm_rate_limited"),
     (DOWN_LLM_KEY, 502, "llm_unreachable"),
+    (ODD_LLM_KEY, 502, "llm_list_failed"),  # a provider 400 that is not about the key
 ])
 def test_model_list_errors_never_carry_the_key_or_the_provider_text(world, caplog, key, status, code):
     with caplog.at_level(logging.DEBUG), world.client() as client:
@@ -540,7 +604,7 @@ def test_model_list_errors_never_carry_the_key_or_the_provider_text(world, caplo
         assert r.status_code == status and r.json()["error"] == code, r.text
         assert set(r.json()) == {"error", "message"}
         assert_no_secrets(r)
-        for fragment in ("Incorrect API key", "rate limit reached", "connection reset"):
+        for fragment in ("Incorrect API key", "rate limit reached", "connection reset", "unsupported listing"):
             assert fragment not in r.text
         assert world.env_path.read_bytes() == before and world.settings.openai_api_key is None
         logging.getLogger("finagent.probe").warning("later %s", key)  # even a later log line is scrubbed
@@ -664,3 +728,227 @@ def test_the_ledger_export_json_stays_valid_after_a_switch(world):
         world.runtime.ledger.append(sid, "note", {"text": "ok"})
         lines = [json.loads(line) for line in client.get(f"/api/ledger/{sid}.jsonl").text.splitlines() if line]
         assert [line["kind"] for line in lines] == ["note"]
+
+
+# --- fix round 1, I1: the paper flag where trades happen ---------------------------------------------------------
+
+
+def _account_down_at_startup(runtime) -> None:
+    runtime.broker.account_error = BrokerError(503, None, "service unavailable")
+
+
+@pytest.mark.parametrize("startup", ["unreachable", "connected"])
+def test_a_confirm_on_an_account_that_turns_out_live_submits_nothing(tmp_path, startup):
+    """The reviewer's probe: the startup check could not tell (a 503, or no `paper` in the
+    response), a ticket was proposed, and then the account reports `paper: false`."""
+    world = ApiWorld(tmp_path)
+    if startup == "unreachable":
+        world.before_start = _account_down_at_startup
+    with world.client() as client:
+        assert world.runtime.alpaca_status == startup
+        broker = world.runtime.broker
+        broker.account_error = None
+        sid = new_session(client)
+        ticket = propose(client, world, sid)  # the account does not say: a ticket is created
+        broker.account_snapshot = make_account(paper=False)
+        r = confirm(client, ticket, sid)
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert body["status"] == "rejected" and "not a paper account" in body["message"]
+        assert body["ticket"]["status"] == "failed" and body["orders"] == []
+        assert world.total_submits() == 0
+        # the runtime dropped the broker: later calls see no broker
+        assert world.runtime.broker is None and world.runtime.executor is None
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        assert client.get("/api/portfolio").json() == {"connected": False}
+        r = confirm(client, ticket, sid)
+        assert r.status_code == 503 and r.json()["error"] == "broker_not_connected"
+        kinds = [json.loads(line)["kind"] for line in world.runtime.ledger.export_jsonl(sid)]
+        assert "submit" not in kinds and "result" in kinds
+        assert world.total_submits() == 0
+
+
+def test_proposing_on_a_live_account_creates_no_ticket(tmp_path):
+    world = ApiWorld(tmp_path)
+    with world.client() as client:
+        world.runtime.broker.account_snapshot = make_account(paper=False)
+        sid = new_session(client)
+        world.add_evidence(sid)
+        events = chat(client, sid)
+        assert not [e for e in events if e["type"] == "data-trade-proposal"]
+        [out] = [e for e in events if e["type"] == "tool-output-available"]
+        assert out["isError"] is True and "not a paper account" in out["output"]
+        assert world.runtime.db.query("SELECT COUNT(*) AS n FROM tickets")[0]["n"] == 0
+        assert world.runtime.broker is None
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        rows = [json.loads(line) for line in world.runtime.ledger.export_jsonl(sid)]
+        rejected = [row["payload"] for row in rows if row["kind"] == "proposal_rejected"]
+        assert rejected == [{"turn_id": events[0]["messageId"], "reason": "not_paper_account"}]
+        assert world.total_submits() == 0
+
+
+def test_a_refresh_on_a_live_account_creates_nothing(tmp_path):
+    world = ApiWorld(tmp_path)
+    with world.client() as client:
+        sid = new_session(client)
+        ticket = propose(client, world, sid)
+        world.runtime.broker.account_snapshot = make_account(paper=False)
+        r = client.post(f"/api/tickets/{ticket['id']}/refresh", json={"session_id": sid})
+        assert r.status_code == 409 and r.json()["status"] == "rejected"
+        assert "not a paper account" in r.json()["message"] and r.json()["new_ticket"] is None
+        assert world.runtime.broker is None
+
+
+def test_get_settings_rechecks_an_unsettled_alpaca_status_at_most_once_a_minute(tmp_path):
+    world = ApiWorld(tmp_path)
+    now = [1000.0]
+    world.monotonic = lambda: now[0]
+    world.before_start = _account_down_at_startup
+    with world.client() as client:
+        broker = world.runtime.broker
+        checks = broker.calls.count("account")
+        broker.account_error = None  # Alpaca answers again
+        now[0] += 30
+        assert client.get("/api/settings").json()["alpaca"] == "unreachable"  # checked under 60 s ago
+        assert broker.calls.count("account") == checks
+        now[0] += 31
+        assert client.get("/api/settings").json()["alpaca"] == "connected"
+        assert broker.calls.count("account") == checks + 1
+        now[0] += 600
+        assert client.get("/api/settings").json()["alpaca"] == "connected"  # settled: not re-checked
+        assert broker.calls.count("account") == checks + 1
+
+
+def test_get_settings_recheck_drops_an_account_that_turned_out_live(tmp_path):
+    world = ApiWorld(tmp_path)
+    now = [1000.0]
+    world.monotonic = lambda: now[0]
+    world.before_start = _account_down_at_startup
+    with world.client() as client:
+        broker = world.runtime.broker
+        broker.account_error = None
+        broker.account_snapshot = make_account(paper=False)
+        now[0] += 61
+        r = client.get("/api/settings")
+        assert r.json()["alpaca"] == "not_paper"
+        assert world.runtime.broker is None and world.runtime.executor is None
+        now[0] += 61
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"  # settled
+
+
+# --- fix round 1, minor 2: dropping only the broker that read the account ---------------------------------------
+
+
+async def test_a_broker_that_was_already_replaced_is_not_dropped(tmp_path):
+    world = ApiWorld(tmp_path)
+    runtime = world.state().chat
+    try:
+        stale = runtime.broker
+        await runtime.apply_settings({"alpaca_api_key_id": NEW_ID, "alpaca_api_secret_key": NEW_SECRET},
+                                     alpaca_status="connected")
+        current = runtime.broker
+        assert current is not stale
+        await runtime.drop_non_paper_broker(stale)  # the old broker read a live account: too late to matter
+        assert runtime.broker is current and runtime.alpaca_status == "connected"
+        await runtime.drop_non_paper_broker(current)
+        assert runtime.broker is None and runtime.alpaca_status == "not_paper"
+    finally:
+        await runtime.shutdown()
+
+
+def test_keys_once_found_live_work_again_when_a_later_check_says_paper(tmp_path):
+    world = ApiWorld(tmp_path, alpaca_api_key_id=LIVE_ID, alpaca_api_secret_key=LIVE_SECRET)
+    with world.client() as client:
+        assert client.get("/api/settings").json()["alpaca"] == "not_paper"
+        world.live_paper = True  # e.g. the user re-entered the keys after Alpaca fixed the account
+        r = client.put("/api/settings", json={"alpaca_key_id": LIVE_ID, "alpaca_secret": LIVE_SECRET})
+        assert r.status_code == 200 and r.json()["alpaca"] == "connected", r.text
+        assert world.runtime.broker is not None and world.runtime.executor is not None
+
+
+# --- fix round 1, minor 3: two settings writes at once ------------------------------------------------------------
+
+
+async def test_interleaved_puts_validate_the_configuration_that_is_applied(tmp_path):
+    from finagent.api_chat import SettingsUpdate, put_settings
+    from finagent.api_common import ApiError
+
+    world = gemini_world(tmp_path)
+    runtime = world.state().chat
+    try:
+        await runtime.lock.acquire()  # e.g. a confirm is running: both writes wait for the lock
+        switch = asyncio.create_task(put_settings(
+            SettingsUpdate(llm_provider="openai", llm_model="gpt-test-large", openai_key=OPENAI), runtime))
+        key_only = asyncio.create_task(put_settings(SettingsUpdate(openai_key=BAD_LLM_KEY), runtime))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        # the switch was checked; the key-only write needed no check (OpenAI was not in use when it decided)
+        assert world.llm_checks == [("openai", "gpt-test-large", OPENAI)]
+        runtime.lock.release()
+        assert (await switch).status_code == 200
+        with pytest.raises(ApiError) as caught:
+            await key_only
+        # applied after the switch, the key-only write would change the key in use: checked again
+        assert caught.value.code == "llm_invalid_key" and caught.value.status == 400
+        assert world.llm_checks[-1] == ("openai", "gpt-test-large", BAD_LLM_KEY)
+        assert runtime.settings.llm_provider == "openai" and runtime.settings.openai_api_key == OPENAI
+        assert BAD_LLM_KEY not in world.env() and f"OPENAI_API_KEY={OPENAI}" in world.env()
+    finally:
+        if runtime.lock.locked():
+            runtime.lock.release()
+        await runtime.shutdown()
+
+
+async def test_a_write_that_still_matches_what_was_checked_is_not_checked_twice(tmp_path):
+    from finagent.api_chat import SettingsUpdate, put_settings
+
+    world = gemini_world(tmp_path)
+    runtime = world.state().chat
+    try:
+        await runtime.lock.acquire()
+        first = asyncio.create_task(put_settings(SettingsUpdate(llm_model="gemini-3.8-pro"), runtime))
+        second = asyncio.create_task(put_settings(SettingsUpdate(tavily_key=""), runtime))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        runtime.lock.release()
+        assert (await first).status_code == 200 and (await second).status_code == 200
+        assert world.llm_checks == [("gemini", "gemini-3.8-pro", GEMINI)]
+    finally:
+        if runtime.lock.locked():
+            runtime.lock.release()
+        await runtime.shutdown()
+
+
+# --- fix round 1, minor 7: one handle for /answer and /api --------------------------------------------------------
+
+
+def test_app_state_load_hands_the_same_handle_to_the_orchestrator_and_the_runtime(monkeypatch):
+    import finagent.app_state as app_state
+
+    seen: dict = {}
+
+    def orchestrator(settings, llm, *rest):
+        seen["orchestrator"] = llm
+        return SimpleNamespace(llm=llm)
+
+    def chat_runtime(settings, *, llm, **kwargs):
+        seen["runtime"] = llm
+        return SimpleNamespace(llm=llm)
+
+    # `AppState.load` is heavy (it reads the product store): everything but the wiring is faked
+    monkeypatch.setattr(app_state, "RDB", lambda *a, **k: SimpleNamespace(meta=lambda: {}))
+    monkeypatch.setattr(app_state, "Lexicon", SimpleNamespace(load=lambda path: "lexicon"))
+    monkeypatch.setattr(app_state, "Ontology", SimpleNamespace(load=lambda path: SimpleNamespace(graph=[])))
+    monkeypatch.setattr(app_state, "SearchIndex", SimpleNamespace(from_rdb=lambda rdb: SimpleNamespace(docs=[])))
+    monkeypatch.setattr(app_state, "EntityResolver", lambda *a: "resolver")
+    monkeypatch.setattr(app_state, "DocStore", SimpleNamespace(load=lambda path: SimpleNamespace(titles=lambda: [])))
+    monkeypatch.setattr(app_state, "ToolRegistry", lambda *a, **k: "tools")
+    monkeypatch.setattr(app_state, "build_system_prompt", lambda *a, **k: "system")
+    monkeypatch.setattr(app_state, "value_hints", lambda rdb: {})
+    monkeypatch.setattr(app_state, "Orchestrator", orchestrator)
+    monkeypatch.setattr(app_state, "ChatRuntime", chat_runtime)
+    client = StubLLM([])
+    state = app_state.AppState.load(Settings(_env_file=None, llm_provider="stub", vector_backend="off"),
+                                    llm=client, build_graph=False)
+    assert isinstance(state.llm, LLMHandle) and state.llm.current is client
+    assert seen["orchestrator"] is seen["runtime"] is state.llm is state.chat.llm

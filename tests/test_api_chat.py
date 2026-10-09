@@ -71,9 +71,10 @@ BAD_LLM_KEY = "sk-bad-llm-key-55555555555555"       # the provider rejects it
 LIMITED_LLM_KEY = "sk-limited-llm-key-4444444444"   # valid, rate limited right now
 DOWN_LLM_KEY = "sk-down-llm-key-33333333333333"     # the provider cannot be reached
 LEAKY_LLM_KEY = "sk-leaky-llm-key-22222222222222"   # the check raises with the key in its message
+ODD_LLM_KEY = "sk-odd-llm-key-11111111111111111"    # the model list answers with a 400 that is not about the key
 SECRETS = [ALPACA_ID, ALPACA_SECRET, NEW_ID, NEW_SECRET, BAD_ID, BAD_SECRET, DOWN_ID, DOWN_SECRET,
            TAVILY, GEMINI, LIVE_ID, LIVE_SECRET, PAPER_ID, PAPER_SECRET, NEW_GEMINI, OPENAI, ANTHROPIC,
-           BAD_LLM_KEY, LIMITED_LLM_KEY, DOWN_LLM_KEY, LEAKY_LLM_KEY]
+           BAD_LLM_KEY, LIMITED_LLM_KEY, DOWN_LLM_KEY, LEAKY_LLM_KEY, ODD_LLM_KEY]
 LLM_KEY_FIELDS = {"gemini": "gemini_api_key", "openai": "openai_api_key", "anthropic": "anthropic_api_key"}
 
 ENV_TEXT = (
@@ -199,6 +200,9 @@ class ApiWorld:
         self.runtime: ChatRuntime | None = None
         self.before_start = None  # optional hook(runtime) run inside the state factory
         self.close_grace_sec = 0.0
+        self.close_sleep = None  # the runtime's grace-close sleep (None: asyncio.sleep)
+        self.monotonic = None    # the runtime's clock for rate-limited status checks (None: time.monotonic)
+        self.live_paper: bool | None = False  # what the live-account keys' account says about `paper`
         self.llm_checks: list[tuple[str, str, str | None]] = []  # (provider, model, key) the validator saw
         self.llm_built: list[SwitchedLLM] = []                    # clients the factory made
         self.model_requests: list[tuple[str, str]] = []           # (provider, key) the model lister saw
@@ -221,7 +225,7 @@ class ApiWorld:
     def broker_factory(self, key_id: str, secret: str) -> ClosableBroker:
         # `paper` as AlpacaPaper.account() derives it from the account number: unknown (None) for
         # the default keys, False for the live-account keys, True for the paper-account keys.
-        paper = {LIVE_ID: False, PAPER_ID: True}.get(key_id)
+        paper = {LIVE_ID: self.live_paper, PAPER_ID: True}.get(key_id)
         broker = ClosableBroker(key_id, account=make_account(paper=paper))
         if (key_id, secret) in {(DOWN_ID, DOWN_SECRET)}:
             broker.account_error = BrokerError(503, None, f"service unavailable {secret}")
@@ -254,6 +258,8 @@ class ApiWorld:
             raise ProviderError(429, f"rate limit reached for {api_key}")
         if api_key in (DOWN_LLM_KEY, LEAKY_LLM_KEY):
             raise ProviderError(None, f"connection reset while sending {api_key}")
+        if api_key == ODD_LLM_KEY:
+            raise ProviderError(400, f"unsupported listing request for {api_key}")
         return list(self.model_lists[provider])
 
     def make_llm(self, settings) -> SwitchedLLM:
@@ -287,6 +293,8 @@ class ApiWorld:
                 llm_validator=self.validate_llm,
                 llm_models=self.list_models,
                 llm_factory=self.make_llm,
+                close_sleep=self.close_sleep,
+                monotonic=self.monotonic,
             )
             self.runtime = fin.chat
             if self.before_start is not None:

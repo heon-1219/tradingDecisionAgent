@@ -53,6 +53,7 @@ from ..research.evidence import (
 )
 from ..research.http import HttpError
 from ..trading.broker import BrokerError
+from ..trading.execution import NotPaperAccount
 from ..trading.ledger import MIN_KNOWN_SECRET_LEN
 from ..trading.metrics import summarize
 from ..trading.models import Mandate, OrderLeg, RiskDecision, normalize_symbol
@@ -1506,6 +1507,14 @@ class ChatToolbox:
         except _ArgError:
             outcome.rejected("invalid_arguments")
             raise
+        except NotPaperAccount:
+            outcome.rejected("not_paper_account")
+            return ToolOutput(
+                "No ticket was created: the connected Alpaca account is not a paper account. This app trades "
+                "paper accounts only, so trading is now disconnected. Tell the user to save paper-trading keys "
+                "in Settings. You cannot place orders.",
+                is_error=True,
+            )
         except BrokerError:
             outcome.rejected("broker_error")
             raise

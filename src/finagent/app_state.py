@@ -27,12 +27,20 @@ conversation) and has the agent drop its cached provider conversations (`reset_c
 `check_llm` (one minimal model call) and `list_llm_models` go through injectable factories
 (`llm_validator`, `llm_models`); production uses `llm_admin`.
 
-**Paper only.** The Alpaca status check (`refresh_alpaca_status` at startup,
-`check_alpaca_keys` for candidate keys, `drop_non_paper_broker` from the portfolio route) reads
-`AccountSnapshot.paper`. `False` means a live account: the status is `not_paper` and the runtime
-rebuilds without a broker, executor or market data, exactly as if the keys were missing, and
-remembers that key pair so that no later rebuild brings them back. `None` (the response did not
-say) keeps the broker: the hard-coded paper host is still the first line of defence.
+**Paper only.** `AccountSnapshot.paper` is read wherever the account is: the status check
+(`refresh_alpaca_status` at startup, and from `GET /api/settings` while the status is unsettled,
+at most once a minute), `check_alpaca_keys` for candidate keys, the portfolio route, and the
+executor's market context, which every proposal, confirm re-check and refresh builds first (it
+refuses to trade and calls back `_drop_non_paper`). `False` means a live account: the status is
+`not_paper` and the runtime rebuilds without a broker, executor or market data, exactly as if the
+keys were missing, and remembers that key pair so that no later rebuild brings them back (a later
+check of the same pair that says otherwise clears it). Only the broker that read the account is
+dropped: one already replaced is left alone. `None` (the response did not say) keeps the broker:
+the hard-coded paper host is still the first line of defence.
+
+**Retired model clients** are closed only after the longest turn the settings allow (either
+mode), plus the nudge grace, one model call and a margin (`_llm_grace_sec`), so a deep turn that
+started on the old client can finish on it.
 
 A rebuild is build-then-swap: `_build()` constructs a full set of components and touches nothing
 shared (a failure retires what it made and changes nothing); `_swap()` puts them in service
@@ -72,10 +80,10 @@ from .agent.llm import LLMClient, LLMHandle, make_llm
 from .agent.orchestrator import Orchestrator
 from .agent.prompts import build_system_prompt, value_hints
 from .agent.tools import ToolRegistry
-from .chat.agent import ChatAgent
+from .chat.agent import ChatAgent, nudge_grace_sec
 from .chat.sessions import SessionStore
 from .chat.toolbox import ChatToolbox
-from .config import ENV_NAMES, Settings, env_fallbacks
+from .config import ENV_NAMES, Settings, env_fallbacks, longest_turn_sec
 from .envfile import update_env_file
 from .kb.docs import DocStore
 from .kb.entity import EntityResolver
@@ -102,7 +110,12 @@ from .trading.proposals import TicketStore
 
 log = logging.getLogger("finagent.app")
 
-CLOSE_GRACE_SEC = 120.0
+CLOSE_GRACE_SEC = 120.0  # for retired HTTP clients and brokers (a confirm in flight)
+LLM_GRACE_MARGIN_SEC = 30.0  # on top of the longest turn, the nudge and one model call
+# Alpaca statuses that `GET /api/settings` does not re-check; any other is re-checked, at most once
+# every ALPACA_RECHECK_SEC.
+SETTLED_ALPACA = frozenset({"connected", "not_paper"})
+ALPACA_RECHECK_SEC = 60.0
 # Settings fields whose secret values the ledger and the log scrubber remove verbatim.
 SECRET_FIELDS = (
     "alpaca_api_key_id", "alpaca_api_secret_key", "gemini_api_key", "tavily_api_key",
@@ -191,6 +204,8 @@ class ChatRuntime:
         llm_validator: Callable[[Any], Awaitable[str]] | None = None,
         llm_models: Callable[[str, str, Any], Awaitable[list[dict]]] | None = None,
         llm_factory: Callable[[Any], LLMClient] | None = None,
+        close_sleep: Callable[[float], Awaitable[Any]] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ):
         install_log_scrubber()  # before anything here can log; the secret values follow in _build
         self.settings = settings
@@ -216,6 +231,9 @@ class ChatRuntime:
         self._http_factory = http_factory or HttpClient
         self._sleep = sleep
         self._grace = close_grace_sec
+        self._close_sleep = close_sleep or asyncio.sleep  # the grace-close wait (tests: virtual time)
+        self._monotonic = monotonic or time.monotonic
+        self._alpaca_checked_at: float | None = None
         self._retired: list[Any] = []
         self._close_tasks: set[asyncio.Task] = set()
         self._secrets_seen: set[str] = set()
@@ -283,7 +301,8 @@ class ChatRuntime:
                 data = self._data_factory(key_id, secret, http)
                 extra = {"sleep": self._sleep} if self._sleep is not None else {}
                 executor = Executor(broker, data, self.tickets, ledger, s,
-                                    mandate_for=self._mandate_for, **extra)
+                                    mandate_for=self._mandate_for,
+                                    on_not_paper=lambda b=broker: self._drop_non_paper(b), **extra)
             toolbox = ChatToolbox(
                 registry=self.registry, orchestrator=self.orchestrator, broker=broker, data=data,
                 edgar=edgar, web=web, grounded=grounded, evidence=self.evidence,
@@ -309,7 +328,18 @@ class ChatRuntime:
             bool(getattr(self.settings, "tavily_api_key", None)), built.grounded is not None,
         )
 
-    def _retire(self, components: list[Any]) -> None:
+    def _llm_grace_sec(self) -> float:
+        """How long a retired model client must live: the longest turn the settings allow, the
+        nudge grace, one more model call (`llm_timeout_sec`) and a margin."""
+        try:
+            timeout = float(getattr(self.settings, "llm_timeout_sec", 40.0))
+        except (TypeError, ValueError):
+            timeout = 40.0
+        turn = longest_turn_sec(self.settings) + nudge_grace_sec(self.settings) + timeout
+        return max(self._grace, turn + LLM_GRACE_MARGIN_SEC)
+
+    def _retire(self, components: list[Any], grace: float | None = None) -> None:
+        """Close `components` after `grace` seconds (default `close_grace_sec`)."""
         if not components:
             return
         self._retired.extend(components)
@@ -317,9 +347,10 @@ class ChatRuntime:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # not running yet: shutdown() closes them
+        delay = self._grace if grace is None else grace
 
         async def close_later() -> None:
-            await asyncio.sleep(self._grace)
+            await self._close_sleep(delay)
             for component in components:
                 if component in self._retired:
                     self._retired.remove(component)
@@ -383,26 +414,49 @@ class ChatRuntime:
             except Exception as exc:  # noqa: BLE001 - classified, logged by type only
                 status = alpaca_status_for(exc)
                 log.info("alpaca key check: %s (%s)", status, type(exc).__name__)
+        self._alpaca_checked_at = self._monotonic()
         if status == "not_paper" and broker is not None:
-            await self.drop_non_paper_broker()
-        self.alpaca_status = status
-        return status
+            await self.drop_non_paper_broker(broker)
+            return self.alpaca_status
+        if broker is self.broker:  # not replaced meanwhile (a settings write sets its own status)
+            self.alpaca_status = status
+        return self.alpaca_status if self.alpaca_status is not None else status
+
+    async def refresh_alpaca_status_if_due(self) -> str | None:
+        """For `GET /api/settings`: check now if never checked; re-check an unsettled status
+        (`unreachable`, `invalid`, `missing`) at most once every `ALPACA_RECHECK_SEC`."""
+        status = self.alpaca_status
+        if status in SETTLED_ALPACA:
+            return status
+        checked = self._alpaca_checked_at
+        if status is not None and checked is not None and self._monotonic() - checked < ALPACA_RECHECK_SEC:
+            return status
+        return await self.refresh_alpaca_status()
 
     def _alpaca_keys(self) -> tuple[Any, Any]:
         return (getattr(self.settings, "alpaca_api_key_id", None),
                 getattr(self.settings, "alpaca_api_secret_key", None))
 
-    async def drop_non_paper_broker(self) -> None:
-        """The account behind the current Alpaca keys is not a paper account: rebuild without a
-        broker, executor or market data (as if the keys were missing) and remember the key pair,
-        so no later rebuild brings them back. The keys stay in the settings and the env file; the
-        status is `not_paper` until other keys are saved."""
+    def _drop_non_paper(self, broker: Any) -> bool:
+        """Synchronous core of `drop_non_paper_broker`, also the executor's `on_not_paper` callback
+        (a confirm calls it while holding the lock). Drops only `broker`, and only while it is
+        still the one in service; returns whether it did."""
+        if broker is None or broker is not self.broker:
+            return False  # already replaced (new keys were saved meanwhile): nothing to drop
+        self._not_paper_keys = self._alpaca_keys()
+        self.alpaca_status = "not_paper"
+        self._alpaca_checked_at = self._monotonic()
+        log.warning("the Alpaca keys belong to a non-paper account: trading is not connected")
+        self.rebuild()
+        return True
+
+    async def drop_non_paper_broker(self, broker: Any) -> bool:
+        """`broker`, which has just read a non-paper account, is dropped if it is still in service:
+        rebuild without a broker, executor or market data (as if the keys were missing) and
+        remember the key pair, so no later rebuild brings them back. The keys stay in the settings
+        and the env file; the status is `not_paper` until other keys are saved."""
         async with self.lock:
-            self._not_paper_keys = self._alpaca_keys()
-            self.alpaca_status = "not_paper"
-            if self.broker is not None:
-                log.warning("the Alpaca keys belong to a non-paper account: trading is not connected")
-                self.rebuild()
+            return self._drop_non_paper(broker)
 
     async def check_alpaca_keys(self, key_id: str, secret: str) -> str:
         """Try candidate keys with a temporary broker (`account()` on the paper host) and close it.
@@ -412,13 +466,16 @@ class ChatRuntime:
         except ValueError:
             return "invalid"
         try:
-            return account_status(await broker.account())
+            status = account_status(await broker.account())
         except Exception as exc:  # noqa: BLE001 - classified, logged by type only
             status = alpaca_status_for(exc)
             log.info("alpaca candidate key check: %s (%s)", status, type(exc).__name__)
             return status
         finally:
             await _aclose(broker)
+        if status == "connected" and self._not_paper_keys == (key_id, secret):
+            self._not_paper_keys = None  # this pair says otherwise now: it may get a broker again
+        return status
 
     # --- the model provider ------------------------------------------------------------------------
 
@@ -456,6 +513,30 @@ class ChatRuntime:
             log.info("llm check: %s (%s)", status, type(exc).__name__)
         return status if status in llm_admin.STATUSES else "unreachable"
 
+    def llm_context(self, changes: dict[str, Any]) -> tuple[Any, Any, Any]:
+        """(provider, model, that provider's key) as they would be with `changes` applied: what a
+        live check validates. `PUT /api/settings` records it when it decides, and
+        `apply_settings` compares it again under the lock."""
+        candidate = self._candidate(changes)
+        provider = getattr(candidate, "llm_provider", None)
+        key_field = llm_admin.KEY_FIELDS.get(provider)
+        return provider, getattr(candidate, "llm_model", None), getattr(candidate, key_field, None) if key_field else None
+
+    async def _recheck_llm(self, changes: dict[str, Any]) -> str:
+        """The re-check under the lock (see `apply_settings`): ok or rate_limited, else raises
+        `llm_admin.LLMCheckFailed`."""
+        provider, model, key = self.llm_context(changes)
+        if provider not in llm_admin.KEY_FIELDS:
+            return "ok"
+        if not model:
+            raise llm_admin.LLMCheckFailed("model_required")
+        if not key:
+            raise llm_admin.LLMCheckFailed("key_required")
+        status = await self.check_llm(changes)
+        if status not in ("ok", "rate_limited"):
+            raise llm_admin.LLMCheckFailed(status)
+        return status
+
     async def list_llm_models(self, provider: str, api_key: str) -> list[dict]:
         """The provider's unfiltered model list for `api_key` (the injected lister;
         `llm_admin.fetch_models` in production). Raises what the lister raises: the caller
@@ -465,7 +546,8 @@ class ChatRuntime:
 
     # --- settings writes -------------------------------------------------------------------------
 
-    async def apply_settings(self, changes: dict[str, Any], *, alpaca_status: str | None = None) -> None:
+    async def apply_settings(self, changes: dict[str, Any], *, alpaca_status: str | None = None,
+                             llm_context: tuple[Any, Any, Any] | None = None) -> str | None:
         """Apply `changes` (settings field -> value; None removes the key), all or nothing:
         1. build the new components for the changed keys, and the new model client if the
            provider, the model, the effort or that provider's key changes (a failure changes
@@ -474,8 +556,16 @@ class ChatRuntime:
         3. only then update the shared settings in place, swap the components in and swap the
            model client into the handle. None of those can fail, so the env file, the settings,
            the components and the model never disagree. The old model client is retired (closed
-           after the grace delay), and the agent drops its cached provider conversations."""
+           after `_llm_grace_sec`), and the agent drops its cached provider conversations.
+        `llm_context` is what the caller's LLM decision was made for (`llm_context(changes)` at
+        that time). If another write changed the provider, the model or a key in between, the
+        configuration these changes now produce is checked again here, under the lock: a failure
+        raises `llm_admin.LLMCheckFailed` and changes nothing. Returns that re-check's status
+        (`ok` or `rate_limited`), or None when none was needed."""
         async with self.lock:
+            recheck = None
+            if llm_context is not None and self.llm_context(changes) != llm_context:
+                recheck = await self._recheck_llm(changes)
             made: list[Any] = []
             try:
                 built = self._build(changes) if _REBUILD_FIELDS & set(changes) else None
@@ -495,13 +585,16 @@ class ChatRuntime:
             if built is not None:
                 self._swap(built)
             if new_llm is not None:
-                self._retire([self.llm.swap(new_llm)])
+                # A turn in flight holds the old client until it ends: keep it that long.
+                self._retire([self.llm.swap(new_llm)], grace=self._llm_grace_sec())
                 log.info("model client swapped: %s", new_llm.name)
             if _CONVERSATION_FIELDS & set(changes):
                 self.agent.reset_conversations()
             if {"alpaca_api_key_id", "alpaca_api_secret_key"} & set(changes):
                 # The caller has just checked the new keys; without keys there is no broker.
                 self.alpaca_status = "missing" if self.broker is None else alpaca_status
+                self._alpaca_checked_at = self._monotonic()
+            return recheck
 
     async def kill_switch(self, suspend_broker: bool) -> dict:
         """Trading off now (before waiting for the lock, so an in-flight confirm stops before its

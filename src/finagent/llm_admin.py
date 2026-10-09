@@ -18,16 +18,21 @@ returns a status and never raises:
 
 **The list** (`fetch_models`) calls the provider's list-models endpoint (the OpenAI SDK with the
 right base URL for `openai` and `gemini`, the Anthropic SDK for `anthropic`) and raises the
-provider's exception; the caller classifies it with `classify_llm_error`. `filter_models` keeps
-the chat-capable text models (by id pattern: no embeddings, image, audio, TTS, live, moderation
-and the like), newest first, at most `MAX_MODELS`. `suggest_model` picks the one to preselect. No
-model catalogue lives here: the list always comes from the provider.
+provider's exception; the caller classifies it with `classify_llm_error`. The whole listing,
+every page included, must finish within `LIST_DEADLINE_SEC` (a `TimeoutError` otherwise).
+`filter_models` keeps the chat-capable text models (by id pattern: no embeddings, image (Gemini's
+"nano-banana" too), audio, TTS, live, moderation and the like; `-instruct` ids are kept for a
+custom OpenAI-compatible endpoint, where they are chat models), newest first, at most
+`MAX_MODELS`. If that leaves nothing of a non-empty list, the unfiltered list is offered instead
+(capped and sorted the same way), so an unusual endpoint still gets a picker. `suggest_model`
+picks the one to preselect. No model catalogue lives here: the list always comes from the provider.
 
 **Secrets.** Nothing here logs, returns or stores a key or a provider message: failures are logged
 by exception type and reported as a status. An exception's text is read only to classify it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -48,9 +53,19 @@ VALIDATION_MAX_TOKENS = 16
 VALIDATION_PROMPT = "ping"
 ADMIN_TIMEOUT_SEC = 20.0
 MAX_MODELS = 60
+LIST_DEADLINE_SEC = 30.0  # for a whole model listing, all pages included
 _MAX_FETCHED = 2000  # models read from a provider's list before filtering (a paginated list stops here)
 
 _KEY_WORDS = ("api key", "api_key", "apikey", "x-api-key", "credit", "billing")
+
+
+class LLMCheckFailed(Exception):
+    """A settings write whose model configuration failed its check: `status` is a status from the
+    table above, or `key_required` / `model_required`. Carries no key and no provider text."""
+
+    def __init__(self, status: str):
+        super().__init__(status)
+        self.status = status
 
 
 def key_for(settings: Any, provider: str) -> str | None:
@@ -155,32 +170,35 @@ def _created(value: Any) -> float:
     return 0.0
 
 
-async def fetch_models(provider: str, api_key: str, settings: Any, *, http_client: Any = None) -> list[dict]:
+def _gemini_id(model_id: str) -> str:
+    """Gemini lists `models/<id>` (Vertex: `publishers/google/models/<id>`); chat takes `<id>`."""
+    return model_id.rsplit("models/", 1)[-1]
+
+
+async def fetch_models(provider: str, api_key: str, settings: Any, *, http_client: Any = None,
+                       deadline_sec: float = LIST_DEADLINE_SEC) -> list[dict]:
     """The provider's model list for `api_key`, unfiltered, as `{"id", "label", "created"}` (label
-    None and created 0.0 when the provider gives none). Raises the provider's exception."""
+    None and created 0.0 when the provider gives none). Raises the provider's exception, or
+    `TimeoutError` when the listing (every page) takes longer than `deadline_sec`."""
+    if provider not in KEY_FIELDS:
+        raise ValueError("unknown provider")
     out: list[dict] = []
     if provider == "anthropic":
         client = _anthropic_client(api_key, settings, http_client)
-        try:
-            async for model in client.models.list(limit=100):
-                out.append({"id": model.id, "label": getattr(model, "display_name", None),
-                            "created": _created(getattr(model, "created_at", None))})
+        pages = client.models.list(limit=100)
+    else:
+        client = _openai_client(provider, api_key, settings, http_client)
+        pages = client.models.list()
+    try:
+        async with asyncio.timeout(deadline_sec):
+            async for model in pages:
+                model_id = getattr(model, "id", None)
+                if isinstance(model_id, str) and provider == "gemini":
+                    model_id = _gemini_id(model_id)
+                created = getattr(model, "created_at", None) if provider == "anthropic" else getattr(model, "created", None)
+                out.append({"id": model_id, "label": getattr(model, "display_name", None), "created": _created(created)})
                 if len(out) >= _MAX_FETCHED:
                     break
-        finally:
-            await client.close()
-        return out
-    if provider not in KEY_FIELDS:
-        raise ValueError("unknown provider")
-    client = _openai_client(provider, api_key, settings, http_client)
-    try:
-        async for model in client.models.list():
-            model_id = getattr(model, "id", None)
-            if isinstance(model_id, str) and provider == "gemini":
-                model_id = model_id.removeprefix("models/")  # Gemini lists "models/<id>"; chat takes "<id>"
-            out.append({"id": model_id, "label": None, "created": _created(getattr(model, "created", None))})
-            if len(out) >= _MAX_FETCHED:
-                break
     finally:
         await client.close()
     return out
@@ -196,6 +214,8 @@ _DROP_WORDS = frozenset({
     "instruct", "davinci", "babbage", "search", "computer", "robotics", "guard",
 })
 _DROP_SUBSTRINGS = ("embed", "moderation", "transcri", "whisper")
+# Gemini's image and media models do not always say "image" as a word ("nano-banana", "imagegen").
+_GEMINI_DROP_SUBSTRINGS = ("image", "nano-banana")
 # The ids a provider's own chat models start with (none for openai: a custom OPENAI_BASE_URL may
 # serve anything).
 _ID_PREFIX = {"gemini": "gemini-", "anthropic": "claude"}
@@ -203,13 +223,17 @@ _WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _DIGITS_RE = re.compile(r"(\d+)")
 
 
-def _is_chat_model(provider: str, model_id: str) -> bool:
+def _is_chat_model(provider: str, model_id: str, custom_endpoint: bool = False) -> bool:
     lowered = model_id.lower()
     if not lowered.startswith(_ID_PREFIX.get(provider, "")):
         return False
-    if any(part in lowered for part in _DROP_SUBSTRINGS):
+    substrings = _DROP_SUBSTRINGS + (_GEMINI_DROP_SUBSTRINGS if provider == "gemini" else ())
+    if any(part in lowered for part in substrings):
         return False
-    return not (_DROP_WORDS & set(_WORD_SPLIT_RE.split(lowered)))
+    # On OpenAI itself "-instruct" is a legacy completions model; behind a custom endpoint
+    # (OpenRouter and similar) "meta-llama/...-instruct" is a chat model.
+    words = _DROP_WORDS - {"instruct"} if custom_endpoint else _DROP_WORDS
+    return not (words & set(_WORD_SPLIT_RE.split(lowered)))
 
 
 def _natural_key(model_id: str) -> list:
@@ -217,22 +241,27 @@ def _natural_key(model_id: str) -> list:
     return [int(part) if i % 2 else part for i, part in enumerate(_DIGITS_RE.split(model_id.lower()))]
 
 
-def filter_models(provider: str, raw: Any, *, keep: str | None = None) -> list[dict]:
+def filter_models(provider: str, raw: Any, *, keep: str | None = None, custom_endpoint: bool = False) -> list[dict]:
     """`raw` (from `fetch_models`) as the model picker's list: chat-capable text models only, as
     `{"id", "label"}`, newest first (models without a date: higher versions first), at most
-    `MAX_MODELS`. `keep` (the model in use) is never cut by the cap."""
-    seen: dict[str, dict] = {}
+    `MAX_MODELS`. `keep` (the model in use) is never cut by the cap. `custom_endpoint`: an
+    OpenAI-compatible server other than OpenAI (`OPENAI_BASE_URL`). If the filter leaves nothing of
+    a non-empty list, the unfiltered list is used (see the module docstring)."""
+    valid: dict[str, dict] = {}
     for item in raw if isinstance(raw, (list, tuple)) else ():
         if not isinstance(item, dict):
             continue
         model_id = item.get("id")
-        if not isinstance(model_id, str) or not model_id.strip() or model_id in seen:
+        if not isinstance(model_id, str) or not model_id.strip():
             continue
-        if not _is_chat_model(provider, model_id):
+        if provider == "gemini":
+            model_id = _gemini_id(model_id)
+        if model_id in valid:
             continue
         label = item.get("label")
-        seen[model_id] = {"id": model_id, "label": label if isinstance(label, str) and label.strip() else model_id,
-                          "_created": _created(item.get("created"))}
+        valid[model_id] = {"id": model_id, "label": label if isinstance(label, str) and label.strip() else model_id,
+                           "_created": _created(item.get("created"))}
+    seen = {k: v for k, v in valid.items() if _is_chat_model(provider, k, custom_endpoint)} or valid
     ordered = sorted(seen.values(), key=lambda m: _natural_key(m["id"]), reverse=True)
     ordered.sort(key=lambda m: m["_created"], reverse=True)  # stable: the id order breaks ties
     if len(ordered) > MAX_MODELS:

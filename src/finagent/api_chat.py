@@ -57,6 +57,7 @@ from .api_common import error_response as _error
 from .api_common import field_errors as _field_errors
 from .config import env_fallbacks
 from .envfile import EnvFileError, check_env_value
+from .llm_admin import LLMCheckFailed
 from .trading.execution import ConfirmResult, TrackedOrder, reject_ticket, stored_orders
 from .trading.models import Mandate, TicketStatus
 from .trading.proposals import TicketStateError
@@ -331,8 +332,8 @@ async def portfolio(rt: Runtime):
         log.warning("portfolio: broker request failed (%s)", type(exc).__name__)
         return respond({"connected": True, "error": "broker_unavailable",
                         "message": "The broker could not be reached. Try again shortly."}, 502)
-    if account.paper is False:  # not a paper account: the runtime drops the broker for good
-        await _shielded(rt.drop_non_paper_broker())
+    if account.paper is False:  # not a paper account: the runtime drops this broker for good
+        await _shielded(rt.drop_non_paper_broker(broker))
         return respond({"connected": False})
     return respond({
         "connected": True,
@@ -479,8 +480,9 @@ def _settings_body(rt) -> dict:
 
 @router.get("/settings")
 async def get_settings_status(rt: Runtime):
-    if rt.alpaca_status is None:
-        await rt.refresh_alpaca_status()
+    # Unchecked, or unsettled (unreachable, invalid, ...): check again, at most once a minute. The
+    # check may drop the broker of a non-paper account, so it runs to the end even if we are gone.
+    await _shielded(rt.refresh_alpaca_status_if_due())
     return respond(_settings_body(rt))
 
 
@@ -522,10 +524,16 @@ async def put_settings(body: SettingsUpdate, rt: Runtime):
         if alpaca_status != "connected":
             raise ApiError(502, "alpaca_unreachable", "Alpaca could not be reached to check the keys. "
                            "Nothing was saved; try again shortly.")
-    warning = await api_llm.check_llm_changes(rt, changes)  # may make one live model call; raises ApiError
+    # may make one live model call; raises ApiError. `llm_context`: what the decision was made for
+    warning, llm_context = await api_llm.check_llm_changes(rt, changes)
     if changes:
         try:
-            await _shielded(rt.apply_settings(changes, alpaca_status=alpaca_status))
+            recheck = await _shielded(rt.apply_settings(changes, alpaca_status=alpaca_status,
+                                                        llm_context=llm_context))
+            if recheck is not None:  # a concurrent write changed the configuration: checked again
+                warning = api_llm.raise_for_llm_status(recheck)
+        except LLMCheckFailed as exc:
+            api_llm.raise_for_llm_status(exc.status, rt.llm_context(changes)[0])
         except Exception as exc:  # noqa: BLE001 - logged by type only
             log.warning("saving settings failed: %s", type(exc).__name__)
             raise ApiError(500, "settings_not_saved", "The settings could not be saved.") from None

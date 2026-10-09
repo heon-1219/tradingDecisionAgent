@@ -337,6 +337,28 @@ def test_real_token_credentials_are_still_masked(scrubbed, caplog, text, hidden)
     assert hidden not in caplog.text and "[redacted]" in caplog.text
 
 
+@pytest.mark.parametrize("text, hidden", [
+    ("access_tokens=ya29.SECRETVALUE0001", "ya29.SECRETVALUE0001"),
+    ("{'tokens': 'ya29.SECRETVALUE0002'}", "ya29.SECRETVALUE0002"),
+    ("x-api-tokens: SECRETVALUE0003", "SECRETVALUE0003"),
+    ("refresh_tokens=\"r-SECRETVALUE0004\"", "r-SECRETVALUE0004"),
+    ("max_tokens: abc123SECRET0005", "abc123SECRET0005"),
+    ("thoughts_token_count=SECRET0006", "SECRET0006"),
+])
+def test_a_tokens_name_with_a_value_that_is_not_a_number_is_masked(scrubbed, caplog, text, hidden):
+    logging.getLogger("finagent.llm").error("openai-compatible error: %s", text)
+    assert hidden not in caplog.text and "[redacted]" in caplog.text
+
+
+@pytest.mark.parametrize("text", [
+    "max_tokens: 9000", "max_tokens: 9,000", "'total_tokens': 1230}", "tokens=12.5",
+    "'prompt_tokens': '1200'", "x-ratelimit-remaining-tokens: 5000", "thoughts_token_count=512)",
+])
+def test_a_tokens_name_with_a_number_stays_readable(scrubbed, caplog, text):
+    logging.getLogger("finagent.llm").error("anthropic error: %s", text)
+    assert text in caplog.text and "[redacted]" not in caplog.text
+
+
 def test_a_known_secret_next_to_a_token_count_name_is_still_scrubbed(scrubbed, caplog):
     logging.getLogger("finagent.llm").error("anthropic error: %s", f"max_tokens: {SECRET} prompt_tokens={SECRET}")
     assert SECRET not in caplog.text

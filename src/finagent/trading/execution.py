@@ -2,7 +2,11 @@
 
 `confirm()` is reached solely from the user's Confirm click (`POST /api/tickets/{id}/confirm`); the
 LLM never gets an order-placing tool. Paper only: the broker is `AlpacaPaper`, whose host is a
-hard-coded constant.
+hard-coded constant, and `build_context` - which every proposal, confirm re-check and refresh runs
+first - refuses an account that says it is not a paper account (`AccountSnapshot.paper is False`):
+it calls `on_not_paper` (the runtime then drops the broker) and raises `NotPaperAccount`. A
+confirm then ends `rejected` with the ticket `failed` and nothing submitted; a refresh ends
+`rejected` and creates nothing; `propose_trades` creates no ticket.
 
 **confirm(ticket_id, session_id, ticket_hash)**
 
@@ -160,6 +164,10 @@ FINAL_ORDER_STATUSES = frozenset(
 STOP_POLL_STATUSES = FINAL_ORDER_STATUSES | {"accepted", "new", "partially_filled"}
 
 _MAX_MESSAGE_CHARS = 160
+NOT_PAPER_MESSAGE = (
+    "The connected Alpaca account is not a paper account, so nothing was submitted. This app trades paper "
+    "accounts only: trading is disconnected until paper-trading keys are saved in Settings."
+)
 _DEFAULT_TTL_SEC = 300
 _CENT = Decimal("0.01")
 _SUB_PENNY = Decimal("0.0001")
@@ -168,6 +176,13 @@ _HUNDRED = Decimal("100")
 ConfirmStatus = Literal[
     "submitted", "requote", "rejected", "disabled", "expired", "not_found", "error"
 ]
+
+
+class NotPaperAccount(Exception):
+    """The broker's account says it is not a paper account (`AccountSnapshot.paper is False`)."""
+
+    def __init__(self) -> None:
+        super().__init__("the Alpaca account is not a paper account")
 
 
 @dataclass
@@ -400,8 +415,10 @@ class Executor:
         db: AppDB | None = None,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         now: Callable[[], datetime] | None = None,
+        on_not_paper: Callable[[], Any] | None = None,
     ):
         self._broker = broker
+        self._on_not_paper = on_not_paper  # told (synchronously) when the account is not paper
         self._data = data
         self._tickets = tickets
         self._ledger = ledger
@@ -422,6 +439,9 @@ class Executor:
         one symbol leaves it out of `assets`, so risk rejects that leg as not tradable."""
         wanted = sorted(_valid_symbols(symbols))
         account = await self._broker.account()
+        if getattr(account, "paper", None) is False:
+            self._not_paper()
+            raise NotPaperAccount()
         positions = await self._broker.positions()
         open_orders = await self._broker.orders(status="open", limit=OPEN_ORDERS_LIMIT)
         assets = {}
@@ -447,6 +467,14 @@ class Executor:
             clock=clock,
             orders_today=self._orders_today(),
         )
+
+    def _not_paper(self) -> None:
+        logger.warning("the broker's account is not a paper account: refusing to trade")
+        if self._on_not_paper is not None:
+            try:
+                self._on_not_paper()
+            except Exception as exc:  # noqa: BLE001 - the refusal itself must still happen
+                logger.error("the not-paper callback failed (%s)", type(exc).__name__)
 
     def _orders_today(self) -> int:
         today = self._now().astimezone(timezone.utc).date().isoformat()
@@ -552,6 +580,11 @@ class Executor:
             ctx = await self.build_context([leg.symbol for leg in ticket.legs])
             mandate = self._mandate_for(run.session_id)
             decisions = evaluate(ticket.legs, ctx, mandate)
+        except NotPaperAccount:
+            self._persist(run)  # nothing attempted -> failed
+            return ConfirmResult(
+                "rejected", self._latest(ticket.id, run.final_ticket), [], NOT_PAPER_MESSAGE,
+            )
         except Exception as exc:  # noqa: BLE001 - no fresh check, no submission
             logger.warning("re-check of ticket %s failed: %s", ticket.id, self._short(exc))
             self._persist(run)  # nothing attempted -> failed
@@ -962,6 +995,8 @@ class Executor:
             ctx = await self.build_context([leg.symbol for leg in loaded.legs])
             mandate = self._mandate_for(session_id)
             decisions = evaluate(loaded.legs, ctx, mandate)
+        except NotPaperAccount:
+            return ConfirmResult("rejected", loaded, [], NOT_PAPER_MESSAGE.replace("submitted", "re-quoted"))
         except Exception as exc:  # noqa: BLE001 - report, don't crash the endpoint
             logger.warning("refresh of ticket %s failed: %s", loaded.id, self._short(exc))
             return ConfirmResult(

@@ -20,7 +20,8 @@
   `ticket_validation_failed` (both with the mandate version, the cited evidence ids and each
   decision's verdict and reason codes), `invalid_arguments` (the proposal's own checks),
   `one_proposal_per_turn`, `dispatch_error` (refused before the tool ran: unknown or missing
-  arguments, arguments that are not an object, or the tool is not available), `broker_error`,
+  arguments, arguments that are not an object, or the tool is not available),
+  `not_paper_account` (the broker's account says it is not a paper account), `broker_error`,
   `upstream_error` (an HTTP data source failed) and `unexpected_error`. A cancelled call is the
   exception: it leaves only its cancelled `tool_call`.
 

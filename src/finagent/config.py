@@ -177,7 +177,16 @@ def chat_mode(settings: object) -> ChatMode:
 def chat_limits(settings: object) -> ChatLimits:
     """The ONE place that resolves a chat turn's limits. `ChatAgent` (rounds, time budget), the
     chat system prompt (its Budget section) and `GET /api/settings` all read through it."""
-    mode = chat_mode(settings)
+    return _limits_for(settings, chat_mode(settings))
+
+
+def longest_turn_sec(settings: object) -> float:
+    """The longest time budget a chat turn can have under these settings, whatever the mode (a
+    turn keeps the limits it started with, so a client it holds must outlive either budget)."""
+    return max(_limits_for(settings, "shallow").time_budget_sec, _limits_for(settings, "deep").time_budget_sec)
+
+
+def _limits_for(settings: object, mode: ChatMode) -> ChatLimits:
     prefix, (rounds, seconds) = ("shallow", _SHALLOW_LIMITS) if mode == "shallow" else ("chat", _DEEP_LIMITS)
     try:
         rounds = max(1, int(getattr(settings, f"{prefix}_max_rounds", rounds)))

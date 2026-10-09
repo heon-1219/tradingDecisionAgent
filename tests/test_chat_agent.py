@@ -944,10 +944,11 @@ async def test_the_shallow_fallback_names_shallow_mode_and_the_paid_key(world, m
     text = await world.agent(RecLLM(script_factory=always_calling_tools)).run_turn(world.session_id, message, events)
     assert "get_market_status" in text
     if lang == "en":
-        assert "shallow-mode limit" in text and "paid API key in Settings" in text
+        assert "shallow-mode limit" in text
+        assert "add a paid API key, or mark your Gemini key as paid in Settings" in text
         assert "ran out of time" not in text and not HANGUL.search(text)
     else:
-        assert "얕은 리서치 모드" in text and "설정" in text and "유료 API 키" in text
+        assert "얕은 리서치 모드" in text and "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면" in text
         assert "shallow" not in text.lower()
     assert "".join(e["delta"] for e in events.of("text-delta")) == text
     assert events[-1]["budget_exhausted"] is True
@@ -964,9 +965,11 @@ async def test_a_nudged_shallow_answer_ends_with_the_shallow_note(world, message
     assert text.startswith("Partial answer from the model.\n\n")
     note = text.split("\n\n", 1)[1]
     if lang == "en":
-        assert note.startswith("Shallow mode:") and "paid API key in Settings" in note
+        assert note.startswith("Shallow mode:")
+        assert "add a paid API key, or mark your Gemini key as paid in Settings" in note
     else:
-        assert note.startswith("얕은 리서치 모드:") and "유료 API 키" in note
+        assert note.startswith("얕은 리서치 모드:")
+        assert "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면" in note
     assert not re.search(r"\d", note)  # no number for the grounding check to flag
     assert not events.of("data-grounding-flags")
     assert llm.convs[0].transcript()[-2] == {"role": "user", "content": SHALLOW_NUDGE_TEXT}

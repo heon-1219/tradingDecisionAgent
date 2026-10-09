@@ -268,6 +268,46 @@ def test_filter_output_shape_order_and_cap():
         {"id": "gpt-a", "label": "gpt-a"}]
 
 
+def test_the_reviewers_probe_ids():
+    gemini = filter_models("gemini", raw("publishers/google/models/gemini-2.5-flash", "gemini-nano-banana-2.1",
+                                         "gemini-3.8-flash-image-preview", "gemini-imagegen-1", "gemini-3.8-pro"))
+    assert [m["id"] for m in gemini] == ["gemini-3.8-pro", "gemini-2.5-flash"]  # Vertex-style path stripped
+    llama = raw("meta-llama/llama-3.3-70b-instruct", "gpt-3.5-turbo-instruct")
+    assert {m["id"] for m in filter_models("openai", llama, custom_endpoint=True)} == {
+        "meta-llama/llama-3.3-70b-instruct", "gpt-3.5-turbo-instruct"}  # OpenRouter-style ids are chat models
+    # on OpenAI itself "-instruct" is a legacy completions model
+    assert [m["id"] for m in filter_models("openai", llama + raw("gpt-test"))] == ["gpt-test"]
+
+
+def test_when_the_filter_leaves_nothing_the_raw_list_is_used(caplog):
+    odd = raw("mystery-model-b", "mystery-model-a", created={"mystery-model-a": 2.0, "mystery-model-b": 1.0})
+    assert [m["id"] for m in filter_models("gemini", odd)] == ["mystery-model-a", "mystery-model-b"]
+    many = raw(*[f"text-embedding-{n}" for n in range(100)])
+    out = filter_models("openai", many)
+    assert len(out) == MAX_MODELS and out[0]["id"] == "text-embedding-99"
+    assert filter_models("openai", []) == [] and filter_models("openai", [{"id": ""}]) == []
+
+
+async def test_listing_has_an_overall_deadline_across_pages():
+    import asyncio
+
+    pages = {"n": 0}
+
+    async def endless(request):
+        pages["n"] += 1
+        await asyncio.sleep(0.05)
+        model_id = f"claude-page-{pages['n']}"
+        return httpx2.Response(200, json={
+            "data": [{"id": model_id, "type": "model", "display_name": model_id, "created_at": "2026-08-01T00:00:00Z"}],
+            "has_more": True, "first_id": model_id, "last_id": model_id})
+
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(endless))
+    with pytest.raises(TimeoutError) as caught:
+        await fetch_models("anthropic", ANTHROPIC_KEY, settings("gemini", "g"), http_client=client, deadline_sec=0.3)
+    assert classify_llm_error(caught.value) == "unreachable"
+    assert 2 <= pages["n"] <= 10
+
+
 def test_the_current_model_is_never_cut_by_the_cap():
     items = raw(*[f"gpt-{n}" for n in range(200)])
     out = filter_models("openai", items, keep="gpt-3")

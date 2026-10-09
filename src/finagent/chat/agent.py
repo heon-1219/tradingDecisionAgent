@@ -116,9 +116,10 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     # No digits: the grounding check reads the whole final text.
     "shallow_note": (
         "Shallow mode: this reply stopped at the research limit of the Gemini free tier, so some research may "
-        "have been skipped. Add a paid API key in Settings to allow deeper research.",
+        "have been skipped. To allow deeper research, add a paid API key, or mark your Gemini key as paid in "
+        "Settings.",
         "얕은 리서치 모드: Gemini 무료 등급의 호출 한도 때문에 리서치를 일부 생략하고 답변을 마쳤을 수 있습니다. "
-        "설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+        "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면 더 깊이 리서치할 수 있습니다.",
     ),
 }
 
@@ -134,26 +135,39 @@ def _msg(key: str, lang: Lang) -> str:
 
 
 def _shallow_fallback_text(lang: Lang, names: str) -> str:
+    # Shallow mode only arises with a Gemini key (config.chat_mode), so the way out names both
+    # a paid key and the "my Gemini key is paid" switch.
     if names:
         return pick(
             lang,
             "I reached the shallow-mode limit before finishing (the Gemini free tier allows only a few model calls "
             f"per reply). Here is what I found so far: I ran {names}, but had no calls left to write up the "
-            "answer. Ask again with a narrower question, or add a paid API key in Settings to allow deeper "
-            "research.",
+            "answer. Ask again with a narrower question; to allow deeper research, add a paid API key, or mark "
+            "your Gemini key as paid in Settings.",
             "얕은 리서치 모드의 한도에 도달해 답변을 마치지 못했습니다(Gemini 무료 등급은 답변당 모델 호출 횟수가 "
             f"적습니다). 지금까지 진행한 내용: {names} 도구를 실행했지만 답변을 정리할 호출이 남지 않았습니다. "
-            "범위를 좁혀 다시 질문하거나, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+            "범위를 좁혀 다시 질문해 주세요. 설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면 더 깊이 "
+            "리서치할 수 있습니다.",
         )
     return pick(
         lang,
         "I reached the shallow-mode limit before finishing (the Gemini free tier allows only a few model calls per "
         "reply). Here is what I found so far: nothing yet, as no tool finished in time. Ask again with a narrower "
-        "question, or add a paid API key in Settings to allow deeper research.",
+        "question; to allow deeper research, add a paid API key, or mark your Gemini key as paid in Settings.",
         "얕은 리서치 모드의 한도에 도달해 답변을 마치지 못했습니다(Gemini 무료 등급은 답변당 모델 호출 횟수가 "
-        "적습니다). 지금까지 진행한 내용: 제시간에 끝난 도구가 없어 아직 없습니다. 범위를 좁혀 다시 질문하거나, "
-        "설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있습니다.",
+        "적습니다). 지금까지 진행한 내용: 제시간에 끝난 도구가 없어 아직 없습니다. 범위를 좁혀 다시 질문해 주세요. "
+        "설정에서 유료 API 키를 등록하거나 Gemini 키를 유료로 표시하면 더 깊이 리서치할 수 있습니다.",
     )
+
+
+def nudge_grace_sec(settings: object) -> float:
+    """How long the one tool-free step after the budget may take: `llm_timeout_sec`, kept within
+    5-20 s. The runtime adds it when it decides how long a retired model client must live."""
+    try:
+        timeout = float(getattr(settings, "llm_timeout_sec", 20.0))
+    except (TypeError, ValueError):
+        timeout = 20.0
+    return min(20.0, max(5.0, timeout))
 
 
 def fallback_text(lang: Lang, tools: list[str], mode: str = "deep") -> str:
@@ -661,9 +675,5 @@ class ChatAgent:
         return max(0, int((self._clock() - t0) * 1000))
 
     def _grace_sec(self) -> float:
-        try:
-            timeout = float(getattr(self._settings, "llm_timeout_sec", 20.0))
-        except (TypeError, ValueError):
-            timeout = 20.0
-        return min(20.0, max(5.0, timeout))
+        return nudge_grace_sec(self._settings)
 

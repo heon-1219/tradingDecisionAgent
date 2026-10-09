@@ -289,11 +289,21 @@ def _secret_value_span(text: str, sep: int, covered_end: int) -> tuple[int, int]
 
 def _is_token_count_name(name: str) -> bool:
     """`max_tokens`, `prompt_tokens`, `x-ratelimit-remaining-tokens`, `thoughts_token_count`: the
-    (last dotted component of the) name ends in `tokens` or `token_count`. These name counts, not
-    credentials. Only the log pass exempts them (`redact_free_text(allow_token_counts=True)`); a
-    singular `..._token` is never exempt."""
+    (last dotted component of the) name ends in `tokens` or `token_count`. Such a name holds a
+    count when its value is a number (`_is_count_value`); only then, and only in the log pass
+    (`redact_free_text(allow_token_counts=True)`), is the pair left readable. A singular
+    `..._token` is never exempt, and neither is `access_tokens=ya29...`."""
     last = name.rpartition(".")[2].lower()
     return last.endswith("tokens") or last.endswith("token_count")
+
+
+# A count: digits, optionally grouped or with a decimal part (`9000`, `9,000`, `12.5`), possibly
+# followed by the closing brackets of the structure it sits in (`1200}`).
+_COUNT_VALUE_RE = re.compile(r"\d[\d,.]*[)\]}]*")
+
+
+def _is_count_value(text: str) -> bool:
+    return bool(_COUNT_VALUE_RE.fullmatch(text))
 
 
 def _pair_value_spans(text: str, *, allow_token_counts: bool = False) -> list[tuple[int, int]]:
@@ -323,9 +333,10 @@ def _pair_value_spans(text: str, *, allow_token_counts: bool = False) -> list[tu
         name = _name_before_separator(text, sep, floor)
         floor = sep + 1
         if name and _is_secret_like_free_text_name(name):
-            if allow_token_counts and _is_token_count_name(name):
-                continue
             span = _secret_value_span(text, sep, covered_end)
+            if span is not None and allow_token_counts and _is_token_count_name(name) \
+                    and _is_count_value(text[span[0]:span[1]]):
+                continue  # a token count (the log pass only)
             if span is not None:
                 spans.append(span)
                 covered_end = span[1]
