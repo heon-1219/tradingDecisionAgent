@@ -159,7 +159,8 @@ The chat and trading API is the HTTP surface of the local paper-trading app (`we
 | `POST` | `/api/tickets/{ticket_id}/reject` | Reject a ticket | 200 |
 | `POST` | `/api/tickets/{ticket_id}/refresh` | Re-quote a ticket | 200 |
 | `GET` | `/api/settings` | Connection status; never secrets | 200 |
-| `PUT` | `/api/settings` | Save keys or the trading flag | 200 |
+| `PUT` | `/api/settings` | Save keys, the model provider or the trading flag | 200 |
+| `POST` | `/api/llm/models` | List the chat models an API key can use | 200 |
 | `POST` | `/api/kill-switch` | Turn trading off | 200 |
 | `GET` | `/api/ledger/{session_id}.jsonl` | Download a session's audit ledger | 200 |
 
@@ -228,7 +229,7 @@ Status codes: 200 (stream), 404 `session_not_found`, 422 `invalid_request`, 503 
 | `data-grounding-flags` | `numbers` | After the final text is composed, if some numbers in it are not supported by this turn's tool outputs. Advisory only | `data: {"type":"data-grounding-flags","numbers":["$1,250","3.4%"]}` |
 | `text-delta` | `delta` | The final answer, in chunks of at most about 200 characters. The whole text is composed first, so this is chunked delivery, not token streaming | `data: {"type":"text-delta","delta":"VOO tracks the S&P 500 [E1]. ..."}` |
 | `error` | `message` | The turn was refused or failed. The message is generic, in the language of the user's message, and never carries provider text | `data: {"type":"error","message":"Sorry, something went wrong while writing this reply. Please try again in a moment."}` |
-| `finish` | `usage`, `elapsed_ms` | Always the last event, also after an error. `usage` holds token counts summed over the turn, as the provider reports them (for example `input` and `output`) | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342}` |
+| `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | Always the last event, also after an error. `usage` holds token counts summed over the turn, as the provider reports them (for example `input` and `output`). `mode` (`shallow` or `deep`), `max_rounds` and `time_budget_sec` are the limits the turn ran under (see [Settings](#settings)). `budget_exhausted` is `true` when the turn ended on them: the answer is then what the model wrote when asked to stop, or a fallback, and in shallow mode it says so and that a paid API key in Settings allows deeper research. If the stream itself fails, its closing `finish` has only `usage` and `elapsed_ms` | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
 
 Order within a turn: `start`; then for each round an optional `reasoning-delta` and, for every tool call in order, `tool-input-available`, `tool-output-available`, any `source-url` events and any events the tool produced (`data-mandate`, `data-trade-proposal`, `source-grounding`); then an optional `data-grounding-flags`, the `text-delta` chunks and `finish`. A refusal or failure is `error` followed by `finish`. Order status updates are not pushed on the stream: poll `GET /api/tickets/{ticket_id}`.
 
@@ -238,7 +239,7 @@ Order within a turn: `start`; then for each round an optional `reasoning-delta` 
 
 | Case | Status | Body |
 |---|---|---|
-| No Alpaca keys saved | 200 | `{"connected": false}` |
+| No Alpaca keys saved, or the keys belong to a live account | 200 | `{"connected": false}` |
 | Connected | 200 | `{"connected": true, "paper": true, "account": {...}, "positions": [...], "open_orders": [...]}` |
 | Broker unreachable | 502 | `{"connected": true, "error": "broker_unavailable", "message": "..."}` |
 
@@ -246,13 +247,15 @@ Order within a turn: `start`; then for each round an optional `reasoning-delta` 
 {
   "connected": true,
   "paper": true,
-  "account": {"status": "ACTIVE", "equity": "100000", "cash": "100000", "buying_power": "100000", "non_marginable_buying_power": "100000", "last_equity": "100000", "trading_blocked": false, "account_blocked": false, "trade_suspended_by_user": false, "shorting_enabled": false},
+  "account": {"status": "ACTIVE", "equity": "100000", "cash": "100000", "buying_power": "100000", "non_marginable_buying_power": "100000", "last_equity": "100000", "trading_blocked": false, "account_blocked": false, "trade_suspended_by_user": false, "shorting_enabled": false, "paper": true},
   "positions": [{"symbol": "VOO", "qty": "4", "qty_available": "4", "avg_entry_price": "500.00", "current_price": "501.20", "market_value": "2004.80", "unrealized_pl": "4.80", "unrealized_plpc": "0.0024", "side": "long"}],
   "open_orders": []
 }
 ```
 
 `open_orders` holds up to 100 open orders in the [order object](#order-object) shape. The 502 case uses the error code `broker_unavailable`.
+
+`paper` (and `account.paper`) come from the account itself: `true` for a paper account, `null` when Alpaca's response did not say. An account that reports `false` (a live account) never gets this far: the app drops its broker and answers `{"connected": false}`, and `GET /api/settings` then says `alpaca: "not_paper"`.
 
 ## Mandate
 
@@ -404,18 +407,23 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 
 | Field | Values |
 |---|---|
-| `alpaca` | `connected`, `missing` (no keys), `invalid` (Alpaca rejected the keys) or `unreachable` |
+| `alpaca` | `connected`, `missing` (no keys), `invalid` (Alpaca rejected the keys), `unreachable`, or `not_paper` (the keys belong to a live account, so trading stays disconnected) |
 | `tavily`, `sec_user_agent`, `gemini` | `set` or `missing` |
 | `trading_enabled` | boolean; `false` after the kill switch |
-| `model`, `effort` | The LLM model name and reasoning effort |
+| `provider` | The chat model provider: `gemini`, `openai` or `anthropic` (`stub` only in tests) |
+| `model`, `effort` | The model id and the reasoning effort (`low`, `medium`, `high`, `xhigh` or `max`) |
+| `mode` | The research depth: `shallow` (Gemini without `gemini_paid`) or `deep` (OpenAI, Anthropic, or Gemini declared paid) |
+| `max_rounds`, `time_budget_sec` | The limits of one reply in that mode: tool rounds and seconds (shallow 4 and 150, deep 12 and 300 by default) |
+| `gemini_paid` | boolean: the user's statement that the Gemini key is on a paid plan |
+| `providers` | `{"gemini", "openai", "anthropic"}`, each `set` or `missing`: whether a key is saved for it |
 | `api_allow_remote` | boolean |
 | `env_fallbacks` | Names of writable settings (for example `TAVILY_API_KEY`) that only the process environment provides. `.env` wins over the environment, so clearing one of these in the app does not survive a restart |
 
 ```json
-{"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "model": "gemini-3.8-flash", "effort": "medium", "api_allow_remote": false, "env_fallbacks": []}
+{"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "api_allow_remote": false, "env_fallbacks": [], "provider": "gemini", "model": "gemini-3.8-flash", "effort": "medium", "mode": "shallow", "max_rounds": 4, "time_budget_sec": 150, "gemini_paid": false, "providers": {"gemini": "set", "openai": "missing", "anthropic": "missing"}}
 ```
 
-**`PUT /api/settings`** saves keys to the local `.env` and the trading flag. Every field is optional:
+**`PUT /api/settings`** saves keys, the model provider settings and the trading flag to the local `.env`. Every field is optional:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -423,18 +431,59 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 | `tavily_key` | string, at most 256 characters | |
 | `sec_user_agent` | string, at most 256 characters | A name and contact address, as the SEC requires |
 | `trading_enabled` | boolean | The only way to turn trading back on after the kill switch |
+| `llm_provider` | `gemini`, `openai` or `anthropic` | The chat model provider. The provider chosen must have a key after the update |
+| `llm_model` | string, at most 256 characters | The model id, for example from `POST /api/llm/models`. It cannot be removed: `""` is 400 `llm_model_required` |
+| `llm_effort` | `low`, `medium`, `high`, `xhigh` or `max` | Reasoning effort (Gemini maps `xhigh` and `max` to `high`) |
+| `gemini_key`, `openai_key`, `anthropic_key` | string, at most 256 characters | Provider API keys. The key of the provider in use cannot be removed |
+| `gemini_paid` | boolean | Declares the Gemini key paid, which gives deep mode. It takes effect from the next reply, without a model call |
 
-For the string fields, `""` removes the key and `null` (or leaving the field out) leaves it as it is. Values are trimmed of ASCII whitespace and must be printable ASCII without `"`, `\` or `${`. Saving rebuilds the connectors in place, so the agent's tool set changes from the next message on. The response is the same body as `GET /api/settings`.
+For the string fields, `""` removes the key and `null` (or leaving the field out) leaves it as it is. Values are trimmed of ASCII whitespace and must be printable ASCII without `"`, `\` or `${`. Saving rebuilds the connectors in place, so the agent's tool set changes from the next message on. The response is the same body as `GET /api/settings`, plus `"warning": "llm_rate_limited"` when that applies.
+
+**Model checks.** When the request changes the provider, the model or the key of the provider that will be in use, the server makes one minimal call to that provider with the candidate configuration (a one-word prompt, at most 16 output tokens, no tools) before anything is saved. A key for a provider that is not in use is saved without a call, and so are `gemini_paid` and `llm_effort`. A rate-limited key works, so the settings are saved and the response adds `"warning": "llm_rate_limited"`. A switch applies from the next reply in every session, and to `GET /answer`; a reply already running finishes on the old model. Neither an error nor a warning ever contains a key or the provider's own message.
 
 | Status | Code | When |
 |---|---|---|
 | 200 | | Saved |
 | 400 | `invalid_value` | A value has characters that cannot be saved; `field` names it |
 | 400 | `alpaca_pair_required` | Only one of the Alpaca key id and secret was given (or one was cleared and not the other) |
+| 200 | (`warning: "llm_rate_limited"`) | Saved; the key works but is rate limited right now |
 | 400 | `alpaca_invalid` | Alpaca rejected the keys; nothing was saved |
+| 400 | `alpaca_not_paper` | The Alpaca keys belong to a live (non-paper) account; nothing was saved |
 | 502 | `alpaca_unreachable` | Alpaca could not be reached to check the keys; nothing was saved |
+| 400 | `llm_key_required` | The chosen provider would have no API key |
+| 400 | `llm_model_required` | No model would be named |
+| 400 | `llm_invalid_key` | The provider rejected the key (401 or 403, an invalid-key 400, or no credit); nothing was saved |
+| 400 | `llm_model_unavailable` | The model is unknown or not available for this key; nothing was saved |
+| 502 | `llm_unreachable` | The provider could not be reached to check (a network error or a 5xx); nothing was saved |
 | 500 | `settings_not_saved` | Writing the settings failed |
-| 422 | `invalid_request` | Unknown field or wrong type |
+| 422 | `invalid_request` | Unknown field or wrong type (for example `llm_provider: "stub"`) |
+
+### Model list
+
+**`POST /api/llm/models`** lists the chat models an API key can use, for the model picker. It changes nothing.
+
+| Field | Type | Notes |
+|---|---|---|
+| `provider` | `gemini`, `openai` or `anthropic` | Required |
+| `api_key` | string, at most 256 characters, optional | The key to try, with the same value rules as a saved key. Without it, the saved key of that provider is used. It is never saved, echoed or logged, and it belongs in the body: there is no `GET` form |
+
+The list comes from the provider's own list-models endpoint. It keeps the chat-capable text models (embedding, image, audio, TTS, live, moderation and similar models are dropped by their id), newest first, at most 60. `suggested` is the model in use if it is listed; otherwise Gemini's default model (`gemini-3.8-flash`), Anthropic's newest Opus and then its newest Sonnet, or else the first of the list; `null` for an empty list. `label` is the provider's display name, or the id when it has none.
+
+```json
+{"provider": "anthropic", "models": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}, {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"}], "suggested": "claude-opus-5-5"}
+```
+
+| Status | Code | When |
+|---|---|---|
+| 200 | | The list |
+| 400 | `llm_key_required` | No `api_key` was sent and no key is saved for that provider |
+| 400 | `invalid_value` | `api_key` has characters that cannot be used (`field` is `api_key`) |
+| 400 | `llm_invalid_key` | The provider rejected the key |
+| 429 | `llm_rate_limited` | The provider is rate limiting the key right now; try again shortly |
+| 502 | `llm_unreachable` | The provider could not be reached |
+| 422 | `invalid_request` | Unknown provider, unknown field or wrong type |
+
+The access rules apply as to every `/api` `POST`: a loopback client, an allowed Host, `X-FinAgent-Client: 1` and a matching `Origin`.
 
 ## Kill switch
 
@@ -463,9 +512,9 @@ It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no
 {"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
 ```
 
-`tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the arguments as canonical JSON (sorted keys, compact separators; `null` when the arguments are not an object), `result_sha256` the SHA-256 of the output text as UTF-8. A cancelled call has `"cancelled": true` and no `result_sha256`; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"` and `"supersedes": "<old ticket id>"` instead of a `turn_id`. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments` or `one_proposal_per_turn`), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
+`tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the UTF-8 bytes of `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)` (with `null` for arguments that are not an object); `result_sha256` is the SHA-256 of the output text's UTF-8 bytes, or `null` when the tool returned no text; `latency_ms` is the tool's own time. A cancelled call has `"cancelled": true` and no `result_sha256`, and any other exception that escaped the tool has `"raised": "<exception type>"`. Tool calls the agent skips once the turn's budget is spent are not run and not ledgered; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"` and `"supersedes": "<old ticket id>"` instead of a `turn_id`. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `broker_error`, `upstream_error` or `unexpected_error`: one entry for every `propose_trades` call that ends without a ticket, except a cancelled one), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
 
-Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included. Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
+Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included (not values passed with `extra=` or logger names; a text over 100,000 characters is cut; token counts such as `max_tokens: 9000` stay readable). Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
 
 ## Example: from a message to a confirmed ticket
 
@@ -676,7 +725,8 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `POST` | `/api/tickets/{ticket_id}/reject` | 티켓 거절 | 200 |
 | `POST` | `/api/tickets/{ticket_id}/refresh` | 티켓 재호가(re-quote) | 200 |
 | `GET` | `/api/settings` | 연결 상태. 비밀값은 절대 반환하지 않음 | 200 |
-| `PUT` | `/api/settings` | 키 또는 거래 플래그 저장 | 200 |
+| `PUT` | `/api/settings` | 키, 모델 제공자 또는 거래 플래그 저장 | 200 |
+| `POST` | `/api/llm/models` | API 키로 쓸 수 있는 채팅 모델 목록 | 200 |
 | `POST` | `/api/kill-switch` | 거래 끄기 | 200 |
 | `GET` | `/api/ledger/{session_id}.jsonl` | 세션의 감사 원장 내려받기 | 200 |
 
@@ -745,7 +795,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `data-grounding-flags` | `numbers` | 최종 텍스트가 완성된 뒤, 그 안의 일부 숫자가 이 턴의 도구 출력으로 뒷받침되지 않을 때. 참고용입니다 | `data: {"type":"data-grounding-flags","numbers":["$1,250","3.4%"]}` |
 | `text-delta` | `delta` | 최종 답변을 최대 200자 안팎의 조각으로. 전체 텍스트를 먼저 만든 뒤 나눠 보내므로 토큰 단위 스트리밍이 아니라 조각 전달입니다 | `data: {"type":"text-delta","delta":"VOO tracks the S&P 500 [E1]. ..."}` |
 | `error` | `message` | 턴이 거절되었거나 실패했을 때. 메시지는 일반적인 문구이며, 사용자 메시지의 언어로 나오고, 제공자의 문구는 담지 않습니다 | `data: {"type":"error","message":"Sorry, something went wrong while writing this reply. Please try again in a moment."}` |
-| `finish` | `usage`, `elapsed_ms` | 항상 마지막 이벤트이며 오류 뒤에도 옵니다. `usage`는 제공자가 보고한 토큰 수를 턴 전체로 합산한 값입니다(예: `input`, `output`) | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342}` |
+| `finish` | `usage`, `elapsed_ms`, `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted` | 항상 마지막 이벤트이며 오류 뒤에도 옵니다. `usage`는 제공자가 보고한 토큰 수를 턴 전체로 합산한 값입니다(예: `input`, `output`). `mode`(`shallow` 또는 `deep`), `max_rounds`, `time_budget_sec`는 그 턴에 적용된 한도입니다([설정](#설정) 참고). `budget_exhausted`가 `true`면 턴이 그 한도에서 끝난 것입니다. 이때 답은 멈추라는 요청을 받은 모델이 쓴 것이거나 대체 메시지이며, 얕은 모드에서는 그 사실과, 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있다는 안내가 들어갑니다. 스트림 자체가 실패하면 마지막 `finish`에는 `usage`와 `elapsed_ms`만 있습니다 | `data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}` |
 
 한 턴 안의 순서: `start`. 이어서 라운드마다 선택적 `reasoning-delta`와, 도구 호출을 순서대로 하나씩 `tool-input-available`, `tool-output-available`, 있다면 `source-url`, 그리고 도구가 만든 이벤트(`data-mandate`, `data-trade-proposal`, `source-grounding`). 그다음 선택적 `data-grounding-flags`, `text-delta` 조각들, `finish`. 거절이나 실패는 `error` 뒤에 `finish`가 옵니다. 주문 상태 변화는 스트림으로 푸시하지 않으므로 `GET /api/tickets/{ticket_id}`를 폴링하세요.
 
@@ -755,7 +805,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 | 경우 | 상태 | 본문 |
 |---|---|---|
-| 저장된 Alpaca 키 없음 | 200 | `{"connected": false}` |
+| 저장된 Alpaca 키가 없거나, 키가 실계좌의 것임 | 200 | `{"connected": false}` |
 | 연결됨 | 200 | `{"connected": true, "paper": true, "account": {...}, "positions": [...], "open_orders": [...]}` |
 | 브로커에 닿지 않음 | 502 | `{"connected": true, "error": "broker_unavailable", "message": "..."}` |
 
@@ -763,13 +813,15 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {
   "connected": true,
   "paper": true,
-  "account": {"status": "ACTIVE", "equity": "100000", "cash": "100000", "buying_power": "100000", "non_marginable_buying_power": "100000", "last_equity": "100000", "trading_blocked": false, "account_blocked": false, "trade_suspended_by_user": false, "shorting_enabled": false},
+  "account": {"status": "ACTIVE", "equity": "100000", "cash": "100000", "buying_power": "100000", "non_marginable_buying_power": "100000", "last_equity": "100000", "trading_blocked": false, "account_blocked": false, "trade_suspended_by_user": false, "shorting_enabled": false, "paper": true},
   "positions": [{"symbol": "VOO", "qty": "4", "qty_available": "4", "avg_entry_price": "500.00", "current_price": "501.20", "market_value": "2004.80", "unrealized_pl": "4.80", "unrealized_plpc": "0.0024", "side": "long"}],
   "open_orders": []
 }
 ```
 
 `open_orders`에는 [주문 객체](#주문-객체) 형태의 미체결 주문이 최대 100개 들어갑니다. 502의 오류 코드는 `broker_unavailable`입니다.
+
+`paper`(그리고 `account.paper`)는 계좌 자체에서 옵니다. 모의 계좌면 `true`, Alpaca 응답에 표시가 없으면 `null`입니다. `false`라고 답하는 계좌(실계좌)는 여기까지 오지 못합니다. 앱이 그 브로커를 버리고 `{"connected": false}`로 답하며, 그 뒤로 `GET /api/settings`는 `alpaca: "not_paper"`를 알려 줍니다.
 
 ## 투자 원칙(Mandate)
 
@@ -921,18 +973,23 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 | 필드 | 값 |
 |---|---|
-| `alpaca` | `connected`, `missing`(키 없음), `invalid`(Alpaca가 키를 거부함), `unreachable` |
+| `alpaca` | `connected`, `missing`(키 없음), `invalid`(Alpaca가 키를 거부함), `unreachable`, `not_paper`(실계좌의 키라서 거래가 연결되지 않음) |
 | `tavily`, `sec_user_agent`, `gemini` | `set` 또는 `missing` |
 | `trading_enabled` | 불리언. 킬 스위치 이후에는 `false` |
-| `model`, `effort` | LLM 모델 이름과 추론 강도 |
+| `provider` | 채팅 모델 제공자: `gemini`, `openai`, `anthropic`(`stub`은 테스트에서만) |
+| `model`, `effort` | 모델 ID와 추론 강도(`low`, `medium`, `high`, `xhigh`, `max`) |
+| `mode` | 리서치 깊이: `shallow`(얕은 리서치 모드. `gemini_paid`가 아닌 Gemini) 또는 `deep`(심층 리서치 모드. OpenAI, Anthropic, 유료로 선언한 Gemini) |
+| `max_rounds`, `time_budget_sec` | 그 모드에서 답변 하나의 한도: 도구 라운드 수와 초(기본값은 얕은 모드 4와 150, 심층 모드 12와 300) |
+| `gemini_paid` | 불리언. Gemini 키가 유료 요금제라는 사용자의 선언 |
+| `providers` | `{"gemini", "openai", "anthropic"}`, 각각 `set` 또는 `missing`: 키가 저장돼 있는지 |
 | `api_allow_remote` | 불리언 |
 | `env_fallbacks` | 프로세스 환경 변수만 제공하는, 쓰기 가능한 설정의 이름(예: `TAVILY_API_KEY`). `.env`가 환경 변수보다 우선하므로 앱에서 이 값을 지워도 재시작하면 되살아납니다 |
 
 ```json
-{"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "model": "gemini-3.8-flash", "effort": "medium", "api_allow_remote": false, "env_fallbacks": []}
+{"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "api_allow_remote": false, "env_fallbacks": [], "provider": "gemini", "model": "gemini-3.8-flash", "effort": "medium", "mode": "shallow", "max_rounds": 4, "time_budget_sec": 150, "gemini_paid": false, "providers": {"gemini": "set", "openai": "missing", "anthropic": "missing"}}
 ```
 
-**`PUT /api/settings`**는 키를 로컬 `.env`에, 거래 플래그와 함께 저장합니다. 모든 필드는 선택입니다.
+**`PUT /api/settings`**는 키, 모델 제공자 설정, 거래 플래그를 로컬 `.env`에 저장합니다. 모든 필드는 선택입니다.
 
 | 필드 | 타입 | 비고 |
 |---|---|---|
@@ -940,18 +997,59 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `tavily_key` | 문자열, 최대 256자 | |
 | `sec_user_agent` | 문자열, 최대 256자 | SEC가 요구하는 이름과 연락처 |
 | `trading_enabled` | 불리언 | 킬 스위치 이후 거래를 다시 켜는 유일한 방법 |
+| `llm_provider` | `gemini`, `openai`, `anthropic` | 채팅 모델 제공자. 바꾼 뒤 고른 제공자의 키가 있어야 합니다 |
+| `llm_model` | 문자열, 최대 256자 | 모델 ID(예: `POST /api/llm/models`에서 고른 것). 지울 수 없으며 `""`는 400 `llm_model_required`입니다 |
+| `llm_effort` | `low`, `medium`, `high`, `xhigh`, `max` | 추론 강도(Gemini는 `xhigh`와 `max`를 `high`로 보냅니다) |
+| `gemini_key`, `openai_key`, `anthropic_key` | 문자열, 최대 256자 | 제공자 API 키. 사용 중인 제공자의 키는 지울 수 없습니다 |
+| `gemini_paid` | 불리언 | Gemini 키를 유료로 선언합니다(심층 모드). 모델 호출 없이 다음 답변부터 적용됩니다 |
 
-문자열 필드에서 `""`는 키를 삭제하고, `null`(또는 필드 생략)은 그대로 둡니다. 값은 ASCII 공백을 다듬은 뒤 `"`, `\`, `${`가 없는 출력 가능한 ASCII여야 합니다. 저장하면 커넥터를 그 자리에서 다시 만들므로 에이전트의 도구 구성은 다음 메시지부터 바뀝니다. 응답은 `GET /api/settings`와 같은 본문입니다.
+문자열 필드에서 `""`는 키를 삭제하고, `null`(또는 필드 생략)은 그대로 둡니다. 값은 ASCII 공백을 다듬은 뒤 `"`, `\`, `${`가 없는 출력 가능한 ASCII여야 합니다. 저장하면 커넥터를 그 자리에서 다시 만들므로 에이전트의 도구 구성은 다음 메시지부터 바뀝니다. 응답은 `GET /api/settings`와 같은 본문이며, 해당하면 `"warning": "llm_rate_limited"`가 붙습니다.
+
+**모델 확인.** 요청이 제공자, 모델, 또는 사용하게 될 제공자의 키를 바꾸면, 서버는 무엇이든 저장하기 전에 후보 구성으로 그 제공자에 최소한의 호출을 한 번 합니다(한 단어짜리 프롬프트, 출력 최대 16토큰, 도구 없음). 사용 중이 아닌 제공자의 키는 호출 없이 저장하며, `gemini_paid`와 `llm_effort`도 마찬가지입니다. 요청 한도에 걸린 키는 동작하는 키이므로 설정을 저장하고 응답에 `"warning": "llm_rate_limited"`를 덧붙입니다. 전환은 모든 세션의 다음 답변과 `GET /answer`부터 적용되며, 이미 진행 중인 답변은 이전 모델로 끝납니다. 오류나 경고에는 키도, 제공자 자체의 메시지도 들어가지 않습니다.
 
 | 상태 | 코드 | 발생 조건 |
 |---|---|---|
 | 200 | | 저장됨 |
 | 400 | `invalid_value` | 저장할 수 없는 문자가 값에 있음. `field`가 해당 필드를 알려 줍니다 |
 | 400 | `alpaca_pair_required` | Alpaca 키 ID와 시크릿 중 하나만 보냄(또는 하나만 삭제함) |
+| 200 | (`warning: "llm_rate_limited"`) | 저장됨. 키는 동작하지만 지금은 요청 한도에 걸려 있음 |
 | 400 | `alpaca_invalid` | Alpaca가 키를 거부함. 아무것도 저장하지 않았습니다 |
+| 400 | `alpaca_not_paper` | Alpaca 키가 실계좌(모의투자가 아닌 계좌)의 것임. 아무것도 저장하지 않았습니다 |
 | 502 | `alpaca_unreachable` | 키를 확인하려 했지만 Alpaca에 닿지 못함. 아무것도 저장하지 않았습니다 |
+| 400 | `llm_key_required` | 고른 제공자에 API 키가 없게 됨 |
+| 400 | `llm_model_required` | 모델 이름이 없게 됨 |
+| 400 | `llm_invalid_key` | 제공자가 키를 거부함(401이나 403, 잘못된 키를 뜻하는 400, 또는 크레디트 없음). 아무것도 저장하지 않았습니다 |
+| 400 | `llm_model_unavailable` | 모델을 모르거나 이 키로 쓸 수 없음. 아무것도 저장하지 않았습니다 |
+| 502 | `llm_unreachable` | 확인하려 했지만 제공자에 닿지 못함(네트워크 오류나 5xx). 아무것도 저장하지 않았습니다 |
 | 500 | `settings_not_saved` | 설정을 기록하지 못함 |
-| 422 | `invalid_request` | 알 수 없는 필드이거나 타입이 틀림 |
+| 422 | `invalid_request` | 알 수 없는 필드이거나 타입이 틀림(예: `llm_provider: "stub"`) |
+
+### 모델 목록
+
+**`POST /api/llm/models`**는 모델 선택 목록을 위해, API 키로 쓸 수 있는 채팅 모델을 나열합니다. 아무것도 바꾸지 않습니다.
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `provider` | `gemini`, `openai`, `anthropic` | 필수 |
+| `api_key` | 문자열, 최대 256자, 선택 | 시험해 볼 키. 저장하는 키와 같은 값 규칙을 따릅니다. 없으면 그 제공자에 저장된 키를 씁니다. 저장하지도, 되돌려 보내지도, 로그에 남기지도 않으며, 본문으로만 받습니다(`GET` 형태는 없습니다) |
+
+목록은 제공자 자체의 모델 목록 엔드포인트에서 옵니다. 채팅이 가능한 텍스트 모델만 남기며(임베딩, 이미지, 오디오, TTS, live, 모더레이션 등의 모델은 ID로 걸러 냅니다), 최신순으로 최대 60개입니다. `suggested`는 사용 중인 모델이 목록에 있으면 그 모델이고, 없으면 Gemini는 기본 모델(`gemini-3.8-flash`), Anthropic은 가장 새로운 Opus, 그다음 가장 새로운 Sonnet, 그 밖에는 목록의 첫 모델이며, 목록이 비어 있으면 `null`입니다. `label`은 제공자가 붙인 표시 이름이고, 없으면 ID입니다.
+
+```json
+{"provider": "anthropic", "models": [{"id": "claude-opus-5-5", "label": "Claude Opus 5.5"}, {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"}], "suggested": "claude-opus-5-5"}
+```
+
+| 상태 | 코드 | 발생 조건 |
+|---|---|---|
+| 200 | | 목록 |
+| 400 | `llm_key_required` | `api_key`를 보내지 않았고, 그 제공자의 저장된 키도 없음 |
+| 400 | `invalid_value` | `api_key`에 쓸 수 없는 문자가 있음(`field`는 `api_key`) |
+| 400 | `llm_invalid_key` | 제공자가 키를 거부함 |
+| 429 | `llm_rate_limited` | 지금은 제공자가 이 키의 요청을 제한하고 있음. 잠시 뒤 다시 시도하세요 |
+| 502 | `llm_unreachable` | 제공자에 닿지 못함 |
+| 422 | `invalid_request` | 알 수 없는 제공자나 필드, 또는 틀린 타입 |
+
+모든 `/api` `POST`와 같은 접근 규칙이 적용됩니다. 루프백 클라이언트, 허용된 Host, `X-FinAgent-Client: 1`, 일치하는 `Origin`이 필요합니다.
 
 ## 킬 스위치
 
@@ -980,9 +1078,9 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {"id": 9, "session_id": "S3F7QKX2M4ABC", "kind": "proposal", "created_at": "2026-10-02T14:31:24.870032+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "source": "chat", "ticket_id": "T4HQ7ZB2NAK", "hash": "<64 hex>", "status": "proposed", "mandate_version": 2, "quote_as_of": "2026-10-02T14:31:24Z", "created_at": "2026-10-02T14:31:24.851Z", "expires_at": "2026-10-02T14:36:24.851Z", "evidence_ids": ["E1", "E2"], "legs": [{"symbol": "VOO", "side": "buy", "qty": "3", "notional": null, "type": "limit", "time_in_force": "day", "limit_price": "612.40"}], "decisions": [{"index": 0, "symbol": "VOO", "side": "buy", "verdict": "accept", "reasons": [], "est_price": "612.40", "est_cost_usd": "1837.20"}], "thesis_sha256": "<64 hex>", "thesis_len": 34, "risks_sha256": "<64 hex>", "risks_len": 58, "invalidation_sha256": "<64 hex>", "invalidation_len": 41}}
 ```
 
-`tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 인자를 정규화한 JSON(키 정렬, 공백 없는 구분자. 인자가 객체가 아니면 `null`)의 SHA-256이고, `result_sha256`은 출력 텍스트를 UTF-8로 인코딩한 값의 SHA-256입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`와 `"supersedes": "<이전 티켓 ID>"`가 들어갑니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn` 중 하나)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
+`tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)`(인자가 객체가 아니면 `null`)의 UTF-8 바이트에 대한 SHA-256이고, `result_sha256`은 출력 텍스트의 UTF-8 바이트에 대한 SHA-256이며 도구가 텍스트를 돌려주지 않았으면 `null`입니다. `latency_ms`는 도구 자체의 소요 시간입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구에서 빠져나온 그 밖의 예외에는 `"raised": "<예외 유형>"`이 붙습니다. 턴의 예산을 다 쓴 뒤 에이전트가 건너뛴 도구 호출은 실행되지 않으므로 원장에 남지 않습니다. 또한 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`와 `"supersedes": "<이전 티켓 ID>"`가 들어갑니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `broker_error`, `upstream_error`, `unexpected_error` 중 하나. 취소된 경우를 빼고 티켓 없이 끝난 `propose_trades` 호출마다 한 항목)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
 
-페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다. 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
+페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다(`extra=`로 넘긴 값과 로거 이름은 대상이 아니고, 100,000자를 넘는 텍스트는 잘리며, `max_tokens: 9000` 같은 토큰 수는 그대로 읽힙니다). 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
 
 ## 예시: 메시지에서 티켓 확인까지
 

@@ -140,7 +140,7 @@ A tool whose dependency is not configured is left out of the tool list (it is no
 | Alpaca paper keys (broker and market data) | `get_account`, `get_positions`, `list_orders`, `get_market_status`, `lookup_asset`, `get_quotes`, `price_metrics`, `get_movers`, `search_news`, `propose_trades` |
 | `SEC_USER_AGENT` | `sec_filings`, `sec_financial_facts`, `sec_filing_passages` |
 | `TAVILY_API_KEY` | `web_search` |
-| Gemini as the LLM provider with a key | `grounded_web_answer` |
+| A Gemini key (`GEMINI_API_KEY`), whichever provider runs the chat | `grounded_web_answer` |
 | Nothing extra | `fetch_source` (Jina Reader works without a key), `screen_us_etfs`, `ask_product_database`, `search_products`, `graph_neighbors`, `draft_mandate` |
 
 ### Every result becomes a source record
@@ -185,7 +185,7 @@ sequenceDiagram
     UI->>API: session_id and message
     API->>A: run_turn, events go to an SSE queue
     A-->>UI: start
-    loop Until the model answers, at most 8 rounds and 150 s
+    loop Until the model answers, within the turn's limits (deep 12 rounds and 300 s, shallow 4 and 150 s)
         A->>L: Conversation so far
         L-->>A: Tool calls, or the final text
         A-->>UI: tool-input-available
@@ -218,7 +218,7 @@ What happens in a turn, in order:
 
 1. **Request checks.** The route answers 404 for an unknown session before any stream starts. The agent then refuses an empty message, a message over 8,000 characters, or a second message while a reply is still running in the same session. A refusal is one `error` event and one `finish`.
 2. **Conversation.** The user message is saved. The system prompt (versioned, with nothing per-turn in it) is followed by the user message plus three lines the app adds: `Today: <UTC date>`, `Answer language: English` or `Korean` (detected from the message), and `Active mandate: <JSON or none>`. A conversation is cached per session in memory. When it is missing, or after 6 turns or 60,000 characters of tool output, it is rebuilt from the last 24 stored user and assistant messages. Tool calls never reach the stored history.
-3. **Tool loop.** Each round the model either answers or calls tools. The calls of one round run in order, each result is sent back to the model, and the UI gets `tool-input-available`, `tool-output-available` and `source-url` events as they happen. The loop stops at `chat_max_rounds` (8) or `chat_time_budget_sec` (150 s). A tool still running when time is up is cancelled and its call gets an error result. The model is then asked once to answer without tools, and if it still produces no text, a fallback message lists the tools that ran.
+3. **Tool loop.** Each round the model either answers or calls tools. The calls of one round run in order, each result is sent back to the model, and the UI gets `tool-input-available`, `tool-output-available` and `source-url` events as they happen. The loop stops at the turn's round or time limit, which depends on the research depth (see [Model providers and research depth](#model-providers-and-research-depth)): 12 rounds and 300 s in deep mode, 4 rounds and 150 s in shallow mode. A tool still running when time is up is cancelled and its call gets an error result; the remaining calls of that round are not run (they get an error result too, and are not ledgered). The model is then asked once to answer without tools; a tool call in that reply is never run or ledgered. If it still produces no text, a fallback message lists the tools that ran. In shallow mode the fallback, or a note under the model's answer, says that the reply stopped at the shallow-mode limit and that a paid API key allows deeper research.
 4. **`propose_trades`.** The toolbox runs these checks before anything is stored:
     - 1 to 10 legs. Each leg is parsed into an `OrderLeg`: exactly one of `qty` or `notional`, a limit price exactly when the order is a limit order, a dollar (notional) order only as a market `day` order. Money from the model becomes `Decimal` (a float is read through its shortest text form, booleans and `null` are refused, the magnitude must be below 1e15 and at most 12 decimals).
     - `thesis`, `risks` and `invalidation` are required.
@@ -234,6 +234,25 @@ What happens in a turn, in order:
 
     Any other `proposed` ticket of the session becomes `superseded` in the same step. The `data-trade-proposal` event carries the ticket.
 7. **Answer.** The model writes the strategy with `[E#]` citations and tells the user to review the ticket. The agent runs the numeric grounding check (section 8), sends `data-grounding-flags` if anything is unsupported, sends the text as `text-delta` chunks of about 200 characters (the whole text is composed first, so this is chunked delivery, not token streaming), saves the assistant message and a per-turn summary, and sends `finish`.
+
+### Model providers and research depth
+
+The chat agent and the `/answer` pipeline use one model client. `AppState.load` builds it from `LLM_PROVIDER` (`gemini`, `openai` or `anthropic`; `stub` in tests), `LLM_MODEL` and `LLM_EFFORT`, and wraps it in an `LLMHandle`: the QA orchestrator, the chat runtime and the one `ChatAgent` all hold that handle. The provider, the model, the effort and the three provider keys can be changed in Settings (`PUT /api/settings`):
+
+1. A configuration that cannot work is refused: a provider without a key, or no model name.
+2. If the provider, the model or that provider's key changes, one minimal model call checks the candidate configuration before anything is saved (`llm_admin.validate_llm`: a one-word prompt, an output cap of 16 tokens, no tools, no retries). A rejected key or an unavailable model is refused, an unreachable provider saves nothing, and a rate-limited key is saved with a warning (the key works).
+3. The new client is built from a copy of the settings, `.env` is written, and only then is the client swapped into the handle, so `/answer` and the chat switch together. The agent drops its cached provider conversations (message formats differ between providers) and rebuilds them from the stored text history. A reply already running finishes on the client it started with, and the old client is closed after the 120 s grace delay.
+
+`POST /api/llm/models` asks the provider's own list endpoint which models a key can use, keeps the chat-capable text models (newest first, at most 60) and suggests one, for the model picker; no model catalogue is hard-coded. Gemini search grounding (`grounded_web_answer`) is built whenever a Gemini key is saved, whichever provider runs the chat. Every provider key, current or replaced, is in the known-secret lists of the ledger, the log scrubber and the toolbox. An OpenAI-compatible server other than OpenAI (OpenRouter and similar) can be set with `OPENAI_BASE_URL` in `.env`; the UI does not expose it. The OpenAI client sends the output cap as `max_completion_tokens` (OpenAI's reasoning models reject `max_tokens`), and `max_tokens` to Gemini and to custom servers; told that the field is not supported, a client switches to the other one once.
+
+**Research depth.** A free-tier Gemini key allows about 5 model calls a minute and 20 a day, and one research-then-propose turn can use them up (both live evaluation scenarios did on 2026-10-02). So a turn runs in one of two modes, resolved in one place, `config.chat_limits(settings)`:
+
+| Mode | When | Rounds per turn | Seconds per turn |
+|---|---|---|---|
+| shallow | `LLM_PROVIDER=gemini` and `GEMINI_PAID` is not `true` | `shallow_max_rounds` (4) | `shallow_time_budget_sec` (150) |
+| deep | OpenAI, Anthropic, Gemini with `GEMINI_PAID=true`, and the test stub | `chat_max_rounds` (12) | `chat_time_budget_sec` (300) |
+
+A free and a paid Gemini key cannot be told apart from outside, so `GEMINI_PAID` is the user's statement. The agent reads the limits once, when a turn starts. The system prompt's Budget section states the mode's round count; in shallow mode it also tells the model to prioritise (one context round, one research round, then the proposal) and to say when deeper research was skipped. Every `finish` event carries `mode`, `max_rounds`, `time_budget_sec` and `budget_exhausted`. When a shallow turn ends on its budget, the user is told why: the fallback names the shallow-mode limit, or a one-line note follows the answer the model wrote when it was asked to stop, and both say that a paid API key in Settings allows deeper research (in English or Korean, like the answer). `GET /api/settings` reports the mode and its limits.
 
 ## 4. Data flow: a confirmation
 
@@ -440,15 +459,15 @@ Documented limits:
 
 | Control | What it does |
 |---|---|
-| **Paper only, in code** | The trading host is the constant `https://paper-api.alpaca.markets`. No setting, environment variable or argument changes it. `AlpacaPaper` checks the full origin (scheme, host, port) of any injected HTTP client, re-checks the origin of every outgoing request before sending it, never follows redirects, and refuses a client with a custom auth handler or request/response hooks. The API keys only authenticate against that host. |
+| **Paper only, in code** | The trading host is the constant `https://paper-api.alpaca.markets`. No setting, environment variable or argument changes it. `AlpacaPaper` checks the full origin (scheme, host, port) of any injected HTTP client, re-checks the origin of every outgoing request before sending it, never follows redirects, and refuses a client with a custom auth handler or request/response hooks. The API keys only authenticate against that host. In depth, the runtime also reads the account's own paper flag (`AccountSnapshot.paper`, from the account number's `PA` prefix) at startup, after a key change and when keys are saved. The keys of a live account (`paper: false`) are refused with `alpaca_not_paper`; if they are already configured, the app runs without a broker, executor or market data (status `not_paper`), exactly as if the keys were missing. When Alpaca's response does not say (`null`), the app works as before. |
 | **No order tool for the LLM** | Tool names are checked at import against `submit`, `place`, `execute`, `order_now`, `buy_now`, `sell_now` and `cancel`; a match stops the app from starting. `propose_trades` only creates a ticket. No tool saves a mandate (`draft_mandate` only drafts). The one path to `broker.submit_order` is `POST /api/tickets/{id}/confirm`. |
 | **One proposal per turn** | The slot is keyed by session and turn, shared across settings rebuilds. A second `propose_trades` in the same turn is refused. |
 | **Ticket hash** | SHA-256 over the executable legs, each decision's verdict, leg, reason codes and severities (not the message text) and estimates, and the ticket id. Confirm needs the matching hash (constant-time comparison), so the human confirms exactly what was shown. |
 | **Ticket lifetime** | 300 s (`ticket_ttl_sec`). Confirm re-quotes and re-runs the risk rules against the current mandate, and re-issues the ticket if anything material changed. |
 | **Kill switch** | `POST /api/kill-switch` sets `trading_enabled` to false in memory at once, before waiting for the lock, so an in-flight confirm stops before its next leg. Optionally it suspends trading at the broker (`suspend_trade`) and cancels open orders, and it writes `TRADING_ENABLED=false` to `.env`. While it is off, confirm answers 423. Research and proposals still work. The switch can only be turned back on with `PUT /api/settings`. |
 | **Local-only API** | `/api/*` answers only loopback clients (the socket peer address; uvicorn runs with `proxy_headers=False` so `X-Forwarded-For` cannot fake it), only for Host `127.0.0.1`, `localhost` or `[::1]` (a defense against DNS rebinding), and requires `X-FinAgent-Client: 1` on POST, PUT, PATCH and DELETE. An `Origin` header, when present, must match the Host. No CORS middleware is installed, WebSocket connections under `/api` are refused, and responses carry anti-framing headers so a hostile page cannot frame the app and trick the user into pressing Confirm. `main()` binds `127.0.0.1` unless `FINAGENT_HOST` says otherwise. The `api_allow_remote` setting lifts only the loopback rule and is unsafe without your own authentication. |
-| **Secrets redaction** | The ledger redacts each payload before it is written: any dict key that looks secret-like at any depth, header-shaped values, free-text patterns (`api_key=...`, `Authorization: ...`, `Bearer ...`), and the exact values of the configured keys (Alpaca, Gemini, Tavily, Anthropic, OpenAI), including keys that were replaced earlier in the same process. Executor messages shown to the user pass through the same scrub, broker error text shown to the model is scrubbed and wrapped, and the HTTP client's logs hide credential headers and key-bearing query strings. The chat agent, the toolbox and the API routes log ids, counts and exception types, never message text or exception text. The executor logs short summaries that have passed the same scrub, and a few of its unexpected-failure paths log a traceback. A traceback prints exception messages, so every log record of the `finagent` loggers is scrubbed when it is created (`logsafe`, installed process-wide at startup): the message with its arguments, the traceback text including chained causes, and the stack info lose the exact key values (current and replaced) and credential shapes (`APCA-API-KEY-ID` and `APCA-API-SECRET-KEY` values, `Authorization: ...`, `Bearer ...`, `key=...` query parameters), whichever log handlers are configured. Records of other libraries' loggers are left as they are. The settings endpoints return status words (`set`, `missing`, `connected`, ...), never a value, and validation errors never echo the input. |
-| **`.env` writer** | `PUT /api/settings` and the kill switch change `.env` through `update_env_file`: values must be printable ASCII and may not contain `"`, `\` or `${`; the first line that sets a name is replaced in place and duplicates are dropped; every other line, the line-ending style and a BOM are kept; the write is atomic (temp file in the same directory, fsync, `os.replace`) and keeps the file's permission bits; a symlinked `.env` is updated through the link. Alpaca keys must be set as a pair and are checked live against the paper host before anything is saved. |
+| **Secrets redaction** | The ledger redacts each payload before it is written: any dict key that looks secret-like at any depth, header-shaped values, free-text patterns (`api_key=...`, `Authorization: ...`, `Bearer ...`), and the exact values of the configured keys (Alpaca, Gemini, Tavily, Anthropic, OpenAI), including keys that were replaced earlier in the same process. Executor messages shown to the user pass through the same scrub, broker error text shown to the model is scrubbed and wrapped, and the HTTP client's logs hide credential headers and key-bearing query strings. The chat agent, the toolbox and the API routes log ids, counts and exception types, never message text or exception text. The executor logs short summaries that have passed the same scrub, and a few of its unexpected-failure paths log a traceback. A traceback prints exception messages, so every log record of the `finagent` loggers is scrubbed when it is created (`logsafe`, installed process-wide at startup): the message with its arguments, the traceback text including chained causes, and the stack info lose the exact key values (current and replaced) and credential shapes (`APCA-API-KEY-ID` and `APCA-API-SECRET-KEY` values, `Authorization: ...`, `Bearer ...`, `key=...` query parameters), whichever log handlers are configured. Records of other libraries' loggers are left as they are. In logs only, a pair whose name ends in `tokens` or `token_count` (`max_tokens: 9000`) is a count and stays readable (a known key value in it is still removed). Limits of the log scrub: values passed with `extra=` and logger names are not scrubbed, and a text over 100,000 characters is cut. Key values shorter than 8 characters are ignored, by the ledger, the logs and the toolbox alike. The settings endpoints return status words (`set`, `missing`, `connected`, ...), never a value, and validation errors never echo the input. |
+| **`.env` writer** | `PUT /api/settings` and the kill switch change `.env` through `update_env_file`: values must be printable ASCII and may not contain `"`, `\` or `${`; the first line that sets a name is replaced in place and duplicates are dropped; every other line, the line-ending style and a BOM are kept; the write is atomic (temp file in the same directory, fsync, `os.replace`) and keeps the file's permission bits; a symlinked `.env` is updated through the link. Alpaca keys must be set as a pair and are checked live against the paper host before anything is saved. A change of the model provider, the model or the key in use is checked with one minimal model call before anything is saved (section 3). |
 | **`.env` wins** | Settings are read with `.env` ahead of the process environment, so what the app saved is what the next start reads. A value that only the environment provides is listed (by name) in `env_fallbacks`. |
 | **Money is `Decimal`** | Prices, quantities, costs and mandate amounts are `Decimal` end to end, and JSON carries them as strings. |
 
@@ -459,7 +478,7 @@ The app database is SQLite (`data/store/app.db` by default, setting `app_db_path
 | Table | Holds | Written by |
 |---|---|---|
 | `sessions` | Chat sessions: id (`S` plus 12 base32 characters), title, language, creation time | `SessionStore` |
-| `messages` | The conversation: role (`user`, `assistant` or `event`), content and a JSON `meta`. Assistant rows carry usage, tools, grounding flags and prompt version. `event` rows are a compact per-turn summary (tool names, call ids, error flags, ticket id), not tool output | `ChatAgent` through `SessionStore` |
+| `messages` | The conversation: role (`user`, `assistant` or `event`), content and a JSON `meta`. Assistant rows carry usage, tools, grounding flags, prompt version, the research mode and whether the turn ended on its budget. `event` rows are a compact per-turn summary (tool names, call ids, error flags, ticket id), not tool output | `ChatAgent` through `SessionStore` |
 | `mandates` | One row per session: version, the mandate as JSON, update time. The version is always the previous one plus 1 | `PUT /api/mandate/{session_id}` |
 | `tickets` | The full ticket as JSON in `body`, with `status`, `created_at` and `expires_at` duplicated into columns so SQL can filter on them. Every write is a compare-and-set on status and body | `TicketStore` |
 | `orders` | One row per submitted or uncertain leg: ticket id, `client_order_id` (unique), broker order id, the latest order snapshot as JSON, times. An uncertain leg has no broker id and no snapshot. Rows are also what `orders_per_day` counts | `Executor` |
@@ -469,9 +488,9 @@ The app database is SQLite (`data/store/app.db` by default, setting `app_db_path
 
 Ledger kinds written today: `mandate_saved`; `tool_call` for every tool call the agent makes; `proposal` (the ticket as shown) or `proposal_rejected` for a proposal; for a confirmation `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status` and `result`; `reject`; `refresh`; `recover` at startup; and `kill_switch`, filed under the session id `system`, which has no export route.
 
-- **`tool_call`** holds the turn id, the tool name (`unknown_tool` for a name that is not a tool), the SHA-256 of the arguments (as canonical JSON) and of the output text, the error flag, the latency in milliseconds and the ids of the evidence the call returned. Arguments and results themselves are not stored, because they can contain untrusted text and personal data. A cancelled call is recorded with `cancelled: true` and no result hash.
+- **`tool_call`** holds the turn id, the tool name (`unknown_tool` for a name that is not a tool), `args_sha256`, `result_sha256`, the error flag, `latency_ms` and the ids of the evidence the call returned. `args_sha256` is `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)` (with `null` for arguments that are not an object), then SHA-256 of the UTF-8 bytes; `result_sha256` is the SHA-256 of the output text's UTF-8 bytes, or `null` when the tool returned something that is not text. `latency_ms` is the time the tool itself took, read as soon as it returned. Arguments and results themselves are not stored, because they can contain untrusted text and personal data. A cancelled call is recorded with `cancelled: true` and no result hash, any other exception that escapes the tool with `raised: "<exception type>"`. Tool calls the agent skips once the turn's budget is spent (the rest of a round when time is up, and any call in the reply to the final no-tools request) are not run, so they are not ledgered.
 - **`proposal`** holds the turn id, the ticket id, hash, status and mandate version, the quote, creation and expiry times, the cited evidence ids, the executable legs (money as strings), and each decision's verdict, reason codes and estimates. The thesis, risks and invalidation texts are stored as a SHA-256 and a length only. A ticket re-issued by a refresh or a requote gets a `proposal` entry too (`source: "requote"`, with the id of the ticket it supersedes).
-- **`proposal_rejected`** is written when `propose_trades` creates no ticket: every leg rejected, a ticket that failed validation, invalid arguments, or a second proposal in the same turn. It carries a reason code (and, for the first two, the decisions' reason codes) but no ticket id.
+- **`proposal_rejected`** is written once for every `propose_trades` call that ends without a ticket, whatever the reason, with a reason code and no ticket id: `all_legs_rejected` and `ticket_validation_failed` (both with the mandate version, the cited evidence ids and each decision's verdict and reason codes), `invalid_arguments` (the proposal's own checks), `one_proposal_per_turn`, `dispatch_error` (refused before the tool ran: unknown or missing arguments, arguments that are not an object, or no broker), `broker_error`, `upstream_error` (a data request failed) and `unexpected_error`. A cancelled call leaves only its cancelled `tool_call`.
 
 A ledger write that fails is logged by exception type and never breaks the tool call. `Ledger` has no update or delete method, but the table has no database-level protection.
 
@@ -482,13 +501,14 @@ Not in the database: the keys and the trading flag (`.env`), and some in-memory 
 - **Paper fills are optimistic.** Alpaca's paper account simulates fills; per the design notes it does not model slippage, fees or dividends. Results look better than a real account would.
 - **Free market data.** Quotes come from the free IEX feed (`feed=iex`), one exchange, which can differ from the consolidated prices that paper fills reference. Market-buy estimates carry a 1% buffer for this. Daily bars for `price_metrics` are requested with an end time 16 minutes in the past, which lets them use the consolidated (SIP) feed.
 - **No performance claims.** There is no backtest and no evaluation of returns. The output is research and suggestions, not predictions, and not investment advice.
-- **Free-tier LLM quota.** Free Gemini keys hit 429 and 503 often. A failed turn ends with a generic error message and a `finish` event. Search grounding on Gemini 3.x needs a key with billing enabled.
+- **Free-tier LLM quota.** Free Gemini keys hit 429 and 503 often, so with such a key the agent runs in shallow mode (4 rounds and 150 s per turn), and a research-then-propose turn may skip deeper research. A failed turn ends with a generic error message and a `finish` event. Search grounding on Gemini 3.x needs a key with billing enabled. `GEMINI_PAID` is the user's statement, not a check: a free key declared paid gets deep limits it cannot sustain.
 - **The grounding check is a heuristic.** It is advisory and has the limits in section 8.
 - **Evidence checks are structural.** The code checks that cited ids exist and that a buy cites a research source. It cannot tell whether a source supports the thesis, and source tiers come from a short domain list.
 - **Prompt injection is contained, not eliminated.** Untrusted text is sanitized, wrapped and labelled, and the model cannot place orders, save a mandate or change settings. Injected text can still influence what the model searches, fetches and writes, which is why the human reads the ticket.
 - **A single-user local tool.** There are no accounts. All sessions trade the same Alpaca paper account, so the daily order count is shared. `ChatRuntime.lock` is global: a confirm that polls for up to about 10 s delays other ticket actions and settings changes. "Today" for the order limit and for ticket expiry uses UTC dates, not the US trading day.
 - **Narrow scope.** US equities and ETFs only, long only, market and limit orders (a dollar order is a market `day` order). No options, crypto, short selling, margin, brackets or stops.
 - **Short memory.** When a conversation is rebuilt it holds the last 24 stored messages, and tool outputs of earlier turns are not replayed.
+- **Switching models.** A switch applies from the next turn: a reply already running finishes on the old model. Cached conversations are rebuilt from the stored text history, as after a restart. The `openai` vector backend (`VECTOR_BACKEND=openai`) keeps the embedding key it was started with.
 - **Restart behavior.** A value that only the process environment provides comes back after a restart even if you cleared it in the app (`env_fallbacks` lists these names).
 
 ---
@@ -637,7 +657,7 @@ flowchart LR
 | Alpaca 모의투자 키(브로커와 시세) | `get_account`, `get_positions`, `list_orders`, `get_market_status`, `lookup_asset`, `get_quotes`, `price_metrics`, `get_movers`, `search_news`, `propose_trades` |
 | `SEC_USER_AGENT` | `sec_filings`, `sec_financial_facts`, `sec_filing_passages` |
 | `TAVILY_API_KEY` | `web_search` |
-| LLM 제공자가 Gemini이고 키가 있을 것 | `grounded_web_answer` |
+| Gemini 키(`GEMINI_API_KEY`). 채팅을 어느 제공자가 맡든 상관없음 | `grounded_web_answer` |
 | 추가로 필요한 것 없음 | `fetch_source`(Jina Reader는 키 없이 동작), `screen_us_etfs`, `ask_product_database`, `search_products`, `graph_neighbors`, `draft_mandate` |
 
 ### 모든 결과는 출처 레코드가 된다
@@ -682,7 +702,7 @@ sequenceDiagram
     UI->>API: session_id와 message
     API->>A: run_turn, 이벤트는 SSE 큐로 전달
     A-->>UI: start
-    loop 모델이 답할 때까지, 최대 8라운드와 150초
+    loop 모델이 답할 때까지, 턴 한도 안에서(심층 12라운드·300초, 얕은 4라운드·150초)
         A->>L: 지금까지의 대화
         L-->>A: 도구 호출 또는 최종 텍스트
         A-->>UI: tool-input-available
@@ -715,7 +735,7 @@ sequenceDiagram
 
 1. **요청 확인.** 없는 세션이면 스트림이 시작되기 전에 라우트가 404로 답합니다. 이어서 에이전트가 빈 메시지, 8,000자를 넘는 메시지, 같은 세션에서 답변이 진행 중일 때 들어온 두 번째 메시지를 거절합니다. 거절은 `error` 이벤트 하나와 `finish` 하나로 끝납니다.
 2. **대화 구성.** 사용자 메시지를 저장합니다. 시스템 프롬프트(버전이 있고 턴마다 달라지는 내용은 없음) 뒤에 사용자 메시지와, 앱이 붙이는 세 줄이 따라옵니다. `Today: <UTC 날짜>`, `Answer language: English` 또는 `Korean`(메시지에서 감지), `Active mandate: <JSON 또는 none>`입니다. 대화는 세션별로 메모리에 캐시합니다. 캐시가 없거나 6턴 또는 도구 출력 6만 자를 넘으면, 저장된 사용자·어시스턴트 메시지 최근 24개로 다시 만듭니다. 도구 호출은 저장 기록에 들어가지 않습니다.
-3. **도구 루프.** 라운드마다 모델이 답하거나 도구를 호출합니다. 한 라운드의 호출은 순서대로 실행하고, 각 결과를 모델에게 돌려주며, UI에는 `tool-input-available`, `tool-output-available`, `source-url` 이벤트가 그때그때 갑니다. 루프는 `chat_max_rounds`(8) 또는 `chat_time_budget_sec`(150초)에서 멈춥니다. 시간이 다 됐을 때 실행 중인 도구는 취소되고 그 호출에는 오류 결과가 붙습니다. 이후 모델에게 도구 없이 답하라고 한 번 요청하고, 그래도 텍스트가 없으면 실행된 도구를 나열한 대체 메시지를 보냅니다.
+3. **도구 루프.** 라운드마다 모델이 답하거나 도구를 호출합니다. 한 라운드의 호출은 순서대로 실행하고, 각 결과를 모델에게 돌려주며, UI에는 `tool-input-available`, `tool-output-available`, `source-url` 이벤트가 그때그때 갑니다. 루프는 턴의 라운드 한도나 시간 한도에서 멈추며, 이 한도는 리서치 깊이에 따라 다릅니다([모델 제공자와 리서치 깊이](#모델-제공자와-리서치-깊이) 참고). 심층 모드는 12라운드와 300초, 얕은 모드는 4라운드와 150초입니다. 시간이 다 됐을 때 실행 중인 도구는 취소되고 그 호출에는 오류 결과가 붙습니다. 같은 라운드의 나머지 호출은 실행하지 않습니다(역시 오류 결과가 붙고, 원장에도 남지 않습니다). 이후 모델에게 도구 없이 답하라고 한 번 요청하며, 그 답에 들어 있는 도구 호출은 실행하지도 원장에 남기지도 않습니다. 그래도 텍스트가 없으면 실행된 도구를 나열한 대체 메시지를 보냅니다. 얕은 모드에서는 대체 메시지나 모델이 쓴 답 아래의 안내 한 줄이, 얕은 모드 한도에서 답변이 멈췄으며 유료 API 키를 등록하면 더 깊이 리서치할 수 있다고 알려 줍니다.
 4. **`propose_trades`.** 도구 상자는 무엇이든 저장하기 전에 다음을 확인합니다.
     - 레그 1~10개. 각 레그는 `OrderLeg`로 파싱됩니다. `qty`와 `notional` 중 정확히 하나, 지정가 주문일 때만 지정가, 금액(notional) 주문은 시장가 `day` 주문일 때만 허용합니다. 모델이 준 금액은 `Decimal`이 됩니다(float는 가장 짧은 문자열 표현으로 읽고, 불리언과 `null`은 거부하며, 절댓값은 1e15 미만, 소수 12자리 이하여야 합니다).
     - `thesis`, `risks`, `invalidation`은 필수입니다.
@@ -731,6 +751,25 @@ sequenceDiagram
 
     같은 세션의 다른 `proposed` 티켓은 같은 단계에서 `superseded`가 됩니다. `data-trade-proposal` 이벤트에 티켓이 담겨 갑니다.
 7. **답변.** 모델이 `[E#]` 인용을 붙여 전략을 쓰고, 사용자에게 티켓을 검토하라고 안내합니다. 에이전트는 숫자 근거 확인(8절)을 실행하고, 뒷받침되지 않는 숫자가 있으면 `data-grounding-flags`를 보내고, 약 200자씩 `text-delta`로 텍스트를 보냅니다(전체 텍스트를 먼저 만든 뒤 나눠 보내므로 토큰 단위 스트리밍이 아닙니다). 이어서 어시스턴트 메시지와 턴 요약을 저장하고 `finish`를 보냅니다.
+
+### 모델 제공자와 리서치 깊이
+
+채팅 에이전트와 `/answer` 파이프라인은 모델 클라이언트 하나를 같이 씁니다. `AppState.load`가 `LLM_PROVIDER`(`gemini`, `openai`, `anthropic`. 테스트에서는 `stub`), `LLM_MODEL`, `LLM_EFFORT`로 클라이언트를 만들고 `LLMHandle`로 감쌉니다. QA 오케스트레이터, 채팅 런타임, 하나뿐인 `ChatAgent`가 모두 이 핸들을 쥡니다. 제공자, 모델, 추론 강도, 세 제공자의 키는 설정(`PUT /api/settings`)에서 바꿀 수 있습니다.
+
+1. 동작할 수 없는 구성은 거절합니다. 키가 없는 제공자, 이름이 없는 모델이 그렇습니다.
+2. 제공자, 모델, 또는 그 제공자의 키가 바뀌면 무엇이든 저장하기 전에 최소한의 모델 호출 한 번으로 후보 구성을 확인합니다(`llm_admin.validate_llm`: 한 단어짜리 프롬프트, 출력 상한 16토큰, 도구 없음, 재시도 없음). 제공자가 거부한 키나 쓸 수 없는 모델은 거절하고, 제공자에 닿지 못하면 아무것도 저장하지 않으며, 요청 한도에 걸린(429) 키는 동작하는 키이므로 경고와 함께 저장합니다.
+3. 설정의 사본으로 새 클라이언트를 만들고 `.env`를 기록한 다음에야 핸들 안의 클라이언트를 바꾸므로, `/answer`와 채팅이 함께 전환됩니다. 에이전트는 캐시한 제공자 대화를 버리고(제공자마다 메시지 형식이 다릅니다) 저장된 텍스트 기록으로 다시 만듭니다. 이미 진행 중인 답변은 시작할 때의 클라이언트로 끝나며, 이전 클라이언트는 120초 유예 뒤에 닫힙니다.
+
+`POST /api/llm/models`는 모델 선택 목록을 위해 제공자 자체의 목록 엔드포인트에 그 키로 쓸 수 있는 모델을 묻고, 채팅이 가능한 텍스트 모델만 남겨(최신순, 최대 60개) 하나를 추천합니다. 모델 목록을 코드에 박아 두지 않습니다. Gemini 검색 그라운딩(`grounded_web_answer`)은 어느 제공자가 채팅을 맡든 Gemini 키가 저장돼 있으면 만들어집니다. 현재 키든 교체된 키든 모든 제공자 키가 원장, 로그 가림, 도구 상자의 알려진 비밀값 목록에 들어갑니다. OpenAI가 아닌 OpenAI 호환 서버(OpenRouter 등)는 `.env`의 `OPENAI_BASE_URL`로 지정할 수 있으며, UI에는 노출하지 않습니다. OpenAI 클라이언트는 출력 상한을 `max_completion_tokens`로 보내고(OpenAI의 추론 모델은 `max_tokens`를 거부합니다) Gemini와 사용자 지정 서버에는 `max_tokens`로 보내며, 그 필드를 지원하지 않는다는 답을 받으면 한 번 다른 필드로 바꿉니다.
+
+**리서치 깊이.** 무료 등급 Gemini 키는 모델 호출을 분당 5회, 하루 20회 정도만 허용하므로, 리서치한 뒤 제안하는 턴 하나가 이를 다 써 버릴 수 있습니다(2026-10-02의 실제 평가 시나리오 두 개가 모두 그랬습니다). 그래서 턴은 두 모드 중 하나로 실행되며, 모드와 한도는 한 곳 `config.chat_limits(settings)`에서만 정해집니다.
+
+| 모드 | 조건 | 턴당 라운드 | 턴당 시간(초) |
+|---|---|---|---|
+| 얕은 리서치 모드(shallow) | `LLM_PROVIDER=gemini`이고 `GEMINI_PAID`가 `true`가 아님 | `shallow_max_rounds`(4) | `shallow_time_budget_sec`(150) |
+| 심층 리서치 모드(deep) | OpenAI, Anthropic, `GEMINI_PAID=true`인 Gemini, 테스트용 stub | `chat_max_rounds`(12) | `chat_time_budget_sec`(300) |
+
+무료 Gemini 키와 유료 Gemini 키는 밖에서 구별할 수 없으므로 `GEMINI_PAID`는 사용자의 선언입니다. 에이전트는 턴이 시작될 때 한도를 한 번 읽습니다. 시스템 프롬프트의 Budget 절은 해당 모드의 라운드 수를 밝히고, 얕은 모드에서는 우선순위(맥락 한 라운드, 리서치 한 라운드, 그다음 제안)와, 라운드가 모자라 더 깊은 리서치를 건너뛰었으면 그 사실을 답에 짧게 밝히라는 지시도 담습니다. 모든 `finish` 이벤트에는 `mode`, `max_rounds`, `time_budget_sec`, `budget_exhausted`가 들어갑니다. 얕은 모드의 턴이 한도에서 끝나면 사용자에게 그 이유를 알립니다. 대체 메시지가 얕은 모드 한도를 밝히거나, 멈추라는 요청을 받은 모델이 쓴 답 아래에 안내 한 줄이 붙으며, 둘 다 설정에서 유료 API 키를 등록하면 더 깊이 리서치할 수 있다고 말합니다(답과 같은 언어, 영어 또는 한국어로). `GET /api/settings`도 모드와 한도를 알려 줍니다.
 
 ## 4. 데이터 흐름: 확인
 
@@ -937,15 +976,15 @@ stateDiagram-v2
 
 | 통제 | 내용 |
 |---|---|
-| **코드로 강제하는 모의투자 전용** | 거래 호스트는 상수 `https://paper-api.alpaca.markets`입니다. 어떤 설정, 환경 변수, 인자로도 바꿀 수 없습니다. `AlpacaPaper`는 주입된 HTTP 클라이언트의 전체 오리진(스킴, 호스트, 포트)을 검사하고, 나가는 모든 요청의 오리진을 보내기 전에 다시 검사하며, 리디렉션을 따라가지 않고, 커스텀 인증 핸들러나 요청·응답 훅이 달린 클라이언트를 거부합니다. API 키는 그 호스트에 인증하는 용도로만 쓰입니다. |
+| **코드로 강제하는 모의투자 전용** | 거래 호스트는 상수 `https://paper-api.alpaca.markets`입니다. 어떤 설정, 환경 변수, 인자로도 바꿀 수 없습니다. `AlpacaPaper`는 주입된 HTTP 클라이언트의 전체 오리진(스킴, 호스트, 포트)을 검사하고, 나가는 모든 요청의 오리진을 보내기 전에 다시 검사하며, 리디렉션을 따라가지 않고, 커스텀 인증 핸들러나 요청·응답 훅이 달린 클라이언트를 거부합니다. API 키는 그 호스트에 인증하는 용도로만 쓰입니다. 심층 방어로, 런타임은 시작할 때, 키가 바뀐 뒤, 키를 저장할 때 계좌 자체의 모의투자 표시(`AccountSnapshot.paper`, 계좌 번호의 `PA` 접두어로 판단)도 읽습니다. 실계좌(`paper: false`)의 키는 `alpaca_not_paper`로 거절하고, 이미 설정돼 있다면 키가 없을 때와 똑같이 브로커, 실행기, 시세 없이 동작합니다(상태 `not_paper`). Alpaca 응답에 표시가 없으면(`null`) 이전처럼 동작합니다. |
 | **LLM에게는 주문 도구가 없음** | 도구 이름은 임포트 시점에 `submit`, `place`, `execute`, `order_now`, `buy_now`, `sell_now`, `cancel`과 대조하며, 하나라도 걸리면 앱이 시작되지 않습니다. `propose_trades`는 티켓만 만듭니다. 투자 원칙을 저장하는 도구도 없습니다(`draft_mandate`는 초안만 작성). `broker.submit_order`로 가는 유일한 경로는 `POST /api/tickets/{id}/confirm`입니다. |
 | **턴당 제안 1건** | 슬롯은 세션과 턴을 키로 하며 설정 재빌드를 넘어 공유됩니다. 같은 턴의 두 번째 `propose_trades`는 거절됩니다. |
 | **티켓 해시** | 실행 대상 레그, 각 결정의 판정·레그·사유 코드와 심각도(메시지 문구는 제외)·추정값, 티켓 ID에 대한 SHA-256입니다. confirm에는 일치하는 해시가 필요하므로(상수 시간 비교) 사람은 보여 준 그대로를 확인하게 됩니다. |
 | **티켓 수명** | 300초(`ticket_ttl_sec`). confirm은 호가를 다시 받아 현재 투자 원칙으로 리스크 규칙을 다시 돌리고, 의미 있는 변화가 있으면 티켓을 다시 발급합니다. |
 | **킬 스위치** | `POST /api/kill-switch`는 락을 기다리기 전에 메모리의 `trading_enabled`를 즉시 false로 바꿔서, 진행 중인 confirm이 다음 레그 전에 멈추게 합니다. 선택적으로 브로커에서 거래를 정지(`suspend_trade`)하고 미체결 주문을 취소하며, `.env`에 `TRADING_ENABLED=false`를 기록합니다. 꺼져 있는 동안 confirm은 423으로 답합니다. 리서치와 제안은 계속 동작합니다. 다시 켜려면 `PUT /api/settings`를 써야 합니다. |
 | **로컬 전용 API** | `/api/*`는 루프백 클라이언트(소켓 상대 주소이며, uvicorn을 `proxy_headers=False`로 실행해 `X-Forwarded-For`로 속일 수 없음)의 요청에만, Host가 `127.0.0.1`, `localhost`, `[::1]`일 때만(DNS 리바인딩 방어) 답하고, POST·PUT·PATCH·DELETE에는 `X-FinAgent-Client: 1`을 요구합니다. `Origin` 헤더가 있으면 Host와 일치해야 합니다. CORS 미들웨어는 설치하지 않았고, `/api` 아래 WebSocket 연결은 거부하며, 응답에 프레이밍 방지 헤더를 붙여 악성 페이지가 앱을 프레임에 넣어 사용자가 Confirm을 누르게 유도하지 못하게 합니다. `main()`은 `FINAGENT_HOST`가 따로 지정되지 않으면 `127.0.0.1`에 바인딩합니다. `api_allow_remote` 설정은 루프백 규칙만 풀며, 별도 인증이 없으면 안전하지 않습니다. |
-| **비밀값 가림** | 원장은 모든 페이로드를 기록하기 전에 가립니다. 깊이와 관계없이 비밀처럼 보이는 딕셔너리 키, 헤더 형태의 값, 자유 텍스트 패턴(`api_key=...`, `Authorization: ...`, `Bearer ...`), 그리고 설정된 키(Alpaca, Gemini, Tavily, Anthropic, OpenAI)의 실제 값이 대상이며, 같은 프로세스에서 이전에 교체된 키도 포함합니다. 사용자에게 보여 주는 실행기 메시지도 같은 처리를 거치고, 모델에게 보여 주는 브로커 오류 텍스트는 가린 뒤 감싸며, HTTP 클라이언트 로그는 자격 증명 헤더와 키가 담긴 쿼리 문자열을 숨깁니다. 채팅 에이전트, 도구 상자, API 라우트는 ID, 개수, 예외 유형만 로그에 남기고 메시지 본문이나 예외 문구는 남기지 않습니다. 실행기는 같은 가림 처리를 거친 짧은 요약을 로그에 남기며, 예기치 못한 실패 경로 몇 곳에서는 트레이스백도 남깁니다. 트레이스백에는 예외 메시지가 그대로 찍히므로, `finagent` 로거의 로그 레코드는 모두 만들어지는 시점에 가림 처리를 거칩니다(`logsafe`, 시작할 때 프로세스 전체에 설치). 인자를 채운 메시지, 연쇄된 원인 예외까지 포함한 트레이스백 텍스트, 스택 정보에서 키의 실제 값(현재 키와 교체된 키 모두)과 자격 증명 형태(`APCA-API-KEY-ID`·`APCA-API-SECRET-KEY` 값, `Authorization: ...`, `Bearer ...`, `key=...` 쿼리 매개변수)를 지우며, 로그 핸들러를 어떻게 구성했든 똑같이 적용됩니다. 다른 라이브러리 로거의 레코드는 건드리지 않습니다. 설정 엔드포인트는 값이 아니라 상태 단어(`set`, `missing`, `connected` 등)만 돌려주며, 검증 오류도 입력을 되돌려 보내지 않습니다. |
-| **`.env` 기록기** | `PUT /api/settings`와 킬 스위치는 `update_env_file`로 `.env`를 바꿉니다. 값은 출력 가능한 ASCII여야 하고 `"`, `\`, `${`를 포함할 수 없습니다. 이름을 설정하는 첫 줄을 그 자리에서 바꾸고 중복은 지우며, 다른 줄, 줄바꿈 방식, BOM은 그대로 둡니다. 쓰기는 원자적이고(같은 디렉터리의 임시 파일, fsync, `os.replace`) 파일의 권한 비트를 유지하며, 심볼릭 링크인 `.env`는 링크를 통해 갱신합니다. Alpaca 키는 쌍으로 설정해야 하며, 저장하기 전에 모의투자 호스트로 실제 확인합니다. |
+| **비밀값 가림** | 원장은 모든 페이로드를 기록하기 전에 가립니다. 깊이와 관계없이 비밀처럼 보이는 딕셔너리 키, 헤더 형태의 값, 자유 텍스트 패턴(`api_key=...`, `Authorization: ...`, `Bearer ...`), 그리고 설정된 키(Alpaca, Gemini, Tavily, Anthropic, OpenAI)의 실제 값이 대상이며, 같은 프로세스에서 이전에 교체된 키도 포함합니다. 사용자에게 보여 주는 실행기 메시지도 같은 처리를 거치고, 모델에게 보여 주는 브로커 오류 텍스트는 가린 뒤 감싸며, HTTP 클라이언트 로그는 자격 증명 헤더와 키가 담긴 쿼리 문자열을 숨깁니다. 채팅 에이전트, 도구 상자, API 라우트는 ID, 개수, 예외 유형만 로그에 남기고 메시지 본문이나 예외 문구는 남기지 않습니다. 실행기는 같은 가림 처리를 거친 짧은 요약을 로그에 남기며, 예기치 못한 실패 경로 몇 곳에서는 트레이스백도 남깁니다. 트레이스백에는 예외 메시지가 그대로 찍히므로, `finagent` 로거의 로그 레코드는 모두 만들어지는 시점에 가림 처리를 거칩니다(`logsafe`, 시작할 때 프로세스 전체에 설치). 인자를 채운 메시지, 연쇄된 원인 예외까지 포함한 트레이스백 텍스트, 스택 정보에서 키의 실제 값(현재 키와 교체된 키 모두)과 자격 증명 형태(`APCA-API-KEY-ID`·`APCA-API-SECRET-KEY` 값, `Authorization: ...`, `Bearer ...`, `key=...` 쿼리 매개변수)를 지우며, 로그 핸들러를 어떻게 구성했든 똑같이 적용됩니다. 다른 라이브러리 로거의 레코드는 건드리지 않습니다. 로그에서만, 이름이 `tokens`나 `token_count`로 끝나는 쌍(`max_tokens: 9000`)은 토큰 수이므로 그대로 읽히게 둡니다(그 안의 알려진 키 값은 여전히 지웁니다). 로그 가림의 한계: `extra=`로 넘긴 값과 로거 이름은 가리지 않으며, 100,000자를 넘는 텍스트는 잘립니다. 8자보다 짧은 키 값은 원장, 로그, 도구 상자 모두 무시합니다. 설정 엔드포인트는 값이 아니라 상태 단어(`set`, `missing`, `connected` 등)만 돌려주며, 검증 오류도 입력을 되돌려 보내지 않습니다. |
+| **`.env` 기록기** | `PUT /api/settings`와 킬 스위치는 `update_env_file`로 `.env`를 바꿉니다. 값은 출력 가능한 ASCII여야 하고 `"`, `\`, `${`를 포함할 수 없습니다. 이름을 설정하는 첫 줄을 그 자리에서 바꾸고 중복은 지우며, 다른 줄, 줄바꿈 방식, BOM은 그대로 둡니다. 쓰기는 원자적이고(같은 디렉터리의 임시 파일, fsync, `os.replace`) 파일의 권한 비트를 유지하며, 심볼릭 링크인 `.env`는 링크를 통해 갱신합니다. Alpaca 키는 쌍으로 설정해야 하며, 저장하기 전에 모의투자 호스트로 실제 확인합니다. 모델 제공자, 모델, 사용 중인 키를 바꿀 때도 저장하기 전에 최소한의 모델 호출 한 번으로 확인합니다(3절). |
 | **`.env` 우선** | 설정은 프로세스 환경 변수보다 `.env`를 먼저 읽습니다. 앱이 저장한 값이 다음 시작 때 읽히는 값이 되게 하기 위해서입니다. 환경 변수만 제공하는 값은 `env_fallbacks`에 이름으로 나열됩니다. |
 | **금액은 `Decimal`** | 가격, 수량, 비용, 투자 원칙의 금액은 끝까지 `Decimal`이며 JSON에서는 문자열로 전달됩니다. |
 
@@ -956,7 +995,7 @@ stateDiagram-v2
 | 테이블 | 담는 내용 | 기록하는 쪽 |
 |---|---|---|
 | `sessions` | 채팅 세션: ID(`S` 뒤에 base32 문자 12개), 제목, 언어, 생성 시각 | `SessionStore` |
-| `messages` | 대화: 역할(`user`, `assistant`, `event`), 내용, JSON `meta`. 어시스턴트 행에는 사용량, 도구, 근거 플래그, 프롬프트 버전이 들어갑니다. `event` 행은 턴 요약(도구 이름, 호출 ID, 오류 여부, 티켓 ID)이며 도구 출력은 담지 않습니다 | `SessionStore`를 통한 `ChatAgent` |
+| `messages` | 대화: 역할(`user`, `assistant`, `event`), 내용, JSON `meta`. 어시스턴트 행에는 사용량, 도구, 근거 플래그, 프롬프트 버전, 리서치 모드, 턴이 한도에서 끝났는지가 들어갑니다. `event` 행은 턴 요약(도구 이름, 호출 ID, 오류 여부, 티켓 ID)이며 도구 출력은 담지 않습니다 | `SessionStore`를 통한 `ChatAgent` |
 | `mandates` | 세션당 한 행: 버전, JSON 형태의 투자 원칙, 갱신 시각. 버전은 항상 이전 버전 + 1입니다 | `PUT /api/mandate/{session_id}` |
 | `tickets` | 전체 티켓을 `body`에 JSON으로 저장하고, SQL에서 거를 수 있도록 `status`, `created_at`, `expires_at`을 별도 컬럼에도 둡니다. 모든 쓰기는 status와 body에 대한 compare-and-set입니다 | `TicketStore` |
 | `orders` | 제출됐거나 불확실한 레그마다 한 행: 티켓 ID, `client_order_id`(고유), 브로커 주문 ID, 최신 주문 스냅샷 JSON, 시각. 불확실한 레그는 브로커 ID와 스냅샷이 없습니다. `orders_per_day`가 세는 대상도 이 행들입니다 | `Executor` |
@@ -966,9 +1005,9 @@ stateDiagram-v2
 
 현재 기록되는 원장 종류는 다음과 같습니다. `mandate_saved`, 에이전트가 도구를 호출할 때마다 남는 `tool_call`, 제안 때의 `proposal`(보여 준 그대로의 티켓) 또는 `proposal_rejected`, confirm 때의 `confirm_request`·`claim`·`requote`·`submit`·`broker_response`·`reconcile`·`order_status`·`result`, `reject`, `refresh`, 시작 시의 `recover`, 그리고 세션 ID `system` 아래 기록되는 `kill_switch`(내보내기 경로는 없음)입니다.
 
-- **`tool_call`**에는 턴 ID, 도구 이름(도구가 아닌 이름이면 `unknown_tool`), 인자(정규화한 JSON)와 출력 텍스트 각각의 SHA-256, 오류 여부, 밀리초 단위 소요 시간, 호출이 돌려준 근거 ID가 담깁니다. 인자와 결과 자체는 저장하지 않습니다. 신뢰할 수 없는 텍스트나 개인 정보가 들어 있을 수 있기 때문입니다. 취소된 호출은 결과 해시 없이 `cancelled: true`로 기록됩니다.
+- **`tool_call`**에는 턴 ID, 도구 이름(도구가 아닌 이름이면 `unknown_tool`), `args_sha256`, `result_sha256`, 오류 여부, `latency_ms`, 호출이 돌려준 근거 ID가 담깁니다. `args_sha256`은 `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)`(인자가 객체가 아니면 `null`)의 UTF-8 바이트에 대한 SHA-256이고, `result_sha256`은 출력 텍스트의 UTF-8 바이트에 대한 SHA-256이며, 도구가 텍스트가 아닌 것을 돌려줬으면 `null`입니다. `latency_ms`는 도구가 끝나자마자 잰, 도구 자체의 소요 시간입니다. 인자와 결과 자체는 저장하지 않습니다. 신뢰할 수 없는 텍스트나 개인 정보가 들어 있을 수 있기 때문입니다. 취소된 호출은 결과 해시 없이 `cancelled: true`로, 도구에서 빠져나온 그 밖의 예외는 `raised: "<예외 유형>"`으로 기록됩니다. 턴의 예산을 다 쓴 뒤 에이전트가 건너뛴 도구 호출(시간이 다 된 라운드의 나머지 호출, 도구 없이 답하라는 마지막 요청에 대한 답 속의 호출)은 실행되지 않으므로 원장에도 남지 않습니다.
 - **`proposal`**에는 턴 ID, 티켓 ID·해시·상태·투자 원칙 버전, 호가·생성·만료 시각, 인용한 근거 ID, 실행 대상 레그(금액은 문자열), 각 결정의 판정·사유 코드·추정값이 담깁니다. `thesis`·`risks`·`invalidation` 문구는 SHA-256과 길이만 남깁니다. refresh나 requote로 다시 발급된 티켓도 `proposal` 항목을 남깁니다(`source: "requote"`, 대체한 티켓의 ID 포함).
-- **`proposal_rejected`**는 `propose_trades`가 티켓을 만들지 않았을 때 기록됩니다. 모든 레그가 거부됐거나, 티켓이 검증에 실패했거나, 인자가 잘못됐거나, 같은 턴에 두 번째 제안이 들어온 경우입니다. 사유 코드(앞의 두 경우에는 각 결정의 사유 코드도)가 담기고 티켓 ID는 없습니다.
+- **`proposal_rejected`**는 `propose_trades` 호출이 어떤 이유로든 티켓 없이 끝날 때마다 한 번 기록되며, 사유 코드가 담기고 티켓 ID는 없습니다. 사유 코드는 `all_legs_rejected`와 `ticket_validation_failed`(둘 다 투자 원칙 버전, 인용한 근거 ID, 각 결정의 판정과 사유 코드 포함), `invalid_arguments`(제안 자체의 검사), `one_proposal_per_turn`, `dispatch_error`(도구가 실행되기 전에 거절됨: 알 수 없거나 빠진 인자, 객체가 아닌 인자, 브로커 없음), `broker_error`, `upstream_error`(데이터 요청 실패), `unexpected_error`입니다. 취소된 호출은 취소된 `tool_call`만 남깁니다.
 
 원장 쓰기가 실패하면 예외 유형만 로그에 남기고 도구 호출은 그대로 진행합니다. `Ledger`에는 수정·삭제 메서드가 없지만, 테이블 자체에 데이터베이스 수준의 보호는 없습니다.
 
@@ -979,11 +1018,12 @@ stateDiagram-v2
 - **모의투자 체결은 낙관적입니다.** Alpaca 모의 계좌는 체결을 시뮬레이션하며, 설계 메모에 따르면 슬리피지, 수수료, 배당을 반영하지 않습니다. 결과가 실제 계좌보다 좋게 보입니다.
 - **무료 시세.** 호가는 무료 IEX 피드(`feed=iex`), 즉 거래소 한 곳의 값이며, 모의 체결이 참조하는 통합 시세와 다를 수 있습니다. 시장가 매수 추정에는 이를 감안해 1% 완충을 둡니다. `price_metrics`의 일봉은 종료 시각을 16분 전으로 요청하므로 통합(SIP) 피드를 쓸 수 있습니다.
 - **성과 주장 없음.** 백테스트도, 수익률 평가도 없습니다. 출력은 리서치와 제안이며 예측이 아니고 투자 권유도 아닙니다.
-- **무료 LLM 한도.** 무료 Gemini 키는 429와 503이 자주 납니다. 실패한 턴은 일반적인 오류 메시지와 `finish` 이벤트로 끝납니다. Gemini 3.x의 검색 그라운딩에는 결제가 활성화된 키가 필요합니다.
+- **무료 LLM 한도.** 무료 Gemini 키는 429와 503이 자주 나므로, 이런 키로는 에이전트가 얕은 모드(턴당 4라운드, 150초)로 동작하며, 리서치한 뒤 제안하는 턴에서 더 깊은 리서치를 건너뛸 수 있습니다. 실패한 턴은 일반적인 오류 메시지와 `finish` 이벤트로 끝납니다. Gemini 3.x의 검색 그라운딩에는 결제가 활성화된 키가 필요합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언이므로, 무료 키를 유료로 선언하면 감당하지 못할 심층 한도가 적용됩니다.
 - **근거 확인은 휴리스틱입니다.** 참고용이며 8절의 한계가 있습니다.
 - **근거 검사는 구조적입니다.** 인용한 ID가 존재하는지, 매수가 리서치 소스를 인용했는지만 코드가 확인합니다. 소스가 논거를 뒷받침하는지는 알 수 없으며, 소스 등급은 짧은 도메인 목록에서 나옵니다.
 - **프롬프트 주입은 차단이 아니라 억제입니다.** 비신뢰 텍스트는 정제하고 감싸고 표시하며, 모델은 주문을 내거나 투자 원칙을 저장하거나 설정을 바꿀 수 없습니다. 그래도 주입된 글이 모델이 무엇을 검색하고 가져오고 쓰는지에는 영향을 줄 수 있습니다. 사람이 티켓을 직접 읽어야 하는 이유입니다.
 - **단일 사용자 로컬 도구입니다.** 계정이 없습니다. 모든 세션이 같은 Alpaca 모의 계좌로 거래하므로 일일 주문 수도 공유됩니다. `ChatRuntime.lock`은 전역이라, 최대 10초가량 폴링하는 confirm이 다른 티켓 동작과 설정 변경을 지연시킬 수 있습니다. 주문 한도와 티켓 만료의 "오늘"은 미국 거래일이 아니라 UTC 날짜입니다.
 - **범위가 좁습니다.** 미국 주식과 ETF만, 매수 위주(공매도 없음), 시장가와 지정가 주문만 가능합니다(금액 주문은 시장가 `day` 주문). 옵션, 암호화폐, 공매도, 증거금, 브래킷, 스톱은 없습니다.
 - **기억이 짧습니다.** 대화를 다시 만들 때는 저장된 최근 메시지 24개만 쓰며, 이전 턴의 도구 출력은 다시 재생하지 않습니다.
+- **모델 전환.** 전환은 다음 턴부터 적용됩니다. 이미 진행 중인 답변은 이전 모델로 끝납니다. 캐시된 대화는 재시작 후처럼 저장된 텍스트 기록으로 다시 만듭니다. `openai` 벡터 백엔드(`VECTOR_BACKEND=openai`)는 시작할 때의 임베딩 키를 계속 씁니다.
 - **재시작 시 동작.** 프로세스 환경 변수만 제공하는 값은 앱에서 지웠더라도 재시작 후 되살아납니다(`env_fallbacks`가 이 이름들을 알려 줍니다).

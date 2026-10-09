@@ -321,3 +321,16 @@ Full source lists are kept in the research notes (`docs/superpowers/specs/2026-0
 - **IEX vs NBBO.** Free IEX quotes differ from the NBBO that paper fills use. Estimates carry a buffer.
 - **Korean products.** They stay as research context only; Alpaca cannot trade them.
 - **Stored secrets.** Keys in `.env` are fine for a personal local tool. Deploying beyond localhost needs auth and a secret store.
+
+
+## Amendment (2026-10-02): model providers and research depth
+
+At the user's request, the assistant can run on a paid key from a popular provider, and says so when a free key limits it:
+
+> "let's make it so that the user can also put in a paid API from popular providers, choose a model, and use them in place. For that, we can have more turns so when we're using the basic Gemini, say 'shallow mode' and notify the user that we have limited turns due to Gemini restrictions"
+
+**Providers.** Gemini, OpenAI and Anthropic (the stub stays for tests). The user picks the provider and the model and enters a key in Settings. Before anything is saved, a change of the provider, the model or that provider's key is checked with one minimal model call: a rejected key or an unavailable model is refused, an unreachable provider saves nothing, and a rate-limited key is saved with a warning. `POST /api/llm/models` lists the chat models a key can use, from the provider's own list, for the model picker. The QA orchestrator, the chat runtime and the one chat agent share one model handle, so a switch takes effect for `/answer` and the chat at once, from the next reply; cached provider conversations are rebuilt from the stored text history, and a reply already running finishes on the old model. Gemini search grounding needs only a Gemini key, whichever provider runs the chat. A custom OpenAI-compatible endpoint (`OPENAI_BASE_URL`) stays possible through `.env`.
+
+**Research depth.** A free-tier Gemini key allows about 5 model calls a minute and 20 a day, and on 2026-10-02 both live evaluation scenarios ran out of budget before they could propose. So a turn runs in one of two modes, resolved in one place (`config.chat_limits`): **shallow** for Gemini unless the user declares the key paid (`GEMINI_PAID=true`; free and paid keys cannot be told apart from outside), with 4 tool rounds and 150 s per reply; **deep** for OpenAI, Anthropic and paid Gemini, with 12 rounds and 300 s. The system prompt's Budget section states the mode's round count, and in shallow mode tells the model to prioritise one context round, one research round, then the proposal. Each `finish` event carries the mode and its limits; a shallow turn that ends on its budget tells the user, in English or Korean, that it stopped at the shallow-mode limit and that a paid key in Settings allows deeper research. The UI (Task 4.3) shows the mode in the top bar and in Settings.
+
+**Paper flag.** In the same change the runtime reads the paper flag that Alpaca's account number gives (`AccountSnapshot.paper`): keys of a live account are refused, and if they are already configured the app runs without a broker. The hard-coded paper host stays the first line of defence.

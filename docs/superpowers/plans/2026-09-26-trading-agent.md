@@ -614,6 +614,14 @@ class ChatAgent:
   - Settings responses never contain the secret.
   - The existing `/answer` still returns the five fields.
 
+### Task 3.8: Model providers and research depth (added 2026-10-02)
+**Files:** `config.py` (`gemini_paid`, `shallow_max_rounds`, `shallow_time_budget_sec`, `chat_mode`, `chat_limits`, the LLM names in `ENV_NAMES`), `agent/llm.py` (`LLMHandle`, `aclose`, the output-cap field), `chat/agent.py`, `chat/prompts.py` (`chat-3`), new `llm_admin.py`, `api_common.py` and `api_llm.py`, `api_chat.py`, `app_state.py`; tests `tests/test_llm_admin.py`, `tests/test_api_llm.py` and the existing suites.
+- Providers `gemini`, `openai`, `anthropic`, switched at runtime through `PUT /api/settings` (`llm_provider`, `llm_model`, `llm_effort`, the three keys, `gemini_paid`), with one minimal validation call before saving; `POST /api/llm/models` for the model picker.
+- One `LLMHandle` shared by the QA orchestrator, the chat runtime and the agent; a switch resets the cached conversations; in-flight turns finish on the old client.
+- Research depth: shallow (Gemini not declared paid: 4 rounds, 150 s) or deep (12 rounds, 300 s), resolved only by `chat_limits`; the prompt's Budget section, the `finish` event and the budget fallback say which.
+- Also: the runtime honours `AccountSnapshot.paper` (`not_paper`, `alpaca_not_paper`), and the Task 3.6 review items (the `proposal_rejected` catch-all, handler-only latency, one 8-character secret floor, token counts readable in logs).
+- [ ] **Tests:** the mode truth table; shallow and deep runs stop at their limits; the prompt in both modes; the handle swap seen by `/answer` and the agent; every `PUT /api/settings` outcome with `.env` unchanged on failure; the model list filtered and capped; no key in any response or log.
+
 ---
 
 ## Phase 4: Web app in the style of AI Studio
@@ -648,6 +656,12 @@ class ChatAgent:
 - **Accessibility:** focus rings; one polite `aria-live` announcement at the end of each turn; no single-key Confirm shortcut; Enter sends and Shift+Enter adds a newline; Ctrl/Cmd+Enter sends; Esc stops.
 - **Phones (~400px):** the rail becomes a drawer, the right panel a bottom sheet, and the Confirm button sticks to the bottom; inputs use 16px text.
 - [ ] **Verify in the Browser pane with a fake-backed server** (`FINAGENT_FAKE_BROKER=1` wires `tests/fakes_trading.py`): send a prompt; see tool cards, sources and a ticket; confirm; see the order timeline. Check at 400px and in the light theme, and check EN/KO switching.
+
+### Task 4.3: Model provider settings and the research-depth notice (added 2026-10-02)
+**Files:** `web/app/**` on top of the Task 4.2 components; the demo server's fake validation and model list.
+- A mode chip in the top bar ("Shallow mode" / "Deep mode") with an explanation and a link to Settings; a shallow-mode notice in the empty state and once per session; a hint with the Settings link when a shallow turn ended on its budget (`finish.budget_exhausted`).
+- A model section in Settings: provider, API key (never stored client-side), a model select from `POST /api/llm/models` plus a custom id, the Gemini paid checkbox, effort, and the save results (`warning`, the `llm_*` errors).
+- [ ] **Verify:** `node --check`, the node scripts, `tests/test_web_app.py`, and the flows against the demo server.
 
 ---
 
@@ -692,6 +706,7 @@ class ChatAgent:
 - §6 trading core → Tasks 2.1–2.4
 - §7 chat agent → Tasks 3.1–3.4
 - §8 API → Task 3.5
+- Amendment (2026-10-02), model providers and research depth → Tasks 3.8 and 4.3
 - §9 UI → Tasks 4.1–4.2
 - §10 config and secrets → Tasks 1.1 and 3.5
 - §11 testing → every task, plus 5.1–5.2
