@@ -351,11 +351,62 @@ def test_switching_the_model_provider_in_the_demo_never_reaches_a_provider(tmp_p
         fw.release_sqlite(world.runtime.db, getattr(world.registry, "rdb", None))
 
 
+def test_the_research_depth_flow_by_http(tmp_path):
+    """Task 4.3's checks against the demo: list models, save the valid key (deep), the rejected key
+    (400, nothing changes), the rate-limited key (saved with a warning), and the Gemini paid switch
+    (shallow <-> deep, which the next reply's finish event reports)."""
+    app, world = demo_server.build_demo_app(tmp_path)
+    try:
+        with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
+            start = client.get("/api/settings").json()
+            assert (start["provider"], start["gemini_paid"], start["mode"], start["max_rounds"]) == ("gemini", True, "deep", 12)
+
+            shallow = client.put("/api/settings", headers=WRITE, json={"gemini_paid": False})
+            assert shallow.status_code == 200, shallow.text
+            assert (shallow.json()["mode"], shallow.json()["max_rounds"], shallow.json()["time_budget_sec"]) == ("shallow", 4, 150)
+            assert world.llm_admin.checked == []  # the paid switch needs no key check
+            sid = new_session(client)
+            [done] = of(chat(client, sid, CORE), "finish")
+            assert (done["mode"], done["max_rounds"]) == ("shallow", 4)
+
+            listed = client.post("/api/llm/models", headers=WRITE, json={"provider": "anthropic", "api_key": demo_server.DEMO_VALID_KEY})
+            assert listed.status_code == 200 and listed.json()["suggested"] == "claude-opus-5-5"
+            limited = client.post("/api/llm/models", headers=WRITE, json={"provider": "anthropic", "api_key": demo_server.DEMO_LIMITED_KEY})
+            assert limited.status_code == 429 and limited.json()["error"] == "llm_rate_limited"
+
+            deep = client.put("/api/settings", headers=WRITE, json={
+                "llm_provider": "anthropic", "llm_model": "claude-opus-5-5", "anthropic_key": demo_server.DEMO_VALID_KEY})
+            assert deep.status_code == 200, deep.text
+            assert (deep.json()["provider"], deep.json()["mode"], deep.json()["max_rounds"]) == ("anthropic", "deep", 12)
+            [done] = of(chat(client, sid, CORE), "finish")
+            assert (done["mode"], done["max_rounds"]) == ("deep", 12)
+
+            before = client.get("/api/settings").json()
+            refused = client.put("/api/settings", headers=WRITE, json={
+                "llm_provider": "openai", "llm_model": "gpt-6", "openai_key": demo_server.DEMO_INVALID_KEY})
+            assert refused.status_code == 400 and refused.json()["error"] == "llm_invalid_key"
+            assert client.get("/api/settings").json() == before  # nothing changed
+
+            warned = client.put("/api/settings", headers=WRITE, json={
+                "llm_provider": "openai", "llm_model": "gpt-6", "openai_key": demo_server.DEMO_LIMITED_KEY})
+            assert warned.status_code == 200 and warned.json()["warning"] == "llm_rate_limited"
+            assert warned.json()["provider"] == "openai"
+            for answer in (listed, limited, deep, refused, warned):
+                assert demo_server.DEMO_VALID_KEY not in answer.text and demo_server.DEMO_LIMITED_KEY not in answer.text
+
+            back = client.put("/api/settings", headers=WRITE, json={"llm_provider": "gemini", "llm_model": "gemini-3.8-flash"})
+            assert back.status_code == 200, back.text
+            assert (back.json()["mode"], back.json()["gemini_paid"]) == ("shallow", False)
+    finally:
+        fw.release_sqlite(world.runtime.db, getattr(world.registry, "rdb", None))
+
+
 def test_the_help_names_the_test_keys_for_the_provider_settings(capsys):
     with pytest.raises(SystemExit):
         demo_server.main(["--help"])
     out = capsys.readouterr().out
     assert demo_server.DEMO_VALID_KEY in out and demo_server.DEMO_INVALID_KEY in out
+    assert demo_server.DEMO_LIMITED_KEY in out and "shallow mode" in out
 
 
 # --- main() ------------------------------------------------------------------------------------------

@@ -25,8 +25,10 @@ the order timeline and the Portfolio panel move.
 
 The model provider can be switched in Settings without any network: the key check, the model list
 and the client factory are fakes (`scripts/_demo_llm_admin.py`). Any provider accepts the test key
-`demo-valid-key` and rejects `demo-invalid-key`; any other key is "unreachable". Whatever provider is
-chosen, the scripted model keeps answering.
+`demo-valid-key`, rejects `demo-invalid-key` and calls `demo-limited-key` rate limited (saved with a
+warning); any other key is "unreachable". Whatever provider is chosen, the scripted model keeps
+answering. The demo starts in deep mode (its Gemini key is declared paid); clear "My Gemini key is
+on a paid plan" in Settings to see shallow mode.
 
 The server binds 127.0.0.1 only. Its state (app DB, env file, product DB) lives in a fresh temporary
 directory that is removed on exit; it never reads or writes the project's `.env` or `data/`.
@@ -50,7 +52,7 @@ _SCRIPTS = os.path.normcase(str(_HERE))
 sys.path[:] = [p for p in sys.path if os.path.normcase(os.path.abspath(p or os.curdir)) != _SCRIPTS] + [str(_HERE)]
 
 from _demo_broker import FillingBroker  # noqa: E402
-from _demo_llm_admin import DEMO_INVALID_KEY, DEMO_VALID_KEY  # noqa: E402
+from _demo_llm_admin import DEMO_INVALID_KEY, DEMO_LIMITED_KEY, DEMO_VALID_KEY  # noqa: E402
 from _fakeworld import DemoLLM, FakeWorld, build_fake_world  # noqa: E402
 from finagent.api import create_app  # noqa: E402
 from finagent.config import ENV_NAMES  # noqa: E402
@@ -112,7 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         epilog=("model provider test keys (Settings, any provider; no provider is ever called):\n"
                 f"  {DEMO_VALID_KEY}    accepted\n"
                 f"  {DEMO_INVALID_KEY}  rejected\n"
-                "  any other key     unreachable"),
+                f"  {DEMO_LIMITED_KEY}  accepted, but rate limited (saved with a warning)\n"
+                "  any other key     unreachable\n"
+                "The demo starts in deep mode; clear the Gemini paid switch in Settings for shallow mode."),
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"port on {HOST} (default {DEFAULT_PORT})")
     args = parser.parse_args(argv)

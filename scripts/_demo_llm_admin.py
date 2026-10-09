@@ -6,8 +6,9 @@ model or the key changes. `DemoLLMAdmin` replaces all three, so switching the pr
 Settings never reaches a network:
 
 - the key check answers "ok" for `DEMO_VALID_KEY` (and for the fake world's own dummy Gemini key),
-  "invalid_key" for `DEMO_INVALID_KEY`, and "unreachable" for anything else (no provider can be
-  reached from the demo, so a real key is neither accepted nor called invalid);
+  "invalid_key" for `DEMO_INVALID_KEY`, "rate_limited" for `DEMO_LIMITED_KEY` (the settings are
+  saved with a warning), and "unreachable" for anything else (no provider can be reached from the
+  demo, so a real key is neither accepted nor called invalid);
 - the model list is a fixed list per provider, for the same keys (the invalid key and an unknown key
   raise what a provider SDK would, so the API classifies them the same way);
 - the client factory records `(provider, model)` and always returns a fresh scripted `DemoLLM`.
@@ -31,6 +32,7 @@ from _demo_llm import DemoLLM  # noqa: E402
 
 DEMO_VALID_KEY = "demo-valid-key"  # test values only: the demo accepts this key for any provider
 DEMO_INVALID_KEY = "demo-invalid-key"  # ... and rejects this one
+DEMO_LIMITED_KEY = "demo-limited-key"  # ... and calls this one rate limited (it works: saved with a warning)
 DEMO_GEMINI_KEY = "demo-gemini-key"  # the fake world's own dummy key (it only switches grounding on)
 
 KEY_FIELDS = {"gemini": "gemini_api_key", "openai": "openai_api_key", "anthropic": "anthropic_api_key"}
@@ -67,6 +69,8 @@ def _status_for(key: Any) -> str:
         return "ok"
     if key == DEMO_INVALID_KEY:
         return "invalid_key"
+    if key == DEMO_LIMITED_KEY:
+        return "rate_limited"
     return "unreachable"
 
 
@@ -91,6 +95,8 @@ class DemoLLMAdmin:
         status = _status_for(api_key)
         if status == "invalid_key":
             raise DemoProviderError(401)
+        if status == "rate_limited":
+            raise DemoProviderError(429)
         if status != "ok":
             raise DemoProviderError(503)
         return [dict(model) for model in DEMO_MODELS.get(provider, [])]
