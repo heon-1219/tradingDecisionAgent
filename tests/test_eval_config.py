@@ -195,3 +195,8 @@ def test_the_scripts_never_put_their_directory_ahead_of_the_standard_library():
 def test_docs_do_not_hard_code_a_default_budget_and_warn_about_live_broker_lines():
     assert "CHAT_TIME_BUDGET_SEC, 90" not in ev.__doc__ and " 90" not in ev.__doc__
     assert "real paper account" in ev.__doc__ and "(id, llm, model, broker, products" in ev.__doc__
+
+
+async def test_read_account_gives_equity_shares_and_market_values():
+    account = await ev.read_account(types.SimpleNamespace(broker=fw.FakeBroker()))
+    assert account == {"equity": "100000", "positions": {"MSFT": "10"}, "values": {"MSFT": "4000"}}

@@ -217,14 +217,15 @@ def build_live_broker_world(*, llm, tmp_dir: Path, settings, real_products: bool
 
 
 async def read_account(world) -> dict | None:
-    """Equity and the shares held per symbol, read from the broker before the turns: what the
-    account-based expectations compare against. None if the broker cannot be read."""
+    """Equity, and the shares and market value held per symbol, read from the broker before the
+    turns: what the account-based expectations compare against. None if the broker cannot be read."""
     try:
         account, positions = await world.broker.account(), await world.broker.positions()
     except Exception as exc:  # noqa: BLE001 - the scenarios still run; those expectations then fail loudly
         log.warning("account not readable (%s); account-based expectations cannot be checked", type(exc).__name__)
         return None
-    return {"equity": str(account.equity), "positions": {s: str(p.qty_available) for s, p in positions.items()}}
+    return {"equity": str(account.equity), "positions": {s: str(p.qty_available) for s, p in positions.items()},
+            "values": {s: str(p.market_value) for s, p in positions.items()}}
 
 
 # --- one scenario -----------------------------------------------------------------------------------------

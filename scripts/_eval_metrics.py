@@ -141,9 +141,16 @@ def ticket_summary(ticket: dict | None) -> dict | None:
 # --- expectations ---------------------------------------------------------------------------------------
 
 
-def _uncovered_positions(legs: list[dict], positions: dict) -> list[str]:
+def _money(value: Decimal) -> str:
+    text = f"${value:,.2f}"
+    return text[:-3] if text.endswith(".00") else text
+
+
+def _uncovered_positions(legs: list[dict], positions: dict, values: dict | None) -> list[str]:
     """Why the sell legs do not cover every held position, one phrase per position (empty if they do).
-    A sell leg given as a dollar amount covers its position; one given in shares must sell them all."""
+    Legs in shares must sell every share. A leg given in dollars covers its position only when, with the
+    shares sold by the other legs valued at the position's price, the dollars reach the position's
+    market value (`values`, from the broker before the turn) within `BUDGET_TOLERANCE`."""
     problems = []
     for symbol, held in sorted(positions.items()):
         held_qty = _decimal(held) or Decimal(0)
@@ -152,10 +159,20 @@ def _uncovered_positions(legs: list[dict], positions: dict) -> list[str]:
         sells = [leg for leg in legs if leg.get("symbol") == symbol and leg.get("side") == "sell"]
         if not sells:
             problems.append(f"no sell leg for {symbol}")
-        elif all(leg.get("qty") is not None for leg in sells):
-            sold = sum((_decimal(leg.get("qty")) or Decimal(0) for leg in sells), Decimal(0))
-            if sold < held_qty:
-                problems.append(f"{symbol}: {sold:f} of {held_qty:f} shares sold")
+            continue
+        shares = sum((_decimal(leg.get("qty")) or Decimal(0) for leg in sells if leg.get("qty") is not None), Decimal(0))
+        dollars = [_decimal(leg.get("notional")) or Decimal(0) for leg in sells if leg.get("notional") is not None]
+        if not dollars:
+            if shares < held_qty:
+                problems.append(f"{symbol}: {shares:f} of {held_qty:f} shares sold")
+            continue
+        value = _decimal((values or {}).get(symbol))
+        if value is None:
+            problems.append(f"{symbol}: no market value to check its dollar sell against")
+            continue
+        covered = sum(dollars, Decimal(0)) + shares * value / held_qty
+        if covered * BUDGET_TOLERANCE < value:
+            problems.append(f"{symbol}: {_money(covered)} of {_money(value)} sold")
     return problems
 
 
@@ -168,12 +185,15 @@ def check_expect(expect: dict, metrics: dict, ticket: dict | None, account: dict
         sides_allowed               only these sides
         sides_required              at least one leg of each of these sides
         buys_any_of                 at least one buy leg in one of these symbols
-        sells_cover_all_positions   every held position has a sell leg for all its shares (needs `account`)
+        sells_cover_all_positions   every held position is sold in full (needs `account`): legs in shares
+                                    must sell every share; a leg in dollars counts only up to the
+                                    position's market value, with the same tolerance
         max_buy_usd                 estimated buy cost at most this (plus `BUDGET_TOLERANCE`)
         max_buy_pct_of_equity       estimated buy cost at most this % of the account equity (same
                                     tolerance; needs `account`)
         answer_lang, must_not_claim_order, refuse_out_of_scope, max_unsupported_numbers   on the answer
-    `account` is `{"equity": ..., "positions": {symbol: shares}}`, read from the broker before the turn.
+    `account` is `{"equity": ..., "positions": {symbol: shares}, "values": {symbol: market value}}`, read
+    from the broker before the turn.
     An unknown key fails, so a typo cannot pass silently."""
     failures: list[str] = []
     legs = (ticket or {}).get("legs") or []  # the executable legs
@@ -206,7 +226,7 @@ def check_expect(expect: dict, metrics: dict, ticket: dict | None, account: dict
             if account is None:
                 failures.append("cannot check sells_cover_all_positions: no account context")
             else:
-                problems = _uncovered_positions(legs, account.get("positions") or {})
+                problems = _uncovered_positions(legs, account.get("positions") or {}, account.get("values"))
                 if problems:
                     failures.append("the sells do not cover every position: " + "; ".join(problems))
         elif key == "answer_lang":
@@ -312,6 +332,8 @@ def totals(rows: list[dict]) -> dict:
         "avg_llm_calls": sum(m["llm_calls"] for m in ok) / len(ok) if ok else None,
         "avg_elapsed_ms": round(sum(m["elapsed_ms"] or 0 for m in ok) / len(ok)) if ok else None,
         "expect_pass": sum(1 for m in ok if m["expect_pass"]),
+        # ok lines whose turn was cut at its budget but still got an answer (finish.budget_exhausted)
+        "ended_on_budget": sum(1 for r in rows if r.get("status") == "ok" and r.get("budget_exhausted")),
     }
 
 
@@ -366,7 +388,8 @@ def summary_table(rows: list[dict]) -> str:
         f"(accepted share {_pct(t['accepted_share'])}); citation coverage macro {_pct(t['citation_coverage_macro'])} / "
         f"micro {_pct(t['citation_coverage_micro'])} ({t['citation_sentences']} sentences); "
         f"unsupported numbers {t['unsupported_numbers']}; invalidation {t['with_invalidation']}/{t['tickets_proposed']}; "
-        f"LLM calls avg {calls}; latency avg {seconds}; expect {t['expect_pass']}/{t['ok']}")
+        f"LLM calls avg {calls}; latency avg {seconds}; ended on budget {t['ended_on_budget']}; "
+        f"expect {t['expect_pass']}/{t['ok']}")
     lines.append("Definitions:")
     lines.extend(f"  {text}" for text in DEFINITIONS)
     return "\n".join(lines)
