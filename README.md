@@ -54,7 +54,7 @@ A tool whose key is missing is left out of the agent's tool list, so the agent o
 
 ### Model provider
 
-Gemini is the default (`gemini-3.8-flash`). In **Settings** you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. The model list comes from the provider itself and shows the chat models your key can use. A custom model id is accepted too.
+Gemini is the default (`gemini-3.8-flash`). In **Settings**, under **Model**, you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. Each provider shows whether its key is saved, and links to the page where its keys are made. The model list comes from the provider itself and shows the chat models your key can use: it loads when you pick a provider whose key is saved, or with **Load models** after you type a key. A **custom model id** is accepted too. The key field is never filled in by the app and is emptied after every save; keys are written only to your local `.env`.
 
 Before anything is saved, a change of provider, model or key is checked with one small model call. A rejected key or an unavailable model is refused, an unreachable provider saves nothing, and a rate-limited key is saved with a warning. A switch applies from the next reply, to `/answer` as well as the chat. To use another OpenAI-compatible server, set `OPENAI_BASE_URL` in `.env`; Settings does not show it. Gemini search grounding needs only a Gemini key, whichever provider runs the chat, and on Gemini 3.x it needs a key with billing enabled.
 
@@ -67,7 +67,7 @@ A free-tier Gemini key allows only a few model calls a minute and a day (about 5
 | **Shallow** | Gemini, unless the key is declared paid (`GEMINI_PAID=true`) | 4 (`SHALLOW_MAX_ROUNDS`) | 150 s (`SHALLOW_TIME_BUDGET_SEC`) |
 | **Deep** | OpenAI, Anthropic, or Gemini with `GEMINI_PAID=true` | 12 (`CHAT_MAX_ROUNDS`) | 300 s (`CHAT_TIME_BUDGET_SEC`) |
 
-A round is one model call plus the tool calls it asks for. In shallow mode the prompt tells the model to spend one round on context, one on research, and then to propose. The app shows the current mode, and a shallow reply that stops at its budget says so and points to Settings. `GEMINI_PAID` is your statement, not a check, because the app cannot tell a free key from a paid one. A free key declared paid gets deep limits it cannot sustain.
+A round is one model call plus the tool calls it asks for. In shallow mode the prompt tells the model to spend one round on context, one on research, and then to propose. The top bar shows the current mode ("Shallow mode" or "Deep mode"; hover, focus or tap it for the limits and a link to Settings). In shallow mode the empty chat explains the limit, a chat's first reply has a one-line note you can dismiss, and a reply that stops at its budget says so and links to Settings. In Settings, **My Gemini key is on a paid plan** sets `GEMINI_PAID`. `GEMINI_PAID` is your statement, not a check, because the app cannot tell a free key from a paid one. A free key declared paid gets deep limits it cannot sustain.
 
 ### Run it
 
@@ -810,7 +810,7 @@ flowchart LR
 
 ### 모델 제공자
 
-기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 직접 입력한 모델 ID도 받습니다.
+기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**의 **모델** 섹션에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 제공자마다 키가 저장돼 있는지 표시하고, 키를 발급하는 페이지 링크를 보여 줍니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 키가 저장된 제공자를 고르면 목록을 불러오고, 키를 입력했다면 **모델 목록 불러오기**로 불러올 수 있습니다. **모델 ID 직접 입력**도 받습니다. 앱은 키 입력란을 미리 채우지 않으며 저장할 때마다 비웁니다. 키는 로컬 `.env`에만 기록됩니다.
 
 저장하기 전에, 제공자·모델·키를 바꾸면 작은 모델 호출 한 번으로 확인합니다. 거부된 키나 쓸 수 없는 모델은 저장을 거절하고, 제공자에 닿지 못하면 아무것도 저장하지 않으며, 요청 한도에 걸린 키는 경고와 함께 저장합니다. 전환은 다음 답변부터 적용되며 채팅뿐 아니라 `/answer`에도 적용됩니다. OpenAI 호환 서버를 쓰려면 `.env`에 `OPENAI_BASE_URL`을 지정하십시오. 설정 화면에는 이 항목이 없습니다. Gemini 검색 그라운딩은 어느 제공자가 채팅을 맡든 Gemini 키만 있으면 되고, Gemini 3.x에서는 결제가 활성화된 키가 필요합니다.
 
@@ -820,10 +820,10 @@ flowchart LR
 
 | 모드 | 적용 조건 | 답변당 도구 라운드 | 답변당 시간 |
 |---|---|---|---|
-| **얕은 모드**(shallow) | Gemini 사용 시. 단, 키가 유료라고 선언하면(`GEMINI_PAID=true`) 제외 | 4 (`SHALLOW_MAX_ROUNDS`) | 150초 (`SHALLOW_TIME_BUDGET_SEC`) |
-| **깊은 모드**(deep) | OpenAI, Anthropic, 또는 `GEMINI_PAID=true`인 Gemini | 12 (`CHAT_MAX_ROUNDS`) | 300초 (`CHAT_TIME_BUDGET_SEC`) |
+| **얕은 리서치 모드**(shallow) | Gemini 사용 시. 단, 키가 유료라고 선언하면(`GEMINI_PAID=true`) 제외 | 4 (`SHALLOW_MAX_ROUNDS`) | 150초 (`SHALLOW_TIME_BUDGET_SEC`) |
+| **심층 리서치 모드**(deep) | OpenAI, Anthropic, 또는 `GEMINI_PAID=true`인 Gemini | 12 (`CHAT_MAX_ROUNDS`) | 300초 (`CHAT_TIME_BUDGET_SEC`) |
 
-라운드는 모델 호출 한 번과 그 호출이 요청한 도구 호출을 합친 단위입니다. 얕은 모드에서는 프롬프트가 모델에게 한 라운드는 상황 파악에, 한 라운드는 리서치에 쓰고 그다음에 제안하라고 지시합니다. 앱은 현재 모드를 보여 주며, 얕은 모드의 답변이 한도에서 멈추면 그 사실을 밝히고 설정으로 안내합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다. 앱은 무료 키와 유료 키를 구별할 수 없으므로, 무료 키를 유료라고 선언하면 감당하지 못할 깊은 모드 한도가 적용됩니다.
+라운드는 모델 호출 한 번과 그 호출이 요청한 도구 호출을 합친 단위입니다. 얕은 리서치 모드에서는 프롬프트가 모델에게 한 라운드는 상황 파악에, 한 라운드는 리서치에 쓰고 그다음에 제안하라고 지시합니다. 상단 바에 현재 모드("얕은 리서치 모드" 또는 "심층 리서치 모드")가 표시되며, 마우스를 올리거나 포커스를 주거나 탭하면 한도와 설정 링크를 보여 줍니다. 얕은 리서치 모드에서는 빈 채팅 화면에 한도를 설명하고, 대화의 첫 답변 위에 닫을 수 있는 한 줄 안내를 띄우며, 한도에서 멈춘 답변에는 그 사실과 설정 링크가 붙습니다. 설정의 **Gemini 키가 유료 요금제입니다** 체크박스가 `GEMINI_PAID`를 정합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다. 앱은 무료 키와 유료 키를 구별할 수 없으므로, 무료 키를 유료라고 선언하면 감당하지 못할 심층 리서치 모드 한도가 적용됩니다.
 
 ### 실행
 
@@ -1178,9 +1178,9 @@ erDiagram
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `GEMINI_PAID` | `false` | Gemini 키가 유료 요금제라는 사용자의 선언. `false`이면 Gemini는 얕은 모드로 동작합니다 |
-| `SHALLOW_MAX_ROUNDS`, `SHALLOW_TIME_BUDGET_SEC` | `4`, `150` | 얕은 모드의 답변당 도구 라운드 수와 제한 시간(초) |
-| `CHAT_MAX_ROUNDS`, `CHAT_TIME_BUDGET_SEC` | `12`, `300` | 깊은 모드의 같은 값 |
+| `GEMINI_PAID` | `false` | Gemini 키가 유료 요금제라는 사용자의 선언. `false`이면 Gemini는 얕은 리서치 모드로 동작합니다 |
+| `SHALLOW_MAX_ROUNDS`, `SHALLOW_TIME_BUDGET_SEC` | `4`, `150` | 얕은 리서치 모드의 답변당 도구 라운드 수와 제한 시간(초) |
+| `CHAT_MAX_ROUNDS`, `CHAT_TIME_BUDGET_SEC` | `12`, `300` | 심층 리서치 모드의 같은 값 |
 
 **API 보호**
 
@@ -1381,7 +1381,7 @@ python scripts/eval_scenarios.py --llm live --resume --limit 3
 
 시나리오 두 개, `etf_core`와 `options_out_of_scope`를 2026-10-02에 `gemini-3.8-flash`(무료 등급, 가짜 브로커)로 한 번 실행했습니다. **둘 다 결과를 내기 전에 90초 턴 예산이 바닥났고**(상태 `budget_exhausted`) 503과 429 재시도가 이어졌기 때문에 라이브 지표는 집계되지 않았습니다. `etf_core`는 도구를 16번 호출했고 그중 7번이 `screen_us_etfs`였으며, `propose_trades`에는 이르지 못했습니다. `options_out_of_scope`는 곧바로 거절하지 않고 계좌, 장 시계, 호가부터 조회했고, 429 오류 다섯 번이 남은 예산을 모두 썼습니다. 이 실행은 반복하지 않았습니다.
 
-이것은 숨기지 않고 밝히는 알려진 한계입니다. 이 표본은 얕은 모드(4라운드, 150초)와 도구 호출을 묶어 달라고 요청하는 프롬프트 변경보다 먼저 만들어졌고, 둘 다 그 뒤로 라이브 실행을 하지 않았습니다. 따라서 **트레이딩 어시스턴트의 라이브 기준선은 아직 없습니다.** 그 두 줄의 재시도 횟수와 90초 예산은 스크립트가 나중에야 기록하기 시작했기 때문에 콘솔 로그를 보고 손으로 추가했습니다. 각 줄의 `note`에도 그렇게 적혀 있습니다.
+이것은 숨기지 않고 밝히는 알려진 한계입니다. 이 표본은 얕은 리서치 모드(4라운드, 150초)와 도구 호출을 묶어 달라고 요청하는 프롬프트 변경보다 먼저 만들어졌고, 둘 다 그 뒤로 라이브 실행을 하지 않았습니다. 따라서 **트레이딩 어시스턴트의 라이브 기준선은 아직 없습니다.** 그 두 줄의 재시도 횟수와 90초 예산은 스크립트가 나중에야 기록하기 시작했기 때문에 콘솔 로그를 보고 손으로 추가했습니다. 각 줄의 `note`에도 그렇게 적혀 있습니다.
 
 #### 지표와 그 한계
 
@@ -1439,7 +1439,7 @@ python -m pytest -q -m slow         # data/raw 기준 전체 ETL 검증 (약 2�
 - **모의투자 체결은 낙관적입니다.** Alpaca 모의 계좌는 체결을 시뮬레이션하며, 설계 메모에 따르면 슬리피지, 수수료, 배당을 반영하지 않습니다. 결과가 실제 계좌보다 좋게 보입니다.
 - **무료 시세.** 호가는 Alpaca의 무료 IEX 피드, 즉 거래소 한 곳의 값이며, 모의 체결이 참조하는 통합 시세와 다를 수 있습니다. 시장가 매수 추정에는 이를 감안해 1% 완충을 둡니다.
 - **성과 주장 없음.** 백테스트도, 수익률 평가도 없습니다. 설계 명세는 LLM 트레이딩 에이전트에서 반복 가능한 수익을 찾지 못한 연구들(FINSABER, StockBench, LiveTradeBench)을 인용하며, 그래서 이 프로젝트는 성과를 주장하지 않습니다. 출력은 리서치와 제안이며 예측이 아니고 투자 권유도 아닙니다.
-- **무료 등급 모델 한도.** 무료 Gemini 키는 분당 약 5회, 하루 약 20회만 호출할 수 있어, 에이전트가 얕은 모드(답변당 4라운드, 150초)로 동작하며 더 깊은 리서치를 건너뛸 수 있습니다. Gemini 3.x의 검색 그라운딩에는 결제가 활성화된 키가 필요합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다.
+- **무료 등급 모델 한도.** 무료 Gemini 키는 분당 약 5회, 하루 약 20회만 호출할 수 있어, 에이전트가 얕은 리서치 모드(답변당 4라운드, 150초)로 동작하며 더 깊은 리서치를 건너뛸 수 있습니다. Gemini 3.x의 검색 그라운딩에는 결제가 활성화된 키가 필요합니다. `GEMINI_PAID`는 확인이 아니라 사용자의 선언입니다.
 - **숫자 확인과 평가의 텍스트 검사는 휴리스틱입니다.** 숫자 근거 확인은 참고용입니다. 그 턴의 어느 도구 출력에도 없는 숫자를 표시할 뿐이고, 숫자가 그 텍스트 어딘가에 있다는 것만 확인하며 그 숫자가 주장을 뒷받침하는지는 확인하지 않습니다. 표시가 곧 숫자가 틀렸다는 증거는 아니며, 모델이 직접 계산한 숫자는 설계상 표시됩니다. 평가의 인용·무효화 조건·거절·주문 주장 검사는 영어·한국어 키워드와 패턴 일치입니다(9절).
 - **프롬프트 주입은 차단이 아니라 억제입니다.** 신뢰할 수 없는 텍스트는 정제하고 감싸고 표시하며, 모델은 주문을 내거나 투자 원칙을 저장하거나 설정을 바꿀 수 없습니다. 그래도 주입된 글이 모델이 무엇을 검색하고 쓰는지에는 영향을 줄 수 있습니다. 사람이 티켓을 직접 읽어야 하는 이유입니다.
 - **단일 사용자 로컬 도구입니다.** 계정이 없고 모든 세션이 같은 Alpaca 모의 계좌로 거래합니다. `/api`를 외부에 노출하지 마십시오. 모의 주문을 낼 수 있고 `.env`에 키를 쓸 수 있습니다. `API_ALLOW_REMOTE=true`는 루프백 제한만 풀며, 앞단에 자체 인증을 두지 않으면 안전하지 않습니다.
