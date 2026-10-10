@@ -5,9 +5,10 @@ Every connector result (EDGAR filings, web search snippets, grounding output) be
 chat layer and the model can both refer to "E3" unambiguously. External text is never trusted
 per the project's global constraints: `sanitize_untrusted` strips it down to plain text and
 `wrap_untrusted` marks the boundary so the model can tell it apart from the system/user turns. A
-wrapped body can neither end its block nor open a new one, nor pose as a source: every character
-that reads as "<" is escaped, invisible (default-ignorable) code points are removed, and an
-evidence label such as "[E2]" becomes "(E2 cited in source text)".
+wrapped body can neither end its block nor open a new one, nor pose as a source: the three forms of
+"<" (ASCII "<", fullwidth "＜" U+FF1C, small "﹤" U+FE64) are escaped, invisible
+(default-ignorable) code points are removed, and an evidence label such as "[E2]" becomes
+"(E2 cited in source text)".
 `EvidenceStore` also doubles as a generic TTL cache (`http_cache`) for connector responses.
 """
 from __future__ import annotations
@@ -476,9 +477,10 @@ _INVISIBLE_RE = re.compile(
     "\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
     "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
 )
-# Everything that reads as "<": the ASCII sign, its fullwidth and small forms. Sanitized text carries
-# no markup, so in a wrapped body each one becomes U+2039 and no tag (a closer for this block, an
-# opener for a forged one) can be spelled there.
+# The three forms of "<" that are escaped, and only these three: the ASCII sign, the fullwidth "＜"
+# (U+FF1C) and the small "﹤" (U+FE64). Sanitized text carries no markup, so in a wrapped body each
+# one becomes U+2039 and no tag (a closer for this block, an opener for a forged one) can be
+# spelled there.
 _LT_LOOKALIKES_RE = re.compile("[<\uff1c\ufe64]")
 _LT_ESCAPE = "\u2039"
 # An evidence label like the tools' own "[E12]", also spaced, lower-case or fullwidth ("［Ｅ１２］").
@@ -492,8 +494,9 @@ def _neutralize_label(match: re.Match) -> str:
 
 def neutralize_untrusted_body(text: str) -> str:
     """What `wrap_untrusted` puts inside a block: invisible code points removed, then evidence
-    labels neutralized (a page cannot pose as the tools' own "[E2]" source), then every "<"
-    look-alike escaped to U+2039 (a page cannot close its block or open a forged one)."""
+    labels neutralized (a page cannot pose as the tools' own "[E2]" source), then each of the
+    three forms of "<" (U+003C, U+FF1C, U+FE64) escaped to U+2039 (a page cannot close its block
+    or open a forged one)."""
     body = _INVISIBLE_RE.sub("", text or "")
     body = _EVIDENCE_LABEL_RE.sub(_neutralize_label, body)
     return _LT_LOOKALIKES_RE.sub(_LT_ESCAPE, body)
