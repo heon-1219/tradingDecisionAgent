@@ -1,9 +1,12 @@
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from finagent.research.evidence import (
+    _LT_ESCAPE,
+    _LT_LOOKALIKES_RE,
     EvidenceStore,
     ResearchResult,
     SourceRecord,
@@ -13,6 +16,8 @@ from finagent.research.evidence import (
     wrap_untrusted,
 )
 from finagent.store.appdb import AppDB
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 # --- sanitize_untrusted / wrap_untrusted -----------------------------------
@@ -577,6 +582,25 @@ def test_no_lookalike_tag_or_invisible_character_survives_in_a_wrapped_body(raw)
     assert wrapped.count("</untrusted>") == 1
     assert not any(ch in body for ch in ("<", "\uff1c", "\ufe64")), body
     assert not any(ch in body for ch in _INVISIBLE), repr(body)
+
+
+def test_the_architecture_doc_names_exactly_the_forms_of_lt_the_code_escapes():
+    # docs/architecture.md says, in English and in Korean, which characters become U+2039 inside a block.
+    # The code handles three forms of "<" and nothing else: the doc names those three and does not
+    # claim "every character that reads as <".
+    forms = sorted(set(_LT_LOOKALIKES_RE.pattern.strip("[]")))
+    assert forms == ["<", "﹤", "＜"]
+    steps = [line for line in (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8").splitlines()
+             if line.startswith("2. `wrap_untrusted`")]
+    assert len(steps) == 2  # the English half and the Korean half
+    for step in steps:
+        for form in forms:
+            assert form in step, form
+            if ord(form) > 0x7F:
+                assert f"U+{ord(form):04X}" in step, (form, step)
+        assert f"U+{ord(_LT_ESCAPE):04X}" in step and _LT_ESCAPE in step
+        assert "every character that reads as" not in step and "읽히는 문자" not in step
+        assert "exactly three forms" in step or "세 가지 꼴" in step
 
 
 def test_bidi_controls_and_tag_characters_are_stripped_even_without_sanitizing():
