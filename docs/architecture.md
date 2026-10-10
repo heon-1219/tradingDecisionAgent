@@ -118,18 +118,20 @@ flowchart LR
 | Source | Tools | Evidence `connector` | Tier | Untrusted | Cache |
 |---|---|---|---|---|---|
 | Local product database, knowledge graph and search | `screen_us_etfs` (over `v_etf_gl`), `search_products`, `graph_neighbors` | `product_db`, `product_kb` | 1 | no | none: read directly |
-| Local QA pipeline (the `/answer` orchestrator) | `ask_product_database` | `product_qa` | 1 | no | none |
+| Local QA pipeline (the `/answer` orchestrator) | `ask_product_database` | `product_qa` | 1 | yes: the answer is written by the QA agent's model (its retrieved context is shown plain) | none |
 | Alpaca market data: quotes and daily bars | `get_quotes`, `price_metrics` | `alpaca_quotes`, `alpaca_bars` | 1 | no | none |
 | Alpaca screener | `get_movers` | `alpaca_screener` | 2 | yes | none |
 | Alpaca news | `search_news` | `news` | 2 | yes | none |
 | SEC EDGAR: filing lists, XBRL company facts | `sec_filings`, `sec_financial_facts` | `edgar` | 1 | no | ticker map 24 h, submissions and company facts 12 h |
-| SEC EDGAR: filing text passages | `sec_filing_passages` | `edgar` | 1 | yes | filing documents effectively permanent (filings are immutable) |
+| SEC EDGAR: filing text passages | `sec_filing_passages` | `edgar` | 1 | yes | the extracted text of a filing document effectively permanent (filings are immutable); never the raw HTML |
 | Web search and page fetch | `web_search` (Tavily), `fetch_source` (Tavily extract, Jina Reader as the keyless fallback) | `websearch` | 1 to 4 by domain | yes | search 15 min for `topic=news`, 12 h otherwise; fetched pages 12 h |
 | Gemini Google Search grounding | `grounded_web_answer` | `grounded_web` | 3 | yes | never |
 
 The web tier is a coarse domain rule, not a curated allowlist. Tier 1: `sec.gov`, the main exchanges and hosts that start with `ir.`, `investor.` or `investors.`. Tier 2: Reuters, Bloomberg, WSJ, FT, Benzinga. Tier 4: Reddit, Medium, Substack and similar blog and forum platforms. Everything else is tier 3. Local and broker data are tier 1 because they are the primary data for this app, not because a domain says so.
 
-All connector HTTP goes through one `HttpClient`: per-host rate limits (SEC 5 requests/s, Tavily 1.5/s, Jina Reader 0.3/s), up to 3 attempts for GET on 429 and 5xx, no retry for POST, and log redaction of credential-looking headers and query parameters.
+All connector HTTP goes through one `HttpClient`: per-host rate limits (SEC 5 requests/s, Tavily 1.5/s, Jina Reader 0.3/s), up to 3 attempts for GET on 429 and 5xx, no retry for POST, and log redaction of credential-looking headers and query parameters. Every failure is an `HttpError`, including a request that got no response at all (a timeout, a connection or protocol error: status 0, with only the exception's type name), so a connector can always fall back, for example from Tavily extract to Jina Reader.
+
+**Filing documents.** `sec_filing_passages` cuts a filing's primary document at 5,000,000 characters right after the download (the result says so when it did; a 10-K's Items 1 to 7 normally fit well inside), extracts the visible text with the same hidden-element rules as `sanitize_untrusted`, and runs the HTML parse and the BM25 ranking in a worker thread, so a multi-megabyte inline-XBRL filing never stalls the event loop for other sessions, keep-alives, `/answer` or a confirm. The cache keeps the extracted chunks, not the HTML, so a cache hit neither downloads nor parses again.
 
 ### Tool availability
 
@@ -149,15 +151,16 @@ Whatever a research tool returns is registered in the session's `EvidenceStore` 
 
 ### External text is untrusted
 
-Web pages, news, filing text, screener strings, grounded answers and broker error messages are written by third parties, so they are treated as data that may contain instructions aimed at the model.
+Web pages, news, filing text, screener strings, grounded answers, the product Q&A agent's answers and broker error messages are written by third parties (or by a model), so they are treated as data that may contain instructions aimed at the model.
 
 1. `sanitize_untrusted` reduces the text to what a person would see on the rendered page. It drops tags, comments, `script`, `style`, `template` and `iframe` content, elements hidden with the `hidden` attribute, `aria-hidden="true"` or inline CSS (`display:none`, `visibility:hidden`, `opacity:0`, `font-size:0`), and zero-width characters. It then collapses whitespace and caps the length.
-2. `wrap_untrusted` puts the result in `<untrusted source="E7">...</untrusted>`. A closing `</untrusted>` inside the text is escaped, so injected text cannot end the block early.
-3. `ChatToolbox` re-checks every connector result. Unless every untrusted source has its own block and no stray wrapper tag sits outside the blocks, the toolbox sanitizes and wraps the whole text again.
-4. The system prompt says that text inside these blocks is data, must never be followed as an instruction, and must never change the mandate, the tool calls or the proposal.
-5. A fetched page is cut to 500,000 characters before parsing, and hidden content is stripped before any excerpt is selected, so a cut cannot expose a hidden block.
-6. Numbers from the app's own data (quotes, bars, account, product database) are not wrapped.
-7. No code path follows a URL found inside retrieved text. The model has to call `fetch_source` itself, and that tool accepts only `http` and `https` URLs.
+2. `wrap_untrusted` puts the result in `<untrusted source="E7">...</untrusted>`. Inside the block, every character that reads as `<` (ASCII, fullwidth `＜`, small form `﹤`) becomes `‹`, invisible code points are removed (Unicode's default-ignorable set, such as the soft hyphen, U+2061 to U+2064, bidi controls and tag characters, and control characters), and an evidence label such as `[E2]`, spaced, lower-case or fullwidth, becomes `(E2 cited in source text)`. Injected text can therefore neither end its block, nor open a forged one, nor pose as one of the tools' sources.
+3. `ChatToolbox` re-checks every connector result. Only the opener that starts a block counts: unless every untrusted source has a block of its own and no wrapper tag sits anywhere else, inside a block or outside, the toolbox sanitizes and wraps the whole text again.
+4. The system prompt says that text inside these blocks is data, must never be followed as an instruction, and must never change the mandate, the tool calls or the proposal; that an evidence id quoted inside a block is part of the text, not a source; and that `fetch_source` opens only result URLs and links the user wrote.
+5. A fetched page is cut to 500,000 characters and a filing document to 5,000,000 before parsing, and hidden content is stripped before any excerpt is selected, so a cut cannot expose a hidden block.
+6. Numbers from the app's own data (quotes, bars, account, product database screens) are not wrapped. The product Q&A agent's answer is: a model wrote it, and it can echo the question.
+7. No code path follows a URL found inside retrieved text. `fetch_source` opens only an `http` or `https` URL that is exactly the URL of one of the session's evidence records (a web search result shows its sanitized title and URL inside its block for this) or that appears verbatim in one of the user's own messages. Any other URL is refused with a tool error ("I can only open pages from search results or links you gave me"), so an injected page cannot make the model send data to an address it names.
+8. A string from the broker that a risk reason quotes (an account or asset status, the asset class, an order id, the next market open) is reduced to one safe token first: letters, digits and `_ . : + -`, at most 32 characters. Errors from the model providers are logged by type and HTTP status only, never with the provider's text.
 
 ### Why grounding results are never cached
 
@@ -433,7 +436,7 @@ A record with the same URL and the same snippet hash in the same session is not 
 **Citations.** The system prompt tells the model to cite `[E#]` right after the claim it supports and to cite only ids that tool outputs showed in this conversation. For a trade the rule is enforced in code:
 
 - `propose_trades` takes `evidence_ids` (at most 30). An id that does not exist in the session makes the call fail with an error the model can read.
-- A proposal with a **buy** leg must cite at least one research source. A record counts as research unless its connector is `alpaca_quotes`, `alpaca_bars` or `alpaca_screener`, so quotes, price metrics and movers alone are not enough. An empty list fails the same way. Sell-only proposals need no research source.
+- A proposal with a **buy** leg must cite at least one research source. A record counts as research unless its connector is `alpaca_quotes`, `alpaca_bars` or `alpaca_screener`, so quotes, price metrics and movers alone are not enough. Untrusted records count as research too (web pages, filing text, the product Q&A agent's answer, which answers from the first-party product database): the gate asks for research behind a buy, not for trusted text. An empty list fails the same way. Sell-only proposals need no research source.
 - The ids are stored on the ticket, and the requote and refresh paths carry them to the new ticket.
 
 These checks are structural. They prove the cited ids exist and are of the right kind. They do not prove the cited source supports the claim, and the tiers are coarse (section 11).
@@ -638,18 +641,20 @@ flowchart LR
 | 소스 | 도구 | 근거 `connector` | 등급 | 비신뢰 | 캐시 |
 |---|---|---|---|---|---|
 | 로컬 상품 DB, 지식그래프, 검색 | `screen_us_etfs`(`v_etf_gl` 대상), `search_products`, `graph_neighbors` | `product_db`, `product_kb` | 1 | 아니오 | 없음, 직접 조회 |
-| 로컬 QA 파이프라인(`/answer` 오케스트레이터) | `ask_product_database` | `product_qa` | 1 | 아니오 | 없음 |
+| 로컬 QA 파이프라인(`/answer` 오케스트레이터) | `ask_product_database` | `product_qa` | 1 | 예: 답변은 QA 에이전트의 모델이 쓴 글임(검색해 온 컨텍스트는 감싸지 않고 보여 줌) | 없음 |
 | Alpaca 시세: 호가와 일봉 | `get_quotes`, `price_metrics` | `alpaca_quotes`, `alpaca_bars` | 1 | 아니오 | 없음 |
 | Alpaca 스크리너 | `get_movers` | `alpaca_screener` | 2 | 예 | 없음 |
 | Alpaca 뉴스 | `search_news` | `news` | 2 | 예 | 없음 |
 | SEC EDGAR: 공시 목록, XBRL 재무 팩트 | `sec_filings`, `sec_financial_facts` | `edgar` | 1 | 아니오 | 티커 매핑 24시간, 제출 목록과 재무 팩트 12시간 |
-| SEC EDGAR: 공시 본문 발췌 | `sec_filing_passages` | `edgar` | 1 | 예 | 공시 문서는 사실상 영구(공시는 바뀌지 않음) |
+| SEC EDGAR: 공시 본문 발췌 | `sec_filing_passages` | `edgar` | 1 | 예 | 공시 문서에서 추출한 텍스트는 사실상 영구(공시는 바뀌지 않음). 원본 HTML은 저장하지 않음 |
 | 웹 검색과 페이지 가져오기 | `web_search`(Tavily), `fetch_source`(Tavily extract, 키가 없을 때는 Jina Reader로 대체) | `websearch` | 도메인에 따라 1~4 | 예 | 검색은 `topic=news`이면 15분, 그 외 12시간. 가져온 페이지는 12시간 |
 | Gemini Google 검색 그라운딩 | `grounded_web_answer` | `grounded_web` | 3 | 예 | 절대 캐시하지 않음 |
 
 웹 등급은 엄선한 허용 목록이 아니라 거친 도메인 규칙입니다. 1등급은 `sec.gov`, 주요 거래소, 그리고 `ir.`·`investor.`·`investors.`로 시작하는 호스트입니다. 2등급은 Reuters, Bloomberg, WSJ, FT, Benzinga입니다. 4등급은 Reddit, Medium, Substack 같은 블로그·포럼 플랫폼입니다. 나머지는 모두 3등급입니다. 로컬 데이터와 브로커 데이터는 도메인 때문이 아니라 이 앱의 1차 데이터이므로 1등급입니다.
 
-커넥터의 HTTP는 모두 하나의 `HttpClient`를 거칩니다. 호스트별 속도 제한(SEC 초당 5회, Tavily 1.5회, Jina Reader 0.3회), 429와 5xx에 대한 GET 최대 3회 시도, POST 재시도 없음, 자격 증명처럼 보이는 헤더와 쿼리 파라미터의 로그 가림이 여기서 적용됩니다.
+커넥터의 HTTP는 모두 하나의 `HttpClient`를 거칩니다. 호스트별 속도 제한(SEC 초당 5회, Tavily 1.5회, Jina Reader 0.3회), 429와 5xx에 대한 GET 최대 3회 시도, POST 재시도 없음, 자격 증명처럼 보이는 헤더와 쿼리 파라미터의 로그 가림이 여기서 적용됩니다. 실패는 모두 `HttpError`이며, 응답을 아예 받지 못한 요청(타임아웃, 연결 오류, 프로토콜 오류)도 상태 0과 예외 유형 이름만 담은 `HttpError`가 됩니다. 그래서 커넥터는 언제든 대체 경로로 넘어갈 수 있습니다(예: Tavily extract에서 Jina Reader로).
+
+**공시 문서.** `sec_filing_passages`는 공시의 주 문서를 내려받은 직후 500만 자로 자르고(잘랐으면 결과에 그렇게 적음. 10-K의 Item 1~7은 보통 이 안에 넉넉히 들어감), `sanitize_untrusted`와 같은 숨김 요소 규칙으로 보이는 텍스트만 추출하며, HTML 파싱과 BM25 순위 계산은 작업 스레드에서 실행합니다. 그래서 수 MB짜리 인라인 XBRL 공시도 다른 세션, keep-alive, `/answer`, confirm이 쓰는 이벤트 루프를 멈추지 않습니다. 캐시에는 HTML이 아니라 추출한 청크를 저장하므로, 캐시에 있으면 다시 내려받지도 파싱하지도 않습니다.
 
 ### 도구 가용성
 
@@ -669,15 +674,16 @@ flowchart LR
 
 ### 외부 텍스트는 신뢰하지 않는다
 
-웹 페이지, 뉴스, 공시 본문, 스크리너 문자열, 그라운딩 답변, 브로커 오류 메시지는 제3자가 쓴 글입니다. 따라서 모델을 겨냥한 지시문이 들어 있을 수 있는 데이터로 취급합니다.
+웹 페이지, 뉴스, 공시 본문, 스크리너 문자열, 그라운딩 답변, 상품 Q&A 에이전트의 답변, 브로커 오류 메시지는 제3자(또는 모델)가 쓴 글입니다. 따라서 모델을 겨냥한 지시문이 들어 있을 수 있는 데이터로 취급합니다.
 
 1. `sanitize_untrusted`는 텍스트를 사람이 렌더링된 화면에서 볼 내용으로 줄입니다. 태그, 주석, `script`·`style`·`template`·`iframe` 내용, `hidden` 속성이나 `aria-hidden="true"`나 인라인 CSS(`display:none`, `visibility:hidden`, `opacity:0`, `font-size:0`)로 가려진 요소, 폭이 0인 문자를 버립니다. 그 뒤 공백을 합치고 길이를 제한합니다.
-2. `wrap_untrusted`가 결과를 `<untrusted source="E7">...</untrusted>`로 감쌉니다. 텍스트 안의 `</untrusted>`는 이스케이프되므로, 주입된 글이 블록을 일찍 끝낼 수 없습니다.
-3. `ChatToolbox`가 모든 커넥터 결과를 다시 검사합니다. 비신뢰 소스마다 자기 블록이 있고 블록 밖에 남은 래퍼 태그가 없다는 조건이 깨지면, 전체 텍스트를 다시 정제하고 감쌉니다.
-4. 시스템 프롬프트는 이 블록 안의 텍스트가 데이터이며, 지시로 따르지 말고, 투자 원칙·도구 호출·제안을 바꾸는 데 쓰지 말라고 알려 줍니다.
-5. 가져온 페이지는 파싱 전에 50만 자로 자르고, 발췌를 고르기 전에 숨겨진 내용을 먼저 제거합니다. 그래서 자르는 위치가 숨겨진 블록을 드러내지 못합니다.
-6. 앱 자체 데이터(호가, 일봉, 계좌, 상품 DB)의 숫자는 감싸지 않습니다.
-7. 가져온 텍스트 안의 URL을 코드가 따라가는 경로는 없습니다. 모델이 직접 `fetch_source`를 호출해야 하며, 이 도구는 `http`와 `https` URL만 받습니다.
+2. `wrap_untrusted`가 결과를 `<untrusted source="E7">...</untrusted>`로 감쌉니다. 블록 안에서는 `<`로 읽히는 문자(ASCII, 전각 `＜`, 작은 꼴 `﹤`)를 모두 `‹`로 바꾸고, 보이지 않는 코드 포인트(소프트 하이픈, U+2061~U+2064, 양방향 제어 문자, 태그 문자 같은 유니코드 default-ignorable 문자와 제어 문자)를 지우며, `[E2]` 같은 근거 표지(띄어 쓰거나 소문자나 전각으로 쓴 것 포함)는 `(E2 cited in source text)`로 바꿉니다. 그래서 주입된 글은 자기 블록을 끝내지도, 가짜 블록을 열지도, 도구가 붙인 출처인 척하지도 못합니다.
+3. `ChatToolbox`가 모든 커넥터 결과를 다시 검사합니다. 블록 맨 앞의 여는 태그만 인정합니다. 비신뢰 소스마다 자기 블록이 있고 그 밖의 곳(블록 안이든 밖이든)에 래퍼 태그가 없다는 조건이 깨지면, 전체 텍스트를 다시 정제하고 감쌉니다.
+4. 시스템 프롬프트는 이 블록 안의 텍스트가 데이터이며, 지시로 따르지 말고, 투자 원칙·도구 호출·제안을 바꾸는 데 쓰지 말라고 알려 줍니다. 블록 안에 적힌 근거 ID는 출처가 아니라 그 글의 일부라는 점과, `fetch_source`는 검색 결과의 URL과 사용자가 쓴 링크만 연다는 점도 알려 줍니다.
+5. 가져온 페이지는 파싱 전에 50만 자로, 공시 문서는 500만 자로 자르고, 발췌를 고르기 전에 숨겨진 내용을 먼저 제거합니다. 그래서 자르는 위치가 숨겨진 블록을 드러내지 못합니다.
+6. 앱 자체 데이터(호가, 일봉, 계좌, 상품 DB 스크리닝)의 숫자는 감싸지 않습니다. 상품 Q&A 에이전트의 답변은 감쌉니다. 모델이 쓴 글이고 질문을 그대로 되풀이할 수 있기 때문입니다.
+7. 가져온 텍스트 안의 URL을 코드가 따라가는 경로는 없습니다. `fetch_source`는 세션의 근거 레코드 가운데 하나의 URL과 정확히 같거나(이를 위해 웹 검색 결과는 정제한 제목과 URL을 자기 블록 안에 보여 줌), 사용자가 이 세션에서 쓴 메시지에 그대로 들어 있는 `http`·`https` URL만 엽니다. 그 밖의 URL은 도구 오류("I can only open pages from search results or links you gave me")로 거부하므로, 주입된 페이지가 자기가 지정한 주소로 모델이 데이터를 보내게 만들 수 없습니다.
+8. 리스크 사유 메시지가 인용하는 브로커 문자열(계좌·종목 상태, 자산 분류, 주문 ID, 다음 개장 시각)은 먼저 안전한 토큰 하나로 줄입니다. 영문자, 숫자, `_ . : + -`만 남기고 최대 32자입니다. 모델 제공자의 오류는 예외 유형과 HTTP 상태만 로그에 남기고, 제공자가 보낸 텍스트는 절대 남기지 않습니다.
 
 ### 그라운딩 결과를 캐시하지 않는 이유
 
@@ -953,7 +959,7 @@ stateDiagram-v2
 **인용.** 시스템 프롬프트는 모델에게 뒷받침하는 주장 바로 뒤에 `[E#]`를 붙이고, 이 대화에서 도구 출력으로 확인된 ID만 인용하라고 지시합니다. 거래에 관한 규칙은 코드로 강제합니다.
 
 - `propose_trades`는 `evidence_ids`(최대 30개)를 받습니다. 세션에 없는 ID가 있으면 호출이 모델이 읽을 수 있는 오류로 실패합니다.
-- **매수** 레그가 있는 제안은 리서치 소스를 하나 이상 인용해야 합니다. 커넥터가 `alpaca_quotes`, `alpaca_bars`, `alpaca_screener`가 아닌 레코드만 리서치로 칩니다. 호가, 가격 지표, 급등락 종목만으로는 부족합니다. 목록이 비어 있어도 마찬가지로 실패합니다. 매도만 있는 제안에는 리서치 소스가 필요하지 않습니다.
+- **매수** 레그가 있는 제안은 리서치 소스를 하나 이상 인용해야 합니다. 커넥터가 `alpaca_quotes`, `alpaca_bars`, `alpaca_screener`가 아닌 레코드만 리서치로 칩니다. 호가, 가격 지표, 급등락 종목만으로는 부족합니다. 비신뢰 레코드(웹 페이지, 공시 본문, 자체 상품 DB를 근거로 답하는 상품 Q&A 에이전트의 답변)도 리서치로 칩니다. 이 검사는 매수 뒤에 리서치가 있는지를 보는 것이지, 신뢰할 수 있는 글인지를 보는 것이 아닙니다. 목록이 비어 있어도 마찬가지로 실패합니다. 매도만 있는 제안에는 리서치 소스가 필요하지 않습니다.
 - ID는 티켓에 저장되며 requote와 refresh 경로가 새 티켓으로 그대로 넘깁니다.
 
 이 검사는 구조적인 것입니다. 인용한 ID가 존재하고 종류가 맞다는 것까지만 증명합니다. 인용한 출처가 주장을 뒷받침하는지는 증명하지 못하며, 등급도 거칠게 매겨집니다(11절).

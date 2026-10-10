@@ -250,7 +250,7 @@ Order within a turn: `start`; then for each round an optional `reasoning-delta` 
 | `tier` | Trust tier: 1 for primary sources such as SEC filings; higher numbers are less authoritative |
 | `published_at` | Publication date as a string, or `null` |
 | `connector` | The research tool that recorded it, for example `edgar` |
-| `untrusted` | `true` for text taken from outside the trusted sources, such as web search results |
+| `untrusted` | `true` for text taken from outside the trusted sources, such as web search results, and for the product Q&A agent's answers (`connector: "product_qa"`), which a model writes |
 | `snippet` | The stored excerpt, cut to 500 characters |
 
 ```json
@@ -848,7 +848,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `tier` | 신뢰 등급: SEC 공시 같은 1차 출처는 1이고, 숫자가 클수록 덜 권위 있는 출처입니다 |
 | `published_at` | 문자열로 된 발행일, 없으면 `null` |
 | `connector` | 이 기록을 남긴 리서치 도구(예: `edgar`) |
-| `untrusted` | 웹 검색 결과처럼 신뢰 출처 밖에서 가져온 텍스트면 `true` |
+| `untrusted` | 웹 검색 결과처럼 신뢰 출처 밖에서 가져온 텍스트, 그리고 모델이 쓰는 상품 Q&A 에이전트의 답변(`connector: "product_qa"`)이면 `true` |
 | `snippet` | 저장된 발췌문, 최대 500자 |
 
 ```json
