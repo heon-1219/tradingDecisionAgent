@@ -11,16 +11,33 @@ structured JSON APIs, so they are recorded as trusted (`untrusted=False`). Filin
 (`filing_passages`) is prose pulled out of a company's own HTML filing, so it is sanitized, marked
 `untrusted=True` and wrapped with `wrap_untrusted` before it reaches the model, per the project's
 "external text is untrusted" constraint.
+
+**Filing documents** (`filing_passages`) can be tens of megabytes of inline-XBRL HTML, so:
+- the downloaded document is cut at `EDGAR_DOCUMENT_MAX_CHARS` before anything else, and the result
+  says so when that happened;
+- the text is extracted with `evidence.strip_hidden_markup`, so text hidden from a reader
+  (`display:none`, the `hidden` attribute, zero font size, ...) never reaches the model;
+- the HTML parse and the BM25 ranking run in a worker thread (`asyncio.to_thread`), so a big filing
+  never stalls the event loop (other sessions, SSE keep-alives, `/answer`, confirms);
+- the cache keeps the extracted chunks, not the raw HTML, so a cache hit neither downloads nor
+  parses the document again.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from html.parser import HTMLParser
 
 from rank_bm25 import BM25Okapi
 
-from .evidence import EvidenceStore, ResearchResult, SourceRecord, sanitize_untrusted, wrap_untrusted
+from .evidence import (
+    EvidenceStore,
+    ResearchResult,
+    SourceRecord,
+    collapse_whitespace,
+    strip_hidden_markup,
+    wrap_untrusted,
+)
 from .http import HttpClient, HttpError
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -32,6 +49,15 @@ _TTL_TICKERS = 24 * 3600
 _TTL_SUBMISSIONS = 12 * 3600
 _TTL_COMPANYFACTS = 12 * 3600
 _TTL_DOCUMENT = 10 * 365 * 24 * 3600  # "permanent": filings are immutable once filed
+# Most characters of a filing's primary document that are processed, applied right after the
+# download (before parsing and caching). A 10-K's Items 1 to 7 normally sit well inside it; the
+# inline-XBRL documents of the largest filers run past 20 MB, which would cost many seconds of
+# parsing for sections (financial statements, exhibits) that XBRL facts cover better anyway.
+EDGAR_DOCUMENT_MAX_CHARS = 5_000_000
+_DOCUMENT_TRUNCATED_NOTICE = (
+    " (note: the filing document exceeded the size limit and was truncated before processing; "
+    "its later sections are missing)"
+)
 _TTL_FULLTEXT = 15 * 60
 
 _PREFERRED_FORMS = ("10-K", "10-Q")
@@ -39,61 +65,26 @@ _PREFERRED_FORMS = ("10-K", "10-Q")
 _CIK_ONLY_RE = re.compile(r"^\d{1,10}$")
 _ITEM_HEADING_RE = re.compile(r"^item\s+\d+[a-z]?\.", re.I | re.M)
 _WORD_RE = re.compile(r"\w+")
+_INLINE_SPACE_RE = re.compile(r"[^\S\n]+")
 _MAX_CHUNK_CHARS = 2000
+_CHUNKS_CACHE_PREFIX = "edgar:chunks:v2"
 
 
-# --- minimal HTML -> text -------------------------------------------------------------
-
-
-class _HTMLTextExtractor(HTMLParser):
-    """Stdlib-only HTML-to-text: keeps block boundaries as newlines and table rows as lines."""
-
-    _SKIP_TAGS = {"script", "style"}
-    _BLOCK_TAGS = {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "br"}
-    _CELL_TAGS = {"td", "th"}
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        if tag in self._SKIP_TAGS:
-            self._skip_depth += 1
-        elif tag in self._BLOCK_TAGS:
-            self._parts.append("\n")
-        elif tag in self._CELL_TAGS:
-            self._parts.append(" | ")
-
-    def handle_startendtag(self, tag: str, attrs) -> None:
-        if tag in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in self._SKIP_TAGS:
-            self._skip_depth = max(0, self._skip_depth - 1)
-        elif tag in self._BLOCK_TAGS:
-            self._parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth:
-            return
-        self._parts.append(data)
-
-    def text(self) -> str:
-        raw = "".join(self._parts)
-        lines = [re.sub(r"[ \t]+", " ", ln).strip(" \t") for ln in raw.splitlines()]
-        # A table row's first cell leaves a leading "| " artifact (the " | " separator is
-        # emitted before every <td>/<th>, including the first one in a row) - drop it.
-        lines = [re.sub(r"^\|\s*", "", ln) for ln in lines]
-        lines = [ln for ln in lines if ln]
-        return "\n".join(lines)
+# --- HTML -> text, chunks and ranking (pure, CPU-bound: run in a worker thread) ------------
 
 
 def _html_to_text(html: str) -> str:
-    parser = _HTMLTextExtractor()
-    parser.feed(html)
-    return parser.text()
+    """The text a reader of the filing sees: hidden elements, scripts and styles dropped
+    (`strip_hidden_markup`), one line per block with whitespace collapsed, and at most one blank
+    line between blocks, so `_split_into_chunks` can split long sections into paragraphs."""
+    lines: list[str] = []
+    for raw in strip_hidden_markup(html).splitlines():
+        line = _INLINE_SPACE_RE.sub(" ", raw).strip()
+        if line:
+            lines.append(line)
+        elif lines and lines[-1]:
+            lines.append("")
+    return "\n".join(lines).strip()
 
 
 def _split_into_chunks(text: str) -> list[tuple[str, str]]:
@@ -131,6 +122,22 @@ def _split_into_chunks(text: str) -> list[tuple[str, str]]:
         if buf:
             chunks.append((heading, buf))
     return chunks
+
+
+def _extract_chunks(html: str) -> list[tuple[str, str]]:
+    """A filing document as (section heading, text) chunks. CPU-bound: called in a thread."""
+    return _split_into_chunks(_html_to_text(html))
+
+
+def _rank_chunks(
+    chunks: list[tuple[str, str]], query: str, k: int
+) -> list[tuple[str, str]]:
+    """The `k` chunks most relevant to `query` (BM25). CPU-bound: called in a thread."""
+    tokenized_corpus = [_WORD_RE.findall(c[1].lower()) for c in chunks]
+    bm25 = BM25Okapi(tokenized_corpus)
+    scores = bm25.get_scores(_WORD_RE.findall(query.lower()))
+    ranked = sorted(zip(chunks, scores), key=lambda pair: pair[1], reverse=True)
+    return [chunk for chunk, _score in ranked[:k]]
 
 
 class Edgar:
@@ -224,19 +231,29 @@ class Edgar:
         self._evidence.cache_put(key, data)
         return data
 
-    async def _document_text(self, cik10: str, accession_no: str, primary_document: str) -> str | None:
+    async def _document_chunks(
+        self, cik10: str, accession_no: str, primary_document: str
+    ) -> tuple[list[tuple[str, str]], bool] | None:
+        """The filing document's extracted (heading, text) chunks and whether the document was
+        cut at `EDGAR_DOCUMENT_MAX_CHARS`; None when it could not be fetched. The extracted chunks
+        are cached (filings never change), never the raw HTML, and the parse runs in a thread."""
         accn_nodash = accession_no.replace("-", "")
-        key = f"edgar:document:{cik10}:{accn_nodash}:{primary_document}"
-        html = self._evidence.cache_get(key, _TTL_DOCUMENT)
-        if html is not None:
-            return html
+        key = f"{_CHUNKS_CACHE_PREFIX}:{cik10}:{accn_nodash}:{primary_document}"
+        cached = self._evidence.cache_get(key, _TTL_DOCUMENT)
+        if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
+            chunks = [(str(heading), str(text)) for heading, text in cached["chunks"]]
+            return chunks, bool(cached.get("truncated"))
         url = self._document_url(cik10, accession_no, primary_document)
         try:
             html = await self._http.get_text(url, headers=self._headers())
         except HttpError:
             return None
-        self._evidence.cache_put(key, html)
-        return html
+        truncated = len(html) > EDGAR_DOCUMENT_MAX_CHARS
+        if truncated:
+            html = html[:EDGAR_DOCUMENT_MAX_CHARS]
+        chunks = await asyncio.to_thread(_extract_chunks, html)
+        self._evidence.cache_put(key, {"chunks": [list(c) for c in chunks], "truncated": truncated})
+        return chunks, truncated
 
     # --- public API ----------------------------------------------------------------
 
@@ -452,16 +469,15 @@ class Edgar:
                 is_error=True,
             )
 
-        html = await self._document_text(cik10, accession_no, primary_doc)
-        if html is None:
+        document = await self._document_chunks(cik10, accession_no, primary_doc)
+        if document is None:
             return ResearchResult(
                 text=f"Could not fetch filing document for accession {accession_no}.",
                 sources=[],
                 is_error=True,
             )
 
-        text = _html_to_text(html)
-        chunks = _split_into_chunks(text)
+        chunks, truncated = document
         if sections:
             wanted = [s.lower() for s in sections]
             filtered = [c for c in chunks if any(w in c[0].lower() for w in wanted)]
@@ -475,18 +491,15 @@ class Edgar:
                 is_error=True,
             )
 
-        tokenized_corpus = [_WORD_RE.findall(c[1].lower()) for c in chunks]
-        bm25 = BM25Okapi(tokenized_corpus)
-        query_tokens = _WORD_RE.findall(query.lower())
-        scores = bm25.get_scores(query_tokens)
-        ranked = sorted(zip(chunks, scores), key=lambda pair: pair[1], reverse=True)
-        top = ranked[:k]
+        top = await asyncio.to_thread(_rank_chunks, chunks, query, k)
 
         doc_url = self._document_url(cik10, accession_no, primary_doc)
         sources: list[SourceRecord] = []
         lines: list[str] = []
-        for (heading, chunk_text), _score in top:
-            clean = sanitize_untrusted(chunk_text, max_chars=_MAX_CHUNK_CHARS)
+        for heading, chunk_text in top:
+            # Already visible text (strip_hidden_markup ran on the whole document): only collapse
+            # and cap. Stripping again would read a decoded "&lt;tag&gt;" in the prose as markup.
+            clean = collapse_whitespace(chunk_text, max_chars=_MAX_CHUNK_CHARS)
             source = self._evidence.add(
                 session_id,
                 connector="edgar",
@@ -501,7 +514,8 @@ class Edgar:
             sources.append(source)
             lines.append(f"[{source.id}] {wrap_untrusted(source.id, clean)}")
 
-        return ResearchResult(text="\n".join(lines), sources=sources)
+        notice = _DOCUMENT_TRUNCATED_NOTICE if truncated else ""
+        return ResearchResult(text="\n".join(lines) + notice, sources=sources)
 
     async def fulltext(
         self,
