@@ -10,7 +10,7 @@ import {
   advance, clock, decision, dict, dispatch, document, emit, finish, flush, leg, liveTurn, net, on, order, panel,
   refreshPortfolio,
   replayTurn,
-  setState, sources, test, thread, ticker, ticket,
+  setState, sources, t, test, thread, ticker, ticket,
 } from './component_harness.mjs';
 import { setLang } from '../web/app/js/i18n.js';
 import { ticketIds } from '../web/app/js/components/ticket-store.js';
@@ -22,8 +22,33 @@ const noticeText = (card) => card.querySelector('.ticket-notice').textContent;
 // The server's own words, kept in a collapsed detail row (only when they add something).
 const serverDetail = (card) => card.querySelector('.ticket-notice').querySelector('.notice-detail');
 const confirmPosts = () => calls.filter((c) => c.method === 'POST' && c.path.endsWith('/confirm'));
+// The live region of index.html. notify.js clears it, then fills it 60 ms later, so one announce() is one
+// write of '' and the last write is what a screen reader reads; the spy keeps every write.
+const announcer = document.createElement('div');
+announcer.id = 'announcer';
+document.body.appendChild(announcer);
+const writes = [];
+let spoken = '';
+Object.defineProperty(announcer, 'textContent', {
+  get: () => spoken,
+  set(value) {
+    spoken = String(value);
+    writes.push(spoken);
+  },
+});
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/* Let every pending announcement land, then forget what was announced so far. */
+const quietAnnouncer = async () => {
+  await wait(90);
+  writes.length = 0;
+};
+/* How many announcements were made since, and the text now in the live region. */
+const announced = async () => {
+  await wait(90);
+  return { calls: writes.filter((w) => w === '').length, text: spoken };
+};
 // E1 is a known source of chat s1; the tickets below also cite E9, which is not.
-sources.seedSources('s1', [{ id: 'E1', title: 'Alpaca IEX quotes', publisher: 'Alpaca Markets', tier: 1 }]);
+sources.seedSources('s1',[{ id: 'E1', title: 'Alpaca IEX quotes', publisher: 'Alpaca Markets', tier: 1 }]);
 
 // --- the trade ticket card ------------------------------------------------------------------------------------
 
@@ -715,6 +740,70 @@ await test('while any row is uncertain the header says "Outcome unknown" and the
   assert.equal(badgeOf(card).textContent, dict.en.ticket_state_submitted);
   assert.equal(footOf(card).textContent, dict.en.timeline_settled);
   card.remove();
+});
+
+await test('an uncertain answer that later settles is announced once, when it settles', async () => {
+  const lost = { client_order_id: 'c1', broker_order_id: null, order: null };
+  const placed = (n) => ({ client_order_id: `c${n}`, broker_order_id: `o${n}`, order: order({ id: `o${n}`, client_order_id: `c${n}` }) });
+  const answerOf = (tk, status) => ({ method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status, body: {
+    status: status === 200 ? 'submitted' : 'error', message: '1 of 2 orders placed.', ticket: { ...tk, status: 'submitted' },
+    orders: status === 200 ? [order()] : [], new_ticket: null, reason: null, block_codes: [] } });
+  const checkAgain = (card) => card.querySelector('.ticket-notice').querySelectorAll('button').find((b) => b.textContent === 'Check again');
+  const confirmed = async (tk, status, rows) => {
+    net.routes = [portfolio, answerOf(tk, status), ticketRead({ ...tk, status: 'submitted' }, rows)];
+    await quietAnnouncer();
+    const { card } = propose(tk);
+    button(card, 'btn-confirm').click();
+    await flush();
+    return card;
+  };
+  // one leg placed, one failed: the first answer is uncertain ("did not finish"), the re-read settles it
+  const half = ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  let card = await confirmed(half, 200, [placed(0), lost]);
+  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
+  // still uncertain on the next look: nothing new to say
+  checkAgain(card).click();
+  await flush();
+  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
+  // the second leg turns out to have failed: the ordinary partial result is announced, once, even when two
+  // re-reads are in flight together
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  net.routes = [portfolio, { ...ticketRead({ ...half, status: 'submitted' }, [placed(0)]), gate }];
+  checkAgain(card).click();
+  checkAgain(card).click();
+  await flush();
+  release();
+  await flush();
+  assert.ok(noticeText(card).startsWith('1 of 2 orders were sent'), noticeText(card));
+  const partial = await announced();
+  assert.equal(partial.text, '1 of 2 orders were submitted. The rest were not placed.');
+  assert.equal(partial.calls, 2, 'the uncertain answer, then the settled one: no repeat');
+  assert.ok(!partial.text.includes('Orders submitted'), 'a partial result is not announced as plain success');
+  card.remove();
+  // the missing leg was placed after all: the plain success is announced
+  const both = ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  card = await confirmed(both, 200, [placed(0), lost]);
+  net.routes = [portfolio, ticketRead({ ...both, status: 'submitted' }, [placed(0), placed(1)])];
+  checkAgain(card).click();
+  await flush();
+  assert.deepEqual(await announced(), { calls: 2, text: dict.en.ticket_announce_submitted });
+  card.remove();
+  // a 502 whose re-read settles leaves the card's words as they are: nothing new is announced
+  const bad = ticket();
+  card = await confirmed(bad, 502, [{ client_order_id: 'c0', broker_order_id: null, order: null }]);
+  net.routes = [portfolio, ticketRead({ ...bad, status: 'submitted' }, [placed(0)])];
+  checkAgain(card).click();
+  await flush();
+  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
+  card.remove();
+  // the Korean wording takes the same numbers
+  setLang('ko');
+  try {
+    assert.equal(t('ticket_announce_partial', { placed: 1, total: 2 }), '주문 2건 중 1건을 전송했습니다. 나머지는 들어가지 않았습니다.');
+  } finally {
+    setLang('en');
+  }
 });
 
 await test('uncertain confirm: a re-read that finds the ticket still proposed says nothing was placed', async () => {

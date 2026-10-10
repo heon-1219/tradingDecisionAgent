@@ -234,9 +234,12 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         if (ticket.status === 'proposed') setNotice({ tone: 'muted', key: 'ticket_uncertain_none' });
         // A 200 with unconfirmed legs, and no uncertain row: those legs failed; the ordinary result.
         const rows = Array.isArray(fresh.orders) ? fresh.orders : [];
+        // The first answer was announced as "did not finish": say how it ended, once (`unconfirmed` is cleared).
         if (unconfirmed !== null && ticket.status === 'submitted' && !rows.some((row) => row && !row.order)) {
-          setNotice(submittedNotice(rows.map((row) => row && row.order).filter(Boolean), executableLegs(ticket).length,
-            unconfirmed));
+          const spec = submittedNotice(rows.map((row) => row && row.order).filter(Boolean), executableLegs(ticket).length,
+            unconfirmed);
+          setNotice(spec);
+          announce(spec.also ? t('ticket_announce_partial', spec.vars) : t('ticket_announce_submitted'));
           unconfirmed = null;
         }
         if (timeline) timeline.update(fresh); // its rows and footer follow this read

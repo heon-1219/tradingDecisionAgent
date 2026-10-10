@@ -177,6 +177,7 @@ export default {
   ticket_announce_rejected: 'Ticket rejected',
   ticket_announce_not_placed: 'Nothing was submitted',
   ticket_announce_uncertain: 'The confirmation did not finish. Check your open orders.',
+  ticket_announce_partial: '{placed} of {total} orders were submitted. The rest were not placed.',
 
   // Order timeline and the Orders panel
   timeline_heading: 'Orders',

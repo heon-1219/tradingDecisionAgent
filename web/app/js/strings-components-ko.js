@@ -176,6 +176,7 @@ export default {
   ticket_announce_rejected: '티켓을 거절했습니다',
   ticket_announce_not_placed: '아무것도 전송하지 않았습니다',
   ticket_announce_uncertain: '승인 처리가 끝나지 않았습니다. 미체결 주문을 확인해 주세요.',
+  ticket_announce_partial: '주문 {total}건 중 {placed}건을 전송했습니다. 나머지는 들어가지 않았습니다.',
 
   // Order timeline and the Orders panel
   timeline_heading: '주문 진행 상황',
