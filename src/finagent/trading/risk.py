@@ -48,9 +48,15 @@ the whole working position, so a sub-$1 residual can always be closed. Accepted 
 come back with plain-form Decimals (qty without exponent or trailing zeros, notional in cents,
 limit price at its tick precision); a leg with more than MAX_LEG_DIGITS digits is rejected
 (`precision`) up front, so no value is ever rounded silently.
+
+Reason messages reach the model. A string they quote from the broker (an account or asset status,
+the asset class, an open order's id, the next market open) is first reduced to one safe token
+(`_token`: letters, digits and `_ . : + -`, at most 32 characters), so it cannot carry an
+instruction or markup.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import (
     ROUND_CEILING,
@@ -272,6 +278,18 @@ def _pct(value: Decimal) -> str:
     return f"{_plain(value):f}%"
 
 
+_TOKEN_STRIP_RE = re.compile(r"[^A-Za-z0-9_.:+\-]")
+_TOKEN_MAX_CHARS = 32
+
+
+def _token(value: object) -> str:
+    """A provider string (account or asset status, asset class, order id, clock time) reduced to
+    one safe token before it goes into a reason message the model reads: only letters, digits and
+    `_ . : + -`, at most 32 characters, "unknown" when nothing is left. Alpaca's own values
+    ("ACTIVE", "us_equity", a UUID, an RFC 3339 time) pass unchanged."""
+    return _TOKEN_STRIP_RE.sub("", str(value if value is not None else ""))[:_TOKEN_MAX_CHARS] or "unknown"
+
+
 # --- working state -------------------------------------------------------------------------------
 
 
@@ -427,7 +445,7 @@ def _account_blocked(c: _Check) -> None:
         if getattr(account, name)
     ]
     if account.status.upper() != "ACTIVE":
-        flags.insert(0, f"status {account.status}")
+        flags.insert(0, f"status {_token(account.status)}")
     if flags:
         c.block("account_blocked", f"The account cannot trade right now ({', '.join(flags)})")
 
@@ -441,9 +459,9 @@ def _asset_not_tradable(c: _Check) -> None:
     if not asset.tradable:
         problems.append("not tradable")
     if asset.status.lower() != "active":
-        problems.append(f"status {asset.status}")
+        problems.append(f"status {_token(asset.status)}")
     if asset.cls.lower() != "us_equity":
-        problems.append(f"asset class {asset.cls}, not us_equity")
+        problems.append(f"asset class {_token(asset.cls)}, not us_equity")
     if problems:
         c.block("asset_not_tradable", f"{symbol} cannot be traded: {', '.join(problems)}")
 
@@ -649,7 +667,7 @@ def _wash_trade(c: _Check) -> None:
         if order.symbol.upper() == leg.symbol and order.side.lower() == opposite:
             c.block(
                 "wash_trade",
-                f"An open {opposite} order for {leg.symbol} (id {order.id}) is on the opposite "
+                f"An open {opposite} order for {leg.symbol} (id {_token(order.id)}) is on the opposite "
                 "side; this order could trade against it (potential wash trade)",
             )
             return
@@ -788,7 +806,7 @@ def _market_closed(c: _Check) -> None:
         c.warn(
             "market_closed",
             f"The market is closed; this order queues until the next open "
-            f"({c.ctx.clock.next_open})",
+            f"({_token(c.ctx.clock.next_open)})",
         )
 
 
