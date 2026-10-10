@@ -383,3 +383,77 @@ async def test_an_output_cap_that_is_only_too_large_is_not_swapped():
     fake = FakeGemini((400, too_large))
     turn = await _openai_with(fake).start("sys", TOOLS, "q").step()
     assert turn.stop_reason == "error" and len(fake.bodies) == 1
+
+
+# --- final review C-m5: provider errors are logged by type and status only ----------------------
+
+PROVIDER_TEXT = "PROVIDER-BODY-MARKER account acct_12345 prompt excerpt"
+
+
+def _ours(caplog) -> str:
+    """What this app logged (the SDKs' own DEBUG records are theirs)."""
+    return "\n".join(r.getMessage() for r in caplog.records if r.name.startswith("finagent"))
+
+
+async def test_an_openai_compatible_error_is_logged_without_the_providers_text(caplog):
+    body = {"error": {"code": 400, "message": f"bad request: {PROVIDER_TEXT}", "status": "INVALID_ARGUMENT"}}
+    fake = FakeGemini((400, body))
+    with caplog.at_level("DEBUG"):
+        turn = await _gemini_with(fake).start("sys", TOOLS, "q").step()
+    assert turn.stop_reason == "error"
+    assert "BadRequestError" in _ours(caplog) and "400" in _ours(caplog)
+    assert "PROVIDER-BODY-MARKER" not in _ours(caplog)
+
+
+async def test_a_rejected_reasoning_effort_is_logged_without_the_providers_text(caplog):
+    rejected = {"error": {"code": 400, "message": f"reasoning_effort is not supported: {PROVIDER_TEXT}",
+                          "status": "INVALID_ARGUMENT"}}
+    fake = FakeGemini((400, rejected), (200, _completion({"content": "ok"})))
+    with caplog.at_level("DEBUG"):
+        assert (await _gemini_with(fake).start("sys", TOOLS, "q").step()).text == "ok"
+    assert "rejected reasoning_effort" in _ours(caplog)
+    assert "PROVIDER-BODY-MARKER" not in _ours(caplog)
+
+
+def _anthropic_conversation(*responses: tuple[int, dict], fallbacks: bool = False):
+    import anthropic
+
+    import httpx2  # the installed anthropic SDK is built on httpx2, not httpx
+
+    queue = list(responses)
+
+    def handler(request):
+        status, body = queue.pop(0)
+        return httpx2.Response(status, json=body)
+
+    client = anthropic.AsyncAnthropic(api_key="k", max_retries=0,
+                                      http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    return AnthropicConversation(client, "claude-test", "low", 100, fallbacks, "sys", [], "q")
+
+
+_ANTHROPIC_OK = {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-test",
+                 "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn", "stop_sequence": None,
+                 "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+
+async def test_an_anthropic_error_is_logged_without_the_providers_text(caplog):
+    conv = _anthropic_conversation((500, {"type": "error", "error": {"type": "api_error", "message": PROVIDER_TEXT}}))
+    with caplog.at_level("DEBUG"):
+        turn = await conv.step()
+    assert turn.stop_reason == "error"
+    assert "InternalServerError" in _ours(caplog) and "500" in _ours(caplog)
+    assert "PROVIDER-BODY-MARKER" not in _ours(caplog)
+
+
+@pytest.mark.parametrize("fallbacks, message", [
+    (True, f"fallbacks beta is not available: {PROVIDER_TEXT}"),
+    (False, f"effort is not supported for this model: {PROVIDER_TEXT}"),
+])
+async def test_an_anthropic_retry_warning_is_logged_without_the_providers_text(caplog, fallbacks, message):
+    conv = _anthropic_conversation(
+        (400, {"type": "error", "error": {"type": "invalid_request_error", "message": message}}),
+        (200, _ANTHROPIC_OK), fallbacks=fallbacks)
+    with caplog.at_level("DEBUG"):
+        assert (await conv.step()).text == "ok"
+    assert "retrying" in _ours(caplog)
+    assert "PROVIDER-BODY-MARKER" not in _ours(caplog)

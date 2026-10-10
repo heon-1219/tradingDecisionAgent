@@ -8,6 +8,10 @@ to get the next assistant turn, and `add_tool_results()` to feed tool outputs ba
 runtime and the chat agent all hold the same handle, and `swap()` changes the provider client behind
 it for all of them at once (PUT /api/settings). A conversation keeps the client that started it, so
 a turn already running finishes on the old one.
+
+A provider error is logged by its exception type and HTTP status only (`_describe`), never with
+its message: that is the provider's response text, which can quote the prompt, account details or
+a key.
 """
 from __future__ import annotations
 
@@ -17,6 +21,12 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 log = logging.getLogger("finagent.llm")
+
+
+def _describe(exc: BaseException) -> str:
+    """A provider error for the log: its type and HTTP status, never its message."""
+    status = getattr(exc, "status_code", None)
+    return f"{type(exc).__name__} (status {status})" if status is not None else type(exc).__name__
 
 
 @dataclass
@@ -175,18 +185,18 @@ class AnthropicConversation:
             except anthropic.BadRequestError as e:
                 msg = str(e).lower()
                 if self.fallbacks and ("fallback" in msg or "beta" in msg):
-                    log.warning("fallbacks unsupported here, retrying without: %s", e)
+                    log.warning("fallbacks unsupported here, retrying without: %s", _describe(e))
                     self.fallbacks = False
                     resp = await self.client.messages.create(**kwargs)
                 elif "effort" in msg or "thinking" in msg or "output_config" in msg:
-                    log.warning("effort/thinking unsupported for %s, retrying plain: %s", self.model, e)
+                    log.warning("effort/thinking unsupported for %s, retrying plain: %s", self.model, _describe(e))
                     kwargs.pop("thinking", None)
                     kwargs.pop("output_config", None)
                     resp = await self.client.messages.create(**kwargs)
                 else:
                     raise
         except (anthropic.APIStatusError, anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
-            log.error("anthropic error: %s", e)
+            log.error("anthropic error: %s", _describe(e))
             return Turn(f"LLM call error: {type(e).__name__}: {e}", [], "error")
 
         self.messages.append({"role": "assistant", "content": resp.content})
@@ -451,7 +461,7 @@ class OpenAIConversation:
         try:
             resp = await self._create()
         except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
-            log.error("openai-compatible error: %s", e)
+            log.error("openai-compatible error: %s", _describe(e))
             return Turn(f"LLM call error: {type(e).__name__}: {e}", [], "error")
         choice = resp.choices[0]
         msg = choice.message
@@ -555,7 +565,7 @@ class GeminiConversation(OpenAIConversation):
             msg = str(e).lower()
             if self.owner.reasoning_effort and ("reasoning" in msg or "thinking" in msg):
                 log.warning("%s rejected reasoning_effort=%s; continuing without it: %s",
-                            self.model, self.owner.reasoning_effort, e)
+                            self.model, self.owner.reasoning_effort, _describe(e))
                 self.owner.reasoning_effort = None
                 return await super()._create()
             raise
