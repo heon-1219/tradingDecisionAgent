@@ -102,7 +102,7 @@ python scripts/check_research.py --grounding        # also one Gemini grounding 
 ```
 
 - **`check_alpaca.py`** runs four independent steps, each with its latency: the account (status, equity, buying power, and whether Alpaca says it is a paper account), the market clock, one IEX snapshot for SPY and the latest 3 news items. By default it writes nothing. Exit code 0 means every step passed, 1 that a step failed, 2 that the keys are missing and 3 that a test order was refused.
-- **`--place-test-order`** submits a 1-share day limit buy of SPY at 50% of the last price, so it cannot fill, then cancels it and reports the final status. On a terminal you must type `PLACE`. It refuses if the account is not a paper account. In Git Bash the script cannot detect a terminal, so use PowerShell or cmd.
+- **`--place-test-order`** submits a 1-share day limit buy of SPY at 50% of the last price, so it cannot fill, then cancels it and reports the final status. On a terminal you must type `PLACE`. It refuses if the account is not a paper account, and while `TRADING_ENABLED` is `false` (the app's kill switch). The script shows only the last 4 characters of the key ID, never any part of the secret key. In Git Bash the script cannot detect a terminal, so use PowerShell or cmd.
 - **`check_research.py`** makes one call per connector and prints the latency and the number of records: SEC EDGAR (AAPL revenue facts, skipped without `SEC_USER_AGENT`), a Tavily search (skipped without a key) and a Jina Reader fetch (no key). `--grounding` adds one Gemini call, which spends free-tier quota. A skipped step is not a failure. It keeps its evidence in a temporary database and never opens the app's `data/store/app.db`.
 
 ### The safety model in brief
@@ -114,7 +114,7 @@ python scripts/check_research.py --grounding        # also one Gemini grounding 
 - **One proposal per turn.** Each ticket carries a SHA-256 hash and expires after 5 minutes.
 - **Human confirmation.** The only route to the broker is `POST /api/tickets/{id}/confirm`, which the Confirm button calls with the ticket's hash. It re-quotes and re-runs the risk rules first, and issues a new ticket instead of submitting if anything material changed.
 - **Claim-first execution, reconcile, no blind retries.** The ticket is claimed before any order is sent, so a double click cannot submit twice. Each order is sent once with a stored `client_order_id`. After a timeout or a server error the app looks the order up by that id instead of resending it.
-- **Kill switch.** One toggle stops all confirmations at once (the API answers 423). It can also suspend trading at the broker and cancel open orders. Research and proposals keep working.
+- **Kill switch.** One toggle stops all confirmations at once (the API answers 423) and saves `TRADING_ENABLED=false` right away. It can also suspend trading at the broker and cancel open orders; turning trading back on in Settings resumes it there too. Research and proposals keep working.
 - **A local-only API.** `/api/*` answers loopback clients only, checks the Host header against an allowlist, and requires an `X-FinAgent-Client` header on every write, so another website open in your browser cannot drive it.
 - **External text is untrusted.** Web pages, news and filings are sanitized, wrapped in `<untrusted>` blocks and labelled as data, and the app never follows a URL found inside them.
 - **Secrets are redacted** in the audit ledger and in logs, and the settings endpoints never return a key.
@@ -430,7 +430,7 @@ Keys, the provider, the model, the effort, `GEMINI_PAID` and the trading switch 
 
 | Variable | Default | Description |
 |---|---|---|
-| `API_ALLOW_REMOTE` | `false` | `true` lets clients that are not on this computer reach `/api/*`. Unsafe without your own authentication in front: `/api/*` can place paper orders and write keys into `.env`. The Host allowlist and the CSRF header still apply |
+| `API_ALLOW_REMOTE` | `false` | `true` lets clients that are not on this computer reach `/api/*`, and lets requests with proxy headers through. Unsafe without your own authentication in front: `/api/*` can place paper orders and write keys into `.env`. The Host allowlist, the cross-site check and the CSRF header still apply. The server logs a warning at startup while it is `true` |
 | `FINAGENT_HOST` | `127.0.0.1` | The host `python -m finagent.api` binds. Read from the process environment, not from `.env` |
 
 ### Gemini integration details
@@ -464,7 +464,7 @@ curl -s http://localhost/health
 - `.env` is listed in `.dockerignore`, so it is never baked into the image (the API key stays out). Compose reads it at runtime through `env_file: .env`, so **the project directory on the host must contain a `.env` file**.
 - Optional HTTPS: set `DOMAIN` in `.env` and run `docker compose --profile https up -d` for Caddy with Let's Encrypt on port 443. This needs a domain that points to the server.
 - The competition server ran exactly this Compose setup on Naver Cloud Platform (VPC · Ubuntu 24.04 · 4 vCPU / 16 GB). The organizers specified the standard HTTP port, so there was no certificate or reverse proxy.
-- This setup serves `/answer`. The paper-trading assistant is meant to run on your own computer (see [Paper-trading assistant](#paper-trading-assistant)). `/api/*` answers loopback clients only, and a request that arrives through Docker's port mapping does not come from a loopback address as the container sees it, so the guard refuses it. The container setup was not changed or tested for the assistant.
+- This setup serves `/answer`. The paper-trading assistant is meant to run on your own computer (see [Paper-trading assistant](#paper-trading-assistant)). `/api/*` answers loopback clients only, and a request that arrives through Docker's port mapping does not come from a loopback address as the container sees it, so the guard refuses it. The image runs uvicorn with `--no-proxy-headers`, so an `X-Forwarded-For` header cannot change that address, and the guard also refuses every `/api/*` request that carries a proxy header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP` or `X-Forwarded-Host`), such as one relayed by the optional Caddy proxy. `/answer` is not affected by either. Apart from that, the container setup was not changed or tested for the assistant.
 
 ## 7. API
 
@@ -858,7 +858,7 @@ python scripts/check_research.py --grounding        # Gemini 그라운딩 호출
 ```
 
 - **`check_alpaca.py`**는 서로 독립적인 네 단계를 실행하고 단계마다 지연시간을 출력합니다. 계좌(상태, 평가액, 매수 가능 금액, 그리고 Alpaca가 모의투자 계좌라고 하는지), 장 시계, SPY의 IEX 스냅샷 1건, 최신 뉴스 3건입니다. 기본값에서는 아무것도 기록하지 않습니다. 종료 코드 0은 모든 단계 통과, 1은 실패한 단계 있음, 2는 키 누락, 3은 테스트 주문 거부를 뜻합니다.
-- **`--place-test-order`**는 마지막 가격의 50%를 지정가로 하는 SPY 1주 당일 매수 주문을 제출합니다. 이 가격에는 체결될 수 없습니다. 그다음 주문을 취소하고 최종 상태를 보고합니다. 터미널에서는 `PLACE`를 직접 입력해야 하며, 모의투자 계좌가 아니면 거부합니다. Git Bash에서는 스크립트가 터미널을 감지하지 못하므로 PowerShell이나 cmd를 쓰십시오.
+- **`--place-test-order`**는 마지막 가격의 50%를 지정가로 하는 SPY 1주 당일 매수 주문을 제출합니다. 이 가격에는 체결될 수 없습니다. 그다음 주문을 취소하고 최종 상태를 보고합니다. 터미널에서는 `PLACE`를 직접 입력해야 하며, 모의투자 계좌가 아니거나 `TRADING_ENABLED`가 `false`(앱의 킬 스위치)이면 거부합니다. 스크립트는 키 ID의 마지막 4자만 보여 주고, 시크릿 키는 일부도 보여 주지 않습니다. Git Bash에서는 스크립트가 터미널을 감지하지 못하므로 PowerShell이나 cmd를 쓰십시오.
 - **`check_research.py`**는 커넥터마다 한 번씩 호출해 지연시간과 레코드 수를 출력합니다. SEC EDGAR(AAPL 매출 데이터, `SEC_USER_AGENT`가 없으면 건너뜀), Tavily 검색(키가 없으면 건너뜀), Jina Reader 가져오기(키 불필요)입니다. `--grounding`은 Gemini 호출을 1회 더하며 무료 등급 한도를 소모합니다. 건너뛴 단계는 실패가 아닙니다. 근거 데이터는 임시 데이터베이스에 두고, 앱의 `data/store/app.db`는 열지 않습니다.
 
 ### 안전 모델 요약
@@ -870,7 +870,7 @@ python scripts/check_research.py --grounding        # Gemini 그라운딩 호출
 - **턴당 제안은 1건.** 티켓마다 SHA-256 해시가 붙고 5분 뒤 만료됩니다.
 - **사람의 승인.** 브로커로 가는 길은 `POST /api/tickets/{id}/confirm` 하나이며, 승인 버튼이 티켓의 해시와 함께 호출합니다. 서버는 먼저 호가를 다시 받아 리스크 규칙을 다시 돌리고, 의미 있는 변화가 있으면 제출하지 않고 새 티켓을 발급합니다.
 - **선점 후 실행, 대조, 무작정 재시도 금지.** 주문을 보내기 전에 티켓을 먼저 선점하므로 더블 클릭으로 두 번 제출될 수 없습니다. 주문은 저장해 둔 `client_order_id`로 한 번만 보냅니다. 타임아웃이나 서버 오류가 나면 다시 보내지 않고 그 ID로 주문을 조회합니다.
-- **킬 스위치.** 스위치 하나로 모든 승인을 즉시 멈춥니다(API는 423으로 응답). 브로커에서 거래를 정지하고 미체결 주문을 취소할 수도 있습니다. 리서치와 제안은 계속 동작합니다.
+- **킬 스위치.** 스위치 하나로 모든 승인을 즉시 멈추고(API는 423으로 응답) `TRADING_ENABLED=false`를 곧바로 저장합니다. 브로커에서 거래를 정지하고 미체결 주문을 취소할 수도 있으며, 설정에서 거래를 다시 켜면 브로커의 정지도 풉니다. 리서치와 제안은 계속 동작합니다.
 - **로컬 전용 API.** `/api/*`는 루프백 클라이언트에게만 응답하고, Host 헤더를 허용 목록과 대조하며, 쓰기 요청마다 `X-FinAgent-Client` 헤더를 요구합니다. 그래서 브라우저에 열려 있는 다른 웹사이트가 조종할 수 없습니다.
 - **외부 텍스트는 신뢰하지 않습니다.** 웹 페이지, 뉴스, 공시는 정제한 뒤 `<untrusted>` 블록으로 감싸 데이터로 표시하며, 그 안에서 발견한 URL은 따라가지 않습니다.
 - **비밀값은 가립니다.** 감사 원장과 로그에서 가리고, 설정 API는 키를 돌려주지 않습니다.
@@ -1186,7 +1186,7 @@ erDiagram
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `API_ALLOW_REMOTE` | `false` | `true`이면 이 컴퓨터가 아닌 클라이언트도 `/api/*`에 접근할 수 있습니다. 앞단에 자체 인증을 두지 않으면 안전하지 않습니다. `/api/*`는 모의 주문을 낼 수 있고 `.env`에 키를 쓸 수 있습니다. Host 허용 목록과 CSRF 헤더 검사는 그대로 적용됩니다 |
+| `API_ALLOW_REMOTE` | `false` | `true`이면 이 컴퓨터가 아닌 클라이언트도 `/api/*`에 접근할 수 있고, 프록시 헤더가 붙은 요청도 통과합니다. 앞단에 자체 인증을 두지 않으면 안전하지 않습니다. `/api/*`는 모의 주문을 낼 수 있고 `.env`에 키를 쓸 수 있습니다. Host 허용 목록, 교차 사이트 검사, CSRF 헤더 검사는 그대로 적용됩니다. `true`인 동안에는 서버가 시작할 때 경고를 남깁니다 |
 | `FINAGENT_HOST` | `127.0.0.1` | `python -m finagent.api`가 바인딩하는 호스트. `.env`가 아니라 프로세스 환경변수에서 읽습니다 |
 
 ### Gemini 연동 세부
@@ -1220,7 +1220,7 @@ curl -s http://localhost/health
 - `.env`는 `.dockerignore`에 있어 이미지에 포함되지 않습니다(API 키 보호). 런타임에 `env_file: .env`로 읽으므로 **호스트의 프로젝트 디렉터리에 `.env` 파일이 있어야 합니다.**
 - 선택 사항인 HTTPS: `.env`에 `DOMAIN`을 넣고 `docker compose --profile https up -d`를 실행하면 Caddy + Let's Encrypt가 443번에서 동작합니다. 서버를 가리키는 도메인이 필요합니다.
 - 대회 서버는 이 Compose 구성 그대로 네이버 클라우드 플랫폼(VPC · Ubuntu 24.04 · 4 vCPU / 16GB)에서 돌았습니다. 주최측 공지가 HTTP 표준 포트를 명시하고 있어 인증서·리버스 프록시를 두지 않았습니다.
-- 이 구성은 `/answer`를 서비스합니다. 모의투자 어시스턴트는 사용자 본인의 컴퓨터에서 실행하도록 만든 것입니다([모의투자 어시스턴트](#모의투자-어시스턴트) 참고). `/api/*`는 루프백 클라이언트에게만 응답하는데, Docker 포트 매핑을 거쳐 들어온 요청은 컨테이너 쪽에서 보면 루프백 주소가 아니므로 보호 장치가 거절합니다. 컨테이너 구성은 어시스턴트를 위해 바꾸거나 시험하지 않았습니다.
+- 이 구성은 `/answer`를 서비스합니다. 모의투자 어시스턴트는 사용자 본인의 컴퓨터에서 실행하도록 만든 것입니다([모의투자 어시스턴트](#모의투자-어시스턴트) 참고). `/api/*`는 루프백 클라이언트에게만 응답하는데, Docker 포트 매핑을 거쳐 들어온 요청은 컨테이너 쪽에서 보면 루프백 주소가 아니므로 보호 장치가 거절합니다. 이미지는 uvicorn을 `--no-proxy-headers`로 실행하므로 `X-Forwarded-For` 헤더로 그 주소를 바꿀 수 없고, 보호 장치는 프록시 헤더(`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`)가 붙은 `/api/*` 요청도 모두 거절합니다. 선택 사항인 Caddy 프록시를 거쳐 온 요청이 그 예입니다. `/answer`는 어느 쪽에도 영향을 받지 않습니다. 그 밖에는 컨테이너 구성을 어시스턴트를 위해 바꾸거나 시험하지 않았습니다.
 
 ## 7. API 명세
 

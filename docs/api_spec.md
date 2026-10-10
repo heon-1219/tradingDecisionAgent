@@ -115,17 +115,21 @@ Asked in English, the answer reads:
 
 # Chat and trading API (`/api/*`)
 
-The chat and trading API is the HTTP surface of the local paper-trading app (`web/app`). It is not part of the competition contract: `GET /answer`, `GET /answer/stream`, `GET /health` and `/ui` are unchanged, and the rules below do not apply to them. Examples assume the server runs on `http://127.0.0.1:8000`. How the pieces work is described in [architecture.md](architecture.md).
+The chat and trading API is the HTTP surface of the local paper-trading app (`web/app`). It is not part of the competition contract: `GET /answer`, `GET /answer/stream`, `GET /health` and `/ui` are unchanged, and the rules below do not apply to them, except the cross-site rule, which `GET /answer` and `GET /answer/stream` get too (a client that sends no `Sec-Fetch-Site`, such as a grader's HTTP client, is not affected). Examples assume the server runs on `http://127.0.0.1:8000`. How the pieces work is described in [architecture.md](architecture.md).
 
 ## Access rules
 
 | Rule | Detail | Refusal |
 |---|---|---|
-| Loopback clients only | The socket peer address must be in `127.0.0.0/8`, be `::1`, or be an IPv4-mapped loopback address. A request with no client address is refused. `X-Forwarded-For` is ignored because the server runs with `proxy_headers=False`. The setting `api_allow_remote=true` lifts only this rule and is unsafe without your own authentication | 403 `local_only` |
+| Loopback clients only | The socket peer address must be in `127.0.0.0/8`, be `::1`, or be an IPv4-mapped loopback address. A request with no client address is refused. `X-Forwarded-For` never sets the address: `python -m finagent.api` runs uvicorn with `proxy_headers=False` and the Docker image with `--no-proxy-headers` (run uvicorn by hand with `--no-proxy-headers` too). The setting `api_allow_remote=true` lifts this rule and the next one, is warned about at startup, and is unsafe without your own authentication | 403 `local_only` |
+| No proxied requests | A request that carries `X-Forwarded-For`, `Forwarded`, `X-Real-IP` or `X-Forwarded-Host` is refused: a local browser never sends them, so the request came through a proxy or is forged | 403 `forwarded_request` |
 | Host allowlist | The `Host` header must be exactly `127.0.0.1`, `localhost` or `[::1]`, with an optional numeric port. This holds even when remote access is allowed | 400 `bad_host` |
+| No cross-site requests | On every method, a `Sec-Fetch-Site` header other than `same-origin` or `none` (so `cross-site` or `same-site`) is refused. A request without the header (curl, scripts) is not affected. `GET /answer` and `GET /answer/stream` apply this rule too | 403 `cross_site` |
 | Anti-CSRF header | `POST`, `PUT`, `PATCH` and `DELETE` must send `X-FinAgent-Client: 1`. `GET` does not need it | 403 `csrf_header_missing` |
 | Origin | If an `Origin` header is present it must be `http://<Host>` or `https://<Host>`, using the value of the `Host` header. Clients that send no `Origin` (curl, scripts) are not affected | 403 `origin_mismatch` |
+| Body size | A request body may be at most 1 MiB: a larger `Content-Length` is refused before anything is read, and a chunked body is counted while it is read | 413 `too_large` |
 | No CORS, no WebSocket | No CORS headers are sent. WebSocket connections under `/api` are closed with code 1008 | |
+| No API docs pages | FastAPI's `/docs`, `/redoc` and `/openapi.json` are not served | 404 |
 | Anti-framing | Responses under `/api/*`, `/` and `/app/*` carry `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options: nosniff` | |
 | Chat service available | If the chat runtime failed to start, every `/api/*` route answers 503. `/answer` keeps working | 503 `chat_unavailable` |
 
@@ -417,7 +421,7 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 |---|---|---|---|---|
 | `submitted` | Orders were sent and the outcome was saved | 200 | n/a | n/a |
 | `requote` | Nothing was submitted. A new ticket (in `new_ticket`) replaced this one because the price, a verdict or a leg changed | 409 | n/a | 200 |
-| `disabled` | The kill switch is on. Nothing changed | 423 | n/a | n/a |
+| `disabled` | The kill switch is on, so nothing changed; or it was pressed while this confirm was re-checking the ticket, before any leg was submitted, so nothing was submitted and the ticket is `failed` | 423 | n/a | n/a |
 | `expired` | The ticket was past its expiry when confirm ran | 410 | n/a | n/a |
 | `not_found` | Unknown id, or a ticket of another session | 404 | 404 | 404 |
 | `rejected`, ticket is `rejected_by_user` | The user had already rejected it | 409 | 200 | 409 |
@@ -441,8 +445,9 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 | `max_rounds`, `time_budget_sec` | The limits of one reply in that mode: tool rounds and seconds (shallow 4 and 150, deep 12 and 300 by default) |
 | `gemini_paid` | boolean: the user's statement that the Gemini key is on a paid plan |
 | `providers` | `{"gemini", "openai", "anthropic"}`, each `set` or `missing`: whether a key is saved for it |
-| `api_allow_remote` | boolean |
-| `env_fallbacks` | Names of writable settings (for example `TAVILY_API_KEY`) that only the process environment provides. `.env` wins over the environment, so clearing one of these in the app does not survive a restart |
+| `api_allow_remote` | boolean. When `true`, the server also logs a warning at startup |
+| `env_fallbacks` | Names of writable settings (for example `TAVILY_API_KEY`) that only the process environment provides, and `API_ALLOW_REMOTE` when only the environment sets it. `.env` wins over the environment, so clearing one of these in the app does not survive a restart |
+| `demo` | `true` only from the keyless demo server (`scripts/demo_server.py`); the field is absent otherwise. Keys typed into the demo stay in memory and are never written to a file |
 
 ```json
 {"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "api_allow_remote": false, "env_fallbacks": [], "provider": "gemini", "model": "gemini-3.8-flash", "effort": "medium", "mode": "shallow", "max_rounds": 4, "time_budget_sec": 150, "gemini_paid": false, "providers": {"gemini": "set", "openai": "missing", "anthropic": "missing"}}
@@ -455,14 +460,14 @@ The HTTP status of a ticket action follows the result `status`. "n/a" means that
 | `alpaca_key_id`, `alpaca_secret` | string, at most 256 characters | Must be sent together. They are checked live against the paper host before anything is saved |
 | `tavily_key` | string, at most 256 characters | |
 | `sec_user_agent` | string, at most 256 characters | A name and contact address, as the SEC requires |
-| `trading_enabled` | boolean | The only way to turn trading back on after the kill switch |
+| `trading_enabled` | boolean | The only way to turn trading back on after the kill switch. If the kill switch was pressed after this request started, `true` is refused (409 `kill_switch_pressed`). Turning trading on also resumes trading at the broker when the kill switch had suspended it there (see `broker_resumed`) |
 | `llm_provider` | `gemini`, `openai` or `anthropic` | The chat model provider. The provider chosen must have a key after the update |
 | `llm_model` | string, at most 256 characters | The model id, for example from `POST /api/llm/models`. It cannot be removed: `""` is 400 `llm_model_required` |
 | `llm_effort` | `low`, `medium`, `high`, `xhigh` or `max` | Reasoning effort (Gemini maps `xhigh` and `max` to `high`) |
 | `gemini_key`, `openai_key`, `anthropic_key` | string, at most 256 characters | Provider API keys. The key of the provider in use cannot be removed |
 | `gemini_paid` | boolean | Declares the Gemini key paid, which gives deep mode. It takes effect from the next reply, without a model call |
 
-For the string fields, `""` removes the key and `null` (or leaving the field out) leaves it as it is. Values are trimmed of ASCII whitespace and must be printable ASCII without `"`, `\` or `${`. Saving rebuilds the connectors in place, so the agent's tool set changes from the next message on. The response is the same body as `GET /api/settings`, plus `"warning": "llm_rate_limited"` when that applies.
+For the string fields, `""` removes the key and `null` (or leaving the field out) leaves it as it is. Values are trimmed of ASCII whitespace and must be printable ASCII without `"`, `\` or `${`. Saving rebuilds the connectors in place, so the agent's tool set changes from the next message on. The response is the same body as `GET /api/settings`, plus `"warning": "llm_rate_limited"` when that applies. A request that sets `trading_enabled: true` also gets `broker_resumed`: `true` when the kill switch had suspended trading at the broker and it has been resumed, `false` when resuming failed (trading is on in the app, but Alpaca may refuse orders until a later re-enable resumes it), or `null` when there was nothing to resume. The app remembers a suspension it made only until it restarts, and not across a change of the Alpaca keys. Every save writes a `settings_changed` ledger entry under the session id `system` with the names of the changed settings, never their values.
 
 **Model checks.** When the request changes the provider, the model or the key of the provider that will be in use, the server makes one minimal call to that provider with the candidate configuration (a one-word prompt, at most 16 output tokens, no tools) before anything is saved. A key for a provider that is not in use is saved without a call, and so are `gemini_paid` and `llm_effort`. A rate-limited key works, so the settings are saved and the response adds `"warning": "llm_rate_limited"`. A switch applies from the next reply in every session, and to `GET /answer`; a reply already running finishes on the old model. Neither an error nor a warning ever contains a key or the provider's own message.
 
@@ -480,6 +485,7 @@ For the string fields, `""` removes the key and `null` (or leaving the field out
 | 400 | `llm_invalid_key` | The provider rejected the key (401 or 403, an invalid-key 400, or no credit); nothing was saved |
 | 400 | `llm_model_unavailable` | The model is unknown or not available for this key; nothing was saved |
 | 502 | `llm_unreachable` | The check failed with a network error, a 5xx, or a provider response the app does not recognise; nothing was saved |
+| 409 | `kill_switch_pressed` | The request would turn trading on, but the kill switch was pressed while it was being handled; nothing was saved |
 | 500 | `settings_not_saved` | Writing the settings failed |
 | 422 | `invalid_request` | Unknown field or wrong type (for example `llm_provider: "stub"`) |
 
@@ -515,7 +521,7 @@ The access rules apply as to every `/api` `POST`: a loopback client, an allowed 
 
 **`POST /api/kill-switch`** turns trading off. Body (optional): `{"suspend_broker": false}`.
 
-It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no further legs, and writes `TRADING_ENABLED=false` to `.env`. With `suspend_broker: true` and a broker connected, it also asks Alpaca to suspend trading on the paper account and cancels the open orders. While trading is disabled, confirm answers 423 `disabled`; research and proposals still work. Turn it back on with `PUT /api/settings {"trading_enabled": true}`.
+It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no further legs, and writes `TRADING_ENABLED=false` to `.env` right away, before it waits for an in-flight confirm or calls the broker. With `suspend_broker: true` and a broker connected, it then also asks Alpaca to suspend trading on the paper account and cancels the open orders. While trading is disabled, confirm answers 423 `disabled`; research and proposals still work. A settings save that was already under way when the switch was pressed cannot turn trading back on (409 `kill_switch_pressed`). Turn it back on with `PUT /api/settings {"trading_enabled": true}`, which also resumes trading at the broker if this switch suspended it (`broker_resumed`).
 
 ```json
 {"trading_enabled": false, "suspend_broker": false, "broker_connected": true, "persisted": true}
@@ -531,7 +537,7 @@ It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no
 {"id": 12, "session_id": "S3F7QKX2M4ABC", "kind": "claim", "created_at": "2026-10-02T14:32:00.512345+00:00", "payload": {"ticket_id": "T4HQ7ZB2NAK", "legs": 1}}
 ```
 
-`kind` is one of `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh` or `recover`. A chat turn adds one `tool_call` line per tool call, a `proposal` line for a ticket it created (the ticket as shown) and a `proposal_rejected` line for a proposal that produced no ticket:
+`kind` is one of `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh` or `recover`. A `reconcile` line has an `outcome` (`found`, `not_found`, `mismatch` or `failed`) and, after a submit, `lookups` (2 when the first lookup found nothing and the second one ran 2 s later). A chat turn adds one `tool_call` line per tool call, a `proposal` line for a ticket it created (the ticket as shown) and a `proposal_rejected` line for a proposal that produced no ticket:
 
 ```json
 {"id": 7, "session_id": "S3F7QKX2M4ABC", "kind": "tool_call", "created_at": "2026-10-02T14:31:20.104211+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "tool": "get_quotes", "args_sha256": "<64 hex>", "result_sha256": "<64 hex>", "is_error": false, "latency_ms": 212, "evidence_ids": ["E3"]}}
@@ -540,7 +546,7 @@ It sets `trading_enabled` to `false` at once, so an in-flight confirm submits no
 
 `tool_call` stores hashes, never the arguments or the output: `args_sha256` is the SHA-256 of the UTF-8 bytes of `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)` (with `null` for arguments that are not an object); `result_sha256` is the SHA-256 of the output text's UTF-8 bytes, or `null` when the tool returned no text; `latency_ms` is the tool's own time. A cancelled call has `"cancelled": true` and no `result_sha256`, and any other exception that escaped the tool has `"raised": "<exception type>"`. Tool calls the agent skips once the turn's budget is spent are not run and not ledgered; `tool` is `unknown_tool` for a name that is not a tool. In `proposal`, the thesis, risks and invalidation texts appear only as a SHA-256 and a length, and `reasons` are reason codes; a ticket re-issued by a refresh or a requote has `"source": "requote"`, `"supersedes": "<old ticket id>"` and `"replaced_status"` instead of a `turn_id`: `proposed` when the old ticket was live (it is now `superseded`), `expired` when an expired ticket was re-quoted (it stays `expired`). A `refresh` line has the ticket id, `status` and `message`, the `new_ticket_id` when one was made, and the refusal `reason` when there is one. `proposal_rejected` carries `turn_id` and a `reason` (`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `not_paper_account`, `broker_error`, `upstream_error` or `unexpected_error`: one entry for every `propose_trades` call that ends without a ticket, except a cancelled one), and for the first two also `mandate_version`, `evidence_ids` and `decisions`; it never has a ticket id.
 
-Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included (not values passed with `extra=` or logger names; a text over 100,000 characters is cut; token counts such as `max_tokens: 9000` stay readable). Status codes: 200, 404 `session_not_found`. Kill-switch entries belong to the session id `system`, which is not a session, so they cannot be exported here.
+Payloads are redacted before they are stored, so secrets never appear; the application's own log records are scrubbed of key values in the same spirit, tracebacks included (not values passed with `extra=` or logger names; a text over 100,000 characters is cut; token counts such as `max_tokens: 9000` stay readable). Status codes: 200, 404 `session_not_found`. Kill-switch entries, `settings_changed` entries (the names of the changed settings, never a value) and `broker_dropped` entries (`reason: "not_paper"`) belong to the session id `system`, which is not a session, so they cannot be exported here.
 
 ## Example: from a message to a confirmed ticket
 
@@ -707,17 +713,21 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 # 채팅 및 트레이딩 API (`/api/*`)
 
-채팅 및 트레이딩 API는 로컬 모의투자 앱(`web/app`)이 쓰는 HTTP 인터페이스입니다. 대회 제출 규약에는 포함되지 않습니다. `GET /answer`, `GET /answer/stream`, `GET /health`, `/ui`는 바뀌지 않았으며 아래 규칙이 적용되지 않습니다. 예시는 서버가 `http://127.0.0.1:8000`에서 실행 중이라고 가정합니다. 동작 원리는 [architecture.md](architecture.md)에 있습니다.
+채팅 및 트레이딩 API는 로컬 모의투자 앱(`web/app`)이 쓰는 HTTP 인터페이스입니다. 대회 제출 규약에는 포함되지 않습니다. `GET /answer`, `GET /answer/stream`, `GET /health`, `/ui`는 바뀌지 않았으며 아래 규칙이 적용되지 않습니다. 다만 교차 사이트 규칙은 `GET /answer`와 `GET /answer/stream`에도 적용합니다(채점용 HTTP 클라이언트처럼 `Sec-Fetch-Site`를 보내지 않는 클라이언트는 영향을 받지 않습니다). 예시는 서버가 `http://127.0.0.1:8000`에서 실행 중이라고 가정합니다. 동작 원리는 [architecture.md](architecture.md)에 있습니다.
 
 ## 접근 규칙
 
 | 규칙 | 내용 | 거부 응답 |
 |---|---|---|
-| 루프백 클라이언트만 허용 | 소켓 상대 주소가 `127.0.0.0/8`, `::1`, 또는 IPv4 매핑 루프백이어야 합니다. 클라이언트 주소가 없는 요청도 거부합니다. 서버를 `proxy_headers=False`로 실행하므로 `X-Forwarded-For`는 무시합니다. 설정 `api_allow_remote=true`는 이 규칙만 풀며, 별도 인증이 없으면 안전하지 않습니다 | 403 `local_only` |
+| 루프백 클라이언트만 허용 | 소켓 상대 주소가 `127.0.0.0/8`, `::1`, 또는 IPv4 매핑 루프백이어야 합니다. 클라이언트 주소가 없는 요청도 거부합니다. `X-Forwarded-For`가 주소를 정하는 일은 없습니다. `python -m finagent.api`는 uvicorn을 `proxy_headers=False`로, Docker 이미지는 `--no-proxy-headers`로 실행합니다(uvicorn을 직접 실행할 때도 `--no-proxy-headers`를 붙이세요). 설정 `api_allow_remote=true`는 이 규칙과 다음 규칙을 풀고, 시작할 때 경고를 남기며, 별도 인증이 없으면 안전하지 않습니다 | 403 `local_only` |
+| 프록시 경유 요청 거부 | `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host` 헤더가 붙은 요청은 거부합니다. 로컬 브라우저는 이 헤더를 보내지 않으므로, 프록시를 거쳤거나 위조된 요청입니다 | 403 `forwarded_request` |
 | Host 허용 목록 | `Host` 헤더가 정확히 `127.0.0.1`, `localhost`, `[::1]` 중 하나여야 하며 숫자 포트는 붙을 수 있습니다. 원격 접근을 허용해도 이 규칙은 유지됩니다 | 400 `bad_host` |
+| 교차 사이트 요청 거부 | 메서드와 상관없이 `Sec-Fetch-Site` 헤더가 `same-origin`이나 `none`이 아니면(즉 `cross-site`나 `same-site`이면) 거부합니다. 이 헤더가 없는 요청(curl, 스크립트)은 영향을 받지 않습니다. `GET /answer`와 `GET /answer/stream`에도 이 규칙을 적용합니다 | 403 `cross_site` |
 | CSRF 방지 헤더 | `POST`, `PUT`, `PATCH`, `DELETE`는 `X-FinAgent-Client: 1`을 보내야 합니다. `GET`에는 필요하지 않습니다 | 403 `csrf_header_missing` |
 | Origin | `Origin` 헤더가 있으면 `Host` 헤더 값을 사용한 `http://<Host>` 또는 `https://<Host>`여야 합니다. `Origin`을 보내지 않는 클라이언트(curl, 스크립트)는 영향을 받지 않습니다 | 403 `origin_mismatch` |
+| 본문 크기 | 요청 본문은 최대 1MiB입니다. `Content-Length`가 더 크면 아무것도 읽기 전에 거부하고, 청크 본문은 읽으면서 셉니다 | 413 `too_large` |
 | CORS·WebSocket 없음 | CORS 헤더를 보내지 않습니다. `/api` 아래 WebSocket 연결은 코드 1008로 닫습니다 | |
+| API 문서 페이지 없음 | FastAPI의 `/docs`, `/redoc`, `/openapi.json`은 제공하지 않습니다 | 404 |
 | 프레이밍 방지 | `/api/*`, `/`, `/app/*` 응답에 `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`가 붙습니다 | |
 | 채팅 서비스 사용 가능 | 채팅 런타임이 시작에 실패하면 모든 `/api/*` 라우트가 503으로 답합니다. `/answer`는 계속 동작합니다 | 503 `chat_unavailable` |
 
@@ -1009,7 +1019,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 |---|---|---|---|---|
 | `submitted` | 주문을 보냈고 결과도 저장했습니다 | 200 | 해당 없음 | 해당 없음 |
 | `requote` | 아무것도 제출하지 않았습니다. 가격, 판정 또는 레그가 바뀌어 새 티켓(`new_ticket`)이 이 티켓을 대체했습니다 | 409 | 해당 없음 | 200 |
-| `disabled` | 킬 스위치가 켜져 있습니다. 아무것도 바뀌지 않았습니다 | 423 | 해당 없음 | 해당 없음 |
+| `disabled` | 킬 스위치가 켜져 있어 아무것도 바뀌지 않았습니다. 또는 이 confirm이 티켓을 재검사하는 동안, 어떤 레그도 제출하기 전에 킬 스위치가 눌려 아무것도 제출하지 않았고 티켓은 `failed`가 됐습니다 | 423 | 해당 없음 | 해당 없음 |
 | `expired` | confirm이 실행될 때 티켓이 이미 만료돼 있었습니다 | 410 | 해당 없음 | 해당 없음 |
 | `not_found` | 없는 ID이거나 다른 세션의 티켓입니다 | 404 | 404 | 404 |
 | `rejected`, 티켓이 `rejected_by_user` | 사용자가 이미 거절했습니다 | 409 | 200 | 409 |
@@ -1033,8 +1043,9 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `max_rounds`, `time_budget_sec` | 그 모드에서 답변 하나의 한도: 도구 라운드 수와 초(기본값은 얕은 리서치 모드 4와 150, 심층 리서치 모드 12와 300) |
 | `gemini_paid` | 불리언. Gemini 키가 유료 요금제라는 사용자의 선언 |
 | `providers` | `{"gemini", "openai", "anthropic"}`, 각각 `set` 또는 `missing`: 키가 저장돼 있는지 |
-| `api_allow_remote` | 불리언 |
-| `env_fallbacks` | 프로세스 환경 변수만 제공하는, 쓰기 가능한 설정의 이름(예: `TAVILY_API_KEY`). `.env`가 환경 변수보다 우선하므로 앱에서 이 값을 지워도 재시작하면 되살아납니다 |
+| `api_allow_remote` | 불리언. `true`이면 서버가 시작할 때 경고도 남깁니다 |
+| `env_fallbacks` | 프로세스 환경 변수만 제공하는, 쓰기 가능한 설정의 이름(예: `TAVILY_API_KEY`). 환경 변수에서만 설정된 `API_ALLOW_REMOTE`도 포함합니다. `.env`가 환경 변수보다 우선하므로 앱에서 이 값을 지워도 재시작하면 되살아납니다 |
+| `demo` | 키 없는 데모 서버(`scripts/demo_server.py`)에서만 `true`이며, 그 밖에는 이 필드가 없습니다. 데모에 입력한 키는 메모리에만 두고 파일에는 절대 쓰지 않습니다 |
 
 ```json
 {"alpaca": "connected", "tavily": "missing", "sec_user_agent": "set", "gemini": "set", "trading_enabled": true, "api_allow_remote": false, "env_fallbacks": [], "provider": "gemini", "model": "gemini-3.8-flash", "effort": "medium", "mode": "shallow", "max_rounds": 4, "time_budget_sec": 150, "gemini_paid": false, "providers": {"gemini": "set", "openai": "missing", "anthropic": "missing"}}
@@ -1047,14 +1058,14 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | `alpaca_key_id`, `alpaca_secret` | 문자열, 최대 256자 | 반드시 함께 보내야 합니다. 저장하기 전에 모의투자 호스트로 실제 확인합니다 |
 | `tavily_key` | 문자열, 최대 256자 | |
 | `sec_user_agent` | 문자열, 최대 256자 | SEC가 요구하는 이름과 연락처 |
-| `trading_enabled` | 불리언 | 킬 스위치 이후 거래를 다시 켜는 유일한 방법 |
+| `trading_enabled` | 불리언 | 킬 스위치 이후 거래를 다시 켜는 유일한 방법. 이 요청이 시작된 뒤 킬 스위치가 눌렸으면 `true`는 거부됩니다(409 `kill_switch_pressed`). 거래를 켜면, 킬 스위치가 브로커의 거래를 정지했던 경우 그 정지도 풉니다(`broker_resumed` 참고) |
 | `llm_provider` | `gemini`, `openai`, `anthropic` | 채팅 모델 제공자. 바꾼 뒤 고른 제공자의 키가 있어야 합니다 |
 | `llm_model` | 문자열, 최대 256자 | 모델 ID(예: `POST /api/llm/models`에서 고른 것). 지울 수 없으며 `""`는 400 `llm_model_required`입니다 |
 | `llm_effort` | `low`, `medium`, `high`, `xhigh`, `max` | 추론 강도(Gemini는 `xhigh`와 `max`를 `high`로 보냅니다) |
 | `gemini_key`, `openai_key`, `anthropic_key` | 문자열, 최대 256자 | 제공자 API 키. 사용 중인 제공자의 키는 지울 수 없습니다 |
 | `gemini_paid` | 불리언 | Gemini 키를 유료로 선언합니다(심층 리서치 모드). 모델 호출 없이 다음 답변부터 적용됩니다 |
 
-문자열 필드에서 `""`는 키를 삭제하고, `null`(또는 필드 생략)은 그대로 둡니다. 값은 ASCII 공백을 다듬은 뒤 `"`, `\`, `${`가 없는 출력 가능한 ASCII여야 합니다. 저장하면 커넥터를 그 자리에서 다시 만들므로 에이전트의 도구 구성은 다음 메시지부터 바뀝니다. 응답은 `GET /api/settings`와 같은 본문이며, 해당하면 `"warning": "llm_rate_limited"`가 붙습니다.
+문자열 필드에서 `""`는 키를 삭제하고, `null`(또는 필드 생략)은 그대로 둡니다. 값은 ASCII 공백을 다듬은 뒤 `"`, `\`, `${`가 없는 출력 가능한 ASCII여야 합니다. 저장하면 커넥터를 그 자리에서 다시 만들므로 에이전트의 도구 구성은 다음 메시지부터 바뀝니다. 응답은 `GET /api/settings`와 같은 본문이며, 해당하면 `"warning": "llm_rate_limited"`가 붙습니다. `trading_enabled: true`를 보낸 요청에는 `broker_resumed`도 붙습니다. 킬 스위치가 브로커의 거래를 정지했고 그 정지를 풀었으면 `true`, 풀지 못했으면 `false`(앱에서는 거래가 켜졌지만, 나중에 다시 켜서 정지가 풀릴 때까지 Alpaca가 주문을 거부할 수 있음), 풀 것이 없었으면 `null`입니다. 앱은 자신이 건 정지를 재시작 전까지만 기억하며, Alpaca 키가 바뀌면 잊습니다. 저장할 때마다 세션 ID `system` 아래에 `settings_changed` 원장 항목을 남기며, 여기에는 바뀐 설정의 이름만 담고 값은 담지 않습니다.
 
 **모델 확인.** 요청이 제공자, 모델, 또는 사용하게 될 제공자의 키를 바꾸면, 서버는 무엇이든 저장하기 전에 후보 구성으로 그 제공자에 최소한의 호출을 한 번 합니다(한 단어짜리 프롬프트, 출력 최대 16토큰, 도구 없음). 사용 중이 아닌 제공자의 키는 호출 없이 저장하며, `gemini_paid`와 `llm_effort`도 마찬가지입니다. 요청 한도에 걸린 키는 동작하는 키이므로 설정을 저장하고 응답에 `"warning": "llm_rate_limited"`를 덧붙입니다. 전환은 모든 세션의 다음 답변과 `GET /answer`부터 적용되며, 이미 진행 중인 답변은 이전 모델로 끝납니다. 오류나 경고에는 키도, 제공자 자체의 메시지도 들어가지 않습니다.
 
@@ -1072,6 +1083,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | 400 | `llm_invalid_key` | 제공자가 키를 거부함(401이나 403, 잘못된 키를 뜻하는 400, 또는 크레디트 없음). 아무것도 저장하지 않았습니다 |
 | 400 | `llm_model_unavailable` | 모델을 모르거나 이 키로 쓸 수 없음. 아무것도 저장하지 않았습니다 |
 | 502 | `llm_unreachable` | 확인이 네트워크 오류, 5xx, 또는 앱이 알 수 없는 제공자 응답으로 실패함. 아무것도 저장하지 않았습니다 |
+| 409 | `kill_switch_pressed` | 거래를 켜려는 요청이었지만 처리하는 동안 킬 스위치가 눌림. 아무것도 저장하지 않았습니다 |
 | 500 | `settings_not_saved` | 설정을 기록하지 못함 |
 | 422 | `invalid_request` | 알 수 없는 필드이거나 타입이 틀림(예: `llm_provider: "stub"`) |
 
@@ -1107,7 +1119,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 **`POST /api/kill-switch`**는 거래를 끕니다. 본문(선택): `{"suspend_broker": false}`.
 
-`trading_enabled`를 즉시 `false`로 바꾸므로 진행 중인 confirm은 더 이상 레그를 제출하지 않으며, `.env`에 `TRADING_ENABLED=false`를 기록합니다. `suspend_broker: true`이고 브로커가 연결돼 있으면 Alpaca에 모의 계좌의 거래 정지를 요청하고 미체결 주문도 취소합니다. 거래가 꺼져 있는 동안 confirm은 423 `disabled`로 답하며 리서치와 제안은 계속 동작합니다. 다시 켜려면 `PUT /api/settings {"trading_enabled": true}`를 사용하세요.
+`trading_enabled`를 즉시 `false`로 바꾸므로 진행 중인 confirm은 더 이상 레그를 제출하지 않으며, 진행 중인 confirm을 기다리거나 브로커를 호출하기 전에 곧바로 `.env`에 `TRADING_ENABLED=false`를 기록합니다. `suspend_broker: true`이고 브로커가 연결돼 있으면 그다음 Alpaca에 모의 계좌의 거래 정지를 요청하고 미체결 주문도 취소합니다. 거래가 꺼져 있는 동안 confirm은 423 `disabled`로 답하며 리서치와 제안은 계속 동작합니다. 킬 스위치를 누를 때 이미 진행 중이던 설정 저장은 거래를 다시 켜지 못합니다(409 `kill_switch_pressed`). 다시 켜려면 `PUT /api/settings {"trading_enabled": true}`를 사용하세요. 이 스위치가 브로커의 거래를 정지했다면 그 정지도 함께 풉니다(`broker_resumed`).
 
 ```json
 {"trading_enabled": false, "suspend_broker": false, "broker_connected": true, "persisted": true}
@@ -1123,7 +1135,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 {"id": 12, "session_id": "S3F7QKX2M4ABC", "kind": "claim", "created_at": "2026-10-02T14:32:00.512345+00:00", "payload": {"ticket_id": "T4HQ7ZB2NAK", "legs": 1}}
 ```
 
-`kind`는 `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh`, `recover` 중 하나입니다. 채팅 턴은 도구 호출마다 `tool_call` 한 줄을, 티켓을 만들었으면 `proposal` 한 줄(보여 준 그대로의 티켓)을, 티켓 없이 끝난 제안에는 `proposal_rejected` 한 줄을 남깁니다.
+`kind`는 `mandate_saved`, `tool_call`, `proposal`, `proposal_rejected`, `confirm_request`, `claim`, `requote`, `submit`, `broker_response`, `reconcile`, `order_status`, `result`, `reject`, `refresh`, `recover` 중 하나입니다. `reconcile` 줄에는 `outcome`(`found`, `not_found`, `mismatch`, `failed`)이 있고, 제출 뒤의 대조라면 `lookups`(첫 조회에서 찾지 못해 2초 뒤 두 번째 조회까지 했으면 2)도 있습니다. 채팅 턴은 도구 호출마다 `tool_call` 한 줄을, 티켓을 만들었으면 `proposal` 한 줄(보여 준 그대로의 티켓)을, 티켓 없이 끝난 제안에는 `proposal_rejected` 한 줄을 남깁니다.
 
 ```json
 {"id": 7, "session_id": "S3F7QKX2M4ABC", "kind": "tool_call", "created_at": "2026-10-02T14:31:20.104211+00:00", "payload": {"turn_id": "0d3c1f6e5b7a4e2c9a8b7c6d5e4f3a2b", "tool": "get_quotes", "args_sha256": "<64 hex>", "result_sha256": "<64 hex>", "is_error": false, "latency_ms": 212, "evidence_ids": ["E3"]}}
@@ -1132,7 +1144,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 `tool_call`에는 해시만 저장하고 인자와 출력은 저장하지 않습니다. `args_sha256`은 `json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)`(인자가 객체가 아니면 `null`)의 UTF-8 바이트에 대한 SHA-256이고, `result_sha256`은 출력 텍스트의 UTF-8 바이트에 대한 SHA-256이며 도구가 텍스트를 돌려주지 않았으면 `null`입니다. `latency_ms`는 도구 자체의 소요 시간입니다. 취소된 호출에는 `"cancelled": true`가 붙고 `result_sha256`이 없으며, 도구에서 빠져나온 그 밖의 예외에는 `"raised": "<예외 유형>"`이 붙습니다. 턴의 예산을 다 쓴 뒤 에이전트가 건너뛴 도구 호출은 실행되지 않으므로 원장에 남지 않습니다. 또한 도구가 아닌 이름이면 `tool`은 `unknown_tool`입니다. `proposal`에서 thesis, risks, invalidation 문구는 SHA-256과 길이로만 나타나고 `reasons`는 사유 코드입니다. refresh나 requote로 다시 발급된 티켓에는 `turn_id` 대신 `"source": "requote"`, `"supersedes": "<이전 티켓 ID>"`, `"replaced_status"`가 들어갑니다. `replaced_status`는 이전 티켓이 살아 있었으면 `proposed`(이제 `superseded`), 만료된 티켓을 다시 호가했으면 `expired`(그대로 `expired`)입니다. `refresh` 줄에는 티켓 ID, `status`, `message`, 새 티켓을 만들었으면 `new_ticket_id`, 거절됐으면 `reason`이 담깁니다. `proposal_rejected`에는 `turn_id`와 `reason`(`all_legs_rejected`, `ticket_validation_failed`, `invalid_arguments`, `one_proposal_per_turn`, `dispatch_error`, `not_paper_account`, `broker_error`, `upstream_error`, `unexpected_error` 중 하나. 취소된 경우를 빼고 티켓 없이 끝난 `propose_trades` 호출마다 한 항목)이 담기고, 앞의 두 경우에는 `mandate_version`, `evidence_ids`, `decisions`도 담깁니다. 티켓 ID는 절대 들어가지 않습니다.
 
-페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다(`extra=`로 넘긴 값과 로거 이름은 대상이 아니고, 100,000자를 넘는 텍스트는 잘리며, `max_tokens: 9000` 같은 토큰 수는 그대로 읽힙니다). 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
+페이로드는 저장되기 전에 가려지므로 비밀값이 나타나지 않습니다. 애플리케이션 자체의 로그 레코드도 같은 취지로 트레이스백까지 포함해 키 값을 지웁니다(`extra=`로 넘긴 값과 로거 이름은 대상이 아니고, 100,000자를 넘는 텍스트는 잘리며, `max_tokens: 9000` 같은 토큰 수는 그대로 읽힙니다). 상태 코드: 200, 404 `session_not_found`. 킬 스위치 항목, `settings_changed` 항목(바뀐 설정의 이름만 담고 값은 담지 않음), `broker_dropped` 항목(`reason: "not_paper"`)은 세션이 아닌 세션 ID `system`에 속하므로 여기서는 내보낼 수 없습니다.
 
 ## 예시: 메시지에서 티켓 확인까지
 
