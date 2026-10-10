@@ -66,7 +66,7 @@ const KEY_PREFIXES = [
   'timeline_', 'verdict_', 'severity_', 'clamp_', 'side_', 'size_', 'terms_', 'tif_', 'leg_', 'age_',
   'settings_', 'kill_', 'status_', 'open_', 'popover_', 'err_', 'announce_', 'mode_',
 ];
-const NOT_KEYS = new Set(['order_types']); // a Mandate field name
+const NOT_KEYS = new Set(['order_types', 'kill_switch_pressed']); // a Mandate field name, an API error code
 const componentsDir = join(root, 'js', 'components');
 for (const path of sources) {
   const text = readFileSync(path, 'utf8');

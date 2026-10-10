@@ -84,6 +84,7 @@ export function createKillSwitch({ adopt }) {
       result.setAttribute('data-tone', 'bad');
       result.removeAttribute('data-i18n');
       result.textContent = err?.message || t('err_generic');
+      announce(result.textContent);
     }
     go.disabled = false;
     cancel.disabled = false;

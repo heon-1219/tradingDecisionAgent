@@ -1,9 +1,10 @@
 /* Form pieces for the Settings panel's sections: a labelled field with its error line, and messages
  * that follow a language switch.
  *
- * A message is `{key}` (an i18n key: bound with `bindText`, so `applyI18n` re-translates it) or
- * `{raw}` (a server's own fixed text, for a code the app has no words for: shown as it is). Both are
- * set as text, never as markup.
+ * A message is `{key}` (an i18n key: bound with `bindText`, so `applyI18n` re-translates it),
+ * `{prefix, key}` (a field's name and the reason, "Tavily API key: …", both bound) or `{raw}` (a
+ * server's own fixed text, for a code the app has no words for: shown as it is). All are set as
+ * text, never as markup.
  */
 import { bindText, t } from '../i18n.js';
 import { el, label, uid } from './dom.js';
@@ -24,17 +25,25 @@ export function field(captionKey, control, { help, holder } = {}) {
 
 /* Put a message into `node`; null empties it. */
 export function setMessage(node, message) {
-  if (message && message.key) {
+  if (message && message.key && !message.prefix) {
     bindText(node, message.key);
     return;
   }
   node.removeAttribute('data-i18n');
   node.removeAttribute('data-i18n-vars');
+  if (message && message.key) {
+    node.replaceChildren(label('span', '', message.prefix), document.createTextNode(': '), label('span', '', message.key));
+    return;
+  }
   node.textContent = (message && message.raw) || '';
 }
 
 /* The message as text in the current language (for an announcement). */
-export const textOf = (message) => (message.key ? t(message.key) : message.raw);
+export function textOf(message) {
+  if (!message) return '';
+  if (message.key && message.prefix) return `${t(message.prefix)}: ${t(message.key)}`;
+  return message.key ? t(message.key) : message.raw;
+}
 
 /* Show `message` under a field from `field()` and mark its control invalid; null clears both. */
 export function setFieldError(spot, message) {

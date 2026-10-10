@@ -79,6 +79,9 @@ export function createModelSection({ adopt }) {
   keyInput.setAttribute('data-field', 'llm_key');
   const keyHelp = el('p', 'field-help key-help');
   const key = field('settings_llm_key', keyInput, { help: keyHelp });
+  const demoNote = label('p', 'field-help demo-note', 'settings_demo_keys'); // the keyless demo server
+  demoNote.hidden = true;
+  key.wrap.insertBefore(demoNote, key.error);
 
   // Model: the list from the provider, "Load models", and a custom id.
   const select = el('select', 'field-input');
@@ -192,11 +195,14 @@ export function createModelSection({ adopt }) {
     setDisabled();
   }
 
-  async function loadModels() {
+  /* Load the chosen provider's models. Only "Load models" passes `typed: true`, to send what is in
+   * the key field; every automatic load (a provider chosen, the panel opened) sends `{provider}`
+   * only and never reads the field. */
+  async function loadModels({ typed: useTyped = false } = {}) {
     if (!isProvider(selected)) return;
     const provider = selected;
     const mine = ++generation;
-    const typed = keyInput.value.trim();
+    const typed = useTyped ? keyInput.value.trim() : '';
     setFieldError(key, null);
     setListStatus({ key: 'settings_llm_loading' }, 'loading');
     load.disabled = true;
@@ -286,7 +292,7 @@ export function createModelSection({ adopt }) {
     }
   }
 
-  load.addEventListener('click', () => loadModels());
+  load.addEventListener('click', () => loadModels({ typed: true }));
   save.addEventListener('click', () => submit());
   select.addEventListener('change', () => {
     touched = true;
@@ -307,6 +313,7 @@ export function createModelSection({ adopt }) {
   /* Follow a settings body: the status words and the summary always, the form until it is touched. */
   function update(next) {
     settings = next && typeof next === 'object' ? next : null;
+    demoNote.hidden = !(settings && settings.demo === true);
     const providers = settings?.providers || {};
     for (const { provider, status } of radios) {
       const saved = providers[provider] === 'set';
@@ -346,7 +353,13 @@ export function createModelSection({ adopt }) {
       loadOnOpen();
     },
     focus() {
-      root.scrollIntoView({ block: 'start' });
+      // Scroll the panel body itself: scrollIntoView could also scroll the document, which cannot
+      // be scrolled back (body has overflow: hidden) and would hide the top bar.
+      const scroller = root.closest('.panel-body');
+      if (scroller) {
+        const offset = root.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+        scroller.scrollTop = Math.max(0, (scroller.scrollTop || 0) + offset); // not money: pixels
+      }
       heading.focus({ preventScroll: true });
     },
   };

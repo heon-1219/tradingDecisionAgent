@@ -320,4 +320,14 @@ export default {
   settings_llm_err_rate_limited: 'The provider is rate limiting this key right now. Try again in a minute.',
   settings_llm_err_list_failed: 'The provider did not list the models for this key. Check the key’s access, or enter a model id yourself.',
   settings_alpaca_not_paper_note: 'This is not a paper account, so trading is disabled. Save paper-trading keys to trade.',
+
+  // Final review fixes (part 2a)
+  ticket_cash_after: 'Cash after (est.)',
+  ticket_uncertain_none: 'The server shows nothing was placed for this ticket.',
+  demo_badge: 'DEMO',
+  demo_title: 'Demo server: fake broker and scripted model; nothing leaves this computer',
+  settings_demo_keys: 'Demo server: keys typed here are not used or kept.',
+  settings_err_kill_pressed: 'The kill switch was pressed while this was saving, so trading stays off.',
+  settings_broker_still_suspended: 'Trading is on here, but the Alpaca account is still suspended by the kill switch. Check it in the Alpaca dashboard.',
+  ticket_result_uncertain: 'The broker did not confirm every order: some may or may not have been placed.',
 };

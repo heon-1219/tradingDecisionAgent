@@ -473,6 +473,42 @@ def test_storage_is_written_only_under_the_app_keys_and_never_with_a_key_value()
     assert "shallowNote: 'finagent-app.shallow-note'" in state_js
 
 
+def test_no_storage_is_reached_outside_state_js_by_any_name():
+    # Only state.js touches browser storage (boot.js reads the theme before the modules load). No
+    # other file may name a storage API at all, reach a global by a computed name (which could
+    # spell `'local' + 'Storage'`), or touch cookies or IndexedDB. The behaviour is checked too, by
+    # spies on every storage API: scripts/test_settings_panel.mjs and scripts/test_model_settings.mjs.
+    for path in JS_FILES:
+        rel = _rel(path)
+        if rel == "js/state.js":
+            continue
+        for number, code, line in _code_lines(path):
+            rest = re.sub(r"\bstorage\.(?:get|set|remove)\(", "", code).replace("STORAGE_KEYS", "")
+            rest = re.sub(r"\bstorage\b", "", rest)  # the name state.js exports
+            if rel == "js/boot.js":
+                assert "setItem" not in code, f"{rel}:{number}"
+                rest = rest.replace("window.localStorage.getItem(", "")
+            assert not re.search(r"(?i)storage", rest), f"{rel}:{number}: {line.strip()}"
+            assert not re.search(r"\b(?:globalThis|window|self|top|parent|frames)\s*\[", code), f"{rel}:{number}: {line.strip()}"
+            for needle in ("document.cookie", "indexedDB", "caches."):
+                assert needle not in code, f"{rel}:{number}: {needle}"
+
+
+def test_the_page_never_scrolls_and_the_ticket_card_shows_its_focus():
+    # Only the conversation and the panels scroll: the root cannot (it could not be scrolled back,
+    # and would hide the top bar), and the turns' visually hidden headings stay inside the scroller.
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^html \{\n  overflow: hidden;", css)
+    assert re.search(r"(?m)^\.scroller \{\n  position: relative;", css)
+    model = (COMPONENTS_DIR / "settings-model.js").read_text(encoding="utf-8")
+    assert "scrollIntoView" not in "\n".join(c for _, c, _ in _code_lines(COMPONENTS_DIR / "settings-model.js"))
+    assert "root.closest('.panel-body')" in model
+    # the ticket card takes the focus after Confirm and from "Show the newer ticket": it shows it
+    components = (WEB / "components.css").read_text(encoding="utf-8")
+    ring = re.search(r"\.ticket:focus-visible \{([^}]*)\}", components)
+    assert ring and "outline: 2px solid" in ring.group(1)
+
+
 def test_keys_typed_into_settings_stay_out_of_storage_the_bus_and_logs():
     model = (COMPONENTS_DIR / "settings-model.js").read_text(encoding="utf-8")
     assert "keyInput.type = 'password';" in model
@@ -626,6 +662,15 @@ def test_component_logic():
 def test_model_settings_and_research_depth():
     # The model section of Settings through every list and save answer, the mode chip, the notices.
     result = _node("scripts/test_model_settings.mjs")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_node
+def test_settings_panel_failures_storage_and_the_demo_badge():
+    # The key rows, the switch, the kill switch and a mandate save: said, announced, re-translated;
+    # keys cleared and never stored (storage spies); automatic model lists without a typed key; the
+    # panel, not the document, scrolls to the model section; the DEMO badge.
+    result = _node("scripts/test_settings_panel.mjs")
     assert result.returncode == 0, result.stdout + result.stderr
 
 

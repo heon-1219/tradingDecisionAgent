@@ -17,8 +17,9 @@ import { emit, on, state } from '../state.js';
 import { actionButton, badge, el, extraSection, iconSpan, label } from './dom.js';
 import { createMandateForm } from './mandate-form.js';
 
-/* Send a mandate. Resolves the saved mandate, or reports the failure on the form and resolves null. */
-async function saveMandate(sessionId, payload, form) {
+/* Send a mandate. Resolves the saved mandate, or reports the failure on the form (and announces one
+ * that is not about its fields) and resolves null. */
+export async function saveMandate(sessionId, payload, form) {
   form.setBusy(true);
   try {
     const body = await request('PUT', `/api/mandate/${encodeURIComponent(sessionId)}`, payload);
@@ -27,7 +28,10 @@ async function saveMandate(sessionId, payload, form) {
   } catch (err) {
     form.setBusy(false);
     if (err instanceof ApiError && err.status === 422) form.setErrors(err.fields, err.message);
-    else form.setStatus(null, 'bad', err.message || t('err_generic'));
+    else {
+      form.setStatus(null, 'bad', err.message || t('err_generic'));
+      announce(err.message || t('err_generic'));
+    }
     return null;
   }
 }

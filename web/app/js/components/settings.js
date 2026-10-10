@@ -20,6 +20,7 @@ import { announce } from '../notify.js';
 import { registerPanel } from '../registry.js';
 import { emit, on, setState, state } from '../state.js';
 import { actionButton, el, iconButton, iconSpan, label, str, uid } from './dom.js';
+import { setMessage, textOf } from './form-fields.js';
 import { createKillSwitch } from './settings-kill.js';
 import { createModelSection } from './settings-model.js';
 
@@ -38,6 +39,7 @@ const ERRORS = {
   alpaca_unreachable: 'settings_err_alpaca_unreachable',
   alpaca_pair_required: 'settings_err_alpaca_pair',
   alpaca_not_paper: 'settings_err_alpaca_not_paper',
+  kill_switch_pressed: 'settings_err_kill_pressed',
   invalid_value: 'settings_err_invalid_value',
 };
 const FIELD_LABEL = {
@@ -77,12 +79,18 @@ function setStatus(node, word) {
   bindText(node.firstChild, key);
 }
 
-/* What to say for a failed settings write. Never includes anything that was typed. */
-export function settingsErrorText(err) {
+/* What to say for a failed settings write, as a message for form-fields.js (so it follows a language
+ * switch). Never includes anything that was typed. */
+export function settingsErrorMessage(err) {
   const key = ERRORS[err?.error];
-  if (!key) return err?.message || t('err_generic');
+  if (!key) return err?.message ? { raw: err.message } : { key: 'err_generic' };
   const field = FIELD_LABEL[err?.body?.field];
-  return key === 'settings_err_invalid_value' && field ? `${t(field)}: ${t(key)}` : t(key);
+  return key === 'settings_err_invalid_value' && field ? { prefix: field, key } : { key };
+}
+
+/* The same, as text in the current language. */
+export function settingsErrorText(err) {
+  return textOf(settingsErrorMessage(err));
 }
 
 function connectionRow(spec) {
@@ -116,6 +124,10 @@ function connectionRow(spec) {
   });
   const message = el('p', 'conn-message');
   message.hidden = true;
+  // The keyless demo server: keys typed here are neither used nor kept.
+  const demoNote = label('p', 'panel-note demo-note', 'settings_demo_keys');
+  demoNote.hidden = true;
+  form.prepend(demoNote);
   const warning = el('div', 'notice conn-warning');
   warning.setAttribute('data-tone', 'bad');
   warning.hidden = true;
@@ -126,23 +138,26 @@ function connectionRow(spec) {
   form.append(message, actions);
   row.append(head, warning, form);
 
+  /* The row's message line: {key} | {prefix, key} | {raw} (form-fields.js), or null to hide it. */
   function say(text, tone) {
     message.hidden = !text;
-    message.textContent = text || '';
+    setMessage(message, text);
     message.setAttribute('data-tone', tone || 'muted');
   }
 
   async function send(body, doneKey) {
     save.disabled = true;
     clear.disabled = true;
-    say(t('settings_saving'));
+    say({ key: 'settings_saving' });
     try {
       adopt(await request('PUT', '/api/settings', body));
-      say(t(doneKey), 'ok');
+      say({ key: doneKey }, 'ok');
       announce(t(doneKey));
       emit('portfolio:refresh');
     } catch (err) {
-      say(settingsErrorText(err), 'bad');
+      const text = settingsErrorMessage(err);
+      say(text, 'bad');
+      announce(textOf(text));
     } finally {
       for (const input of inputs) input.value = ''; // never keep what was typed, whatever the answer
       save.disabled = false;
@@ -158,7 +173,7 @@ function connectionRow(spec) {
   });
   save.addEventListener('click', () => {
     if (inputs.some((input) => input.value.trim() === '')) {
-      say(t(inputs.length > 1 ? 'settings_err_alpaca_pair' : 'settings_err_empty'), 'bad');
+      say({ key: inputs.length > 1 ? 'settings_err_alpaca_pair' : 'settings_err_empty' }, 'bad');
       return;
     }
     send(Object.fromEntries(inputs.map((input) => [input.getAttribute('data-field'), input.value])), 'settings_saved');
@@ -180,7 +195,7 @@ function connectionRow(spec) {
     if (key) warning.replaceChildren(iconSpan('alert', 18), label('p', 'notice-text', key));
     else warning.replaceChildren();
   }
-  return { el: row, setStatus: setRowStatus };
+  return { el: row, setStatus: setRowStatus, setDemo: (demo) => { demoNote.hidden = !demo; } };
 }
 
 function build() {
@@ -214,23 +229,37 @@ function build() {
   toggleRow.append(toggleLabel, toggleState, toggle);
   const toggleMessage = el('p', 'conn-message');
   toggleMessage.hidden = true;
+  // Trading is on again here, but the kill switch's suspension at the broker could not be lifted
+  // (`broker_resumed: false`): this stays until trading is off again or a later re-enable resumes it.
+  const brokerNote = el('div', 'notice broker-note');
+  brokerNote.setAttribute('data-tone', 'warn');
+  brokerNote.hidden = true;
+  brokerNote.append(iconSpan('alert', 18), label('p', 'notice-text', 'settings_broker_still_suspended'));
   toggle.addEventListener('click', async () => {
     const next = toggle.getAttribute('aria-checked') !== 'true';
     toggle.disabled = true;
     toggleMessage.hidden = true;
     try {
-      adopt(await request('PUT', '/api/settings', { trading_enabled: next }));
+      const answer = await request('PUT', '/api/settings', { trading_enabled: next });
+      const { broker_resumed: resumed, warning, ...fresh } = answer && typeof answer === 'object' ? answer : {};
+      if (next) brokerNote.hidden = resumed !== false;
+      adopt(fresh);
       announce(t(next ? 'settings_trading_on' : 'settings_trading_off'));
+      if (next && resumed === false) announce(t('settings_broker_still_suspended'));
     } catch (err) {
+      const text = settingsErrorMessage(err);
       toggleMessage.hidden = false;
       toggleMessage.setAttribute('data-tone', 'bad');
-      toggleMessage.textContent = settingsErrorText(err);
+      setMessage(toggleMessage, text);
+      announce(textOf(text));
+      // The kill switch won (409): trading stays off; show what the server has now.
+      if (err?.error === 'kill_switch_pressed') emit('settings:refresh');
     }
     toggle.disabled = false;
   });
   const kill = createKillSwitch({ adopt });
   const tradingSection = el('section', 'panel-section');
-  tradingSection.append(label('h2', 'panel-h', 'settings_trade_heading'), toggleRow, toggleMessage, kill.el);
+  tradingSection.append(label('h2', 'panel-h', 'settings_trade_heading'), toggleRow, toggleMessage, brokerNote, kill.el);
 
   const model = createModelSection({ adopt });
 
@@ -241,7 +270,7 @@ function build() {
   logSection.append(label('h2', 'panel-h', 'settings_log_heading'), log, logNote);
 
   container.replaceChildren(model.el, connSection, tradingSection, logSection);
-  view = { connections, fallbacks, problem, toggle, toggleState, kill, model, log, logNote };
+  view = { connections, fallbacks, problem, toggle, toggleState, brokerNote, kill, model, log, logNote };
 }
 
 function update() {
@@ -249,7 +278,10 @@ function update() {
   const settings = state.settings;
   view.problem.hidden = Boolean(settings) || !state.settingsError;
   view.problem.textContent = settings ? '' : str(state.settingsError);
-  for (const { spec, row } of view.connections) row.setStatus(settings ? settings[spec.status] : undefined);
+  for (const { spec, row } of view.connections) {
+    row.setStatus(settings ? settings[spec.status] : undefined);
+    row.setDemo(Boolean(settings && settings.demo === true));
+  }
   view.model.update(settings);
 
   const names = settings && Array.isArray(settings.env_fallbacks)
@@ -258,6 +290,7 @@ function update() {
   if (names.length) bindText(view.fallbacks, 'settings_env_fallbacks', { names: names.join(', ') });
 
   const enabled = Boolean(settings && settings.trading_enabled);
+  if (settings && !enabled) view.brokerNote.hidden = true; // trading is off again: nothing to resume here
   view.toggle.setAttribute('aria-checked', String(enabled));
   view.toggle.disabled = !settings;
   bindText(view.toggleState, enabled ? 'status_enabled' : 'status_disabled');

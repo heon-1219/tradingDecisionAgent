@@ -319,4 +319,14 @@ export default {
   settings_llm_err_rate_limited: '지금은 제공자가 이 키의 요청 수를 제한하고 있습니다. 1분쯤 뒤 다시 시도해 주세요.',
   settings_llm_err_list_failed: '제공자가 이 키의 모델 목록을 주지 않았습니다. 키의 사용 권한을 확인하거나 모델 ID를 직접 입력해 주세요.',
   settings_alpaca_not_paper_note: '모의투자 계좌가 아니어서 거래 기능이 꺼져 있습니다. 거래하려면 모의투자 키를 저장해 주세요.',
+
+  // 최종 검토 수정(2a)
+  ticket_cash_after: '체결 후 현금(추정)',
+  ticket_uncertain_none: '서버 기록상 이 티켓으로는 주문이 들어가지 않았습니다.',
+  demo_badge: '데모',
+  demo_title: '데모 서버: 가짜 브로커와 스크립트 모델로 동작하며, 이 컴퓨터 밖으로는 아무것도 나가지 않습니다',
+  settings_demo_keys: '데모 서버에서는 여기에 입력한 키를 쓰지도, 보관하지도 않습니다.',
+  settings_err_kill_pressed: '저장하는 동안 킬 스위치가 눌려서 거래 기능은 꺼진 상태로 둡니다.',
+  settings_broker_still_suspended: '여기서는 거래 기능이 켜졌지만, Alpaca 계좌는 킬 스위치로 정지된 상태 그대로입니다. Alpaca 대시보드에서 확인해 주세요.',
+  ticket_result_uncertain: '브로커가 모든 주문을 확인해 주지는 않았습니다. 일부 주문은 들어갔을 수도, 들어가지 않았을 수도 있습니다.',
 };
