@@ -398,6 +398,27 @@ def test_the_flag_alone_never_places_anything(capsys):
     assert "--place-test-order" in capsys.readouterr().out
 
 
+def test_the_secret_key_never_shows_even_its_last_four(capsys):
+    # Final review A-m7: only the key ID's last 4 characters are shown; the secret is just "set".
+    rc = run_main(FakeBroker(), NewsData())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ALPACA_API_KEY_ID       set (…AAAA)" in out
+    assert "ALPACA_API_SECRET_KEY   set\n" in out
+    assert SECRET[-4:] not in out and SECRET not in out
+
+
+def test_the_test_order_is_refused_while_the_kill_switch_is_on(capsys):
+    # Final review A-m7: TRADING_ENABLED=false (the app's kill switch) stops this script too.
+    broker = FakeBroker()
+    rc = run_main(broker, order_data(), ["--place-test-order"],
+                  settings=alpaca_settings(trading_enabled=False))  # read_line must not be called
+    out = capsys.readouterr().out
+    assert rc == 3 and broker.submits == 0
+    assert "TRADING_ENABLED is false" in out and "Nothing was placed." in out
+    assert out.count("✓") == 4  # the read-only checks still ran
+
+
 def test_refuses_when_the_broker_host_constant_is_not_paper(monkeypatch, capsys):
     monkeypatch.setattr(broker_mod, "PAPER_BASE", "https://api.alpaca.markets")
     broker = FakeBroker()

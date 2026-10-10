@@ -21,6 +21,7 @@ cents, so it cannot fill), prints its status, cancels it, and polls up to ~10 s 
     is passed, which then stands in for the typed word. (Git Bash/mintty reports no terminal for native
     Python: use PowerShell, cmd or winpty instead.) The controlling agent never passes --yes-i-am-sure
     without the user's explicit go-ahead.
+  * It refuses while TRADING_ENABLED is false (the app's kill switch), before asking anything.
   * It refuses unless the broker's host constant is the paper host and the account can trade. If Alpaca
     says the account is not a paper account (its number lacks the "PA" prefix) it refuses; if that is
     unknown it says so and relies on the paper host.
@@ -28,8 +29,8 @@ cents, so it cannot fill), prints its status, cancels it, and polls up to ~10 s 
     the order up by client_order_id, reports, and cancels it if it turns out to be live.
   * Ctrl-C after the submit prints where the possibly open order is, then exits.
 
-Everything printed has control characters stripped, keys are never printed (only "set (...last4)"), and
-any key value that shows up inside an error message is replaced by ***.
+Everything printed has control characters stripped, keys are never printed (the key ID as "set (...last4)",
+the secret key only as "set"), and any key value that shows up inside an error message is replaced by ***.
 """
 from __future__ import annotations
 
@@ -416,13 +417,21 @@ async def reconcile_uncertain(broker, rep: Reporter, cid: str, *, sleep, clock, 
 # --------------------------------------------------------------------------------- entry point
 
 
-def key_status(value: str | None) -> str:
-    return f"set (…{value[-4:]})" if value else "MISSING"
+def key_status(value: str | None, *, last4: bool = True) -> str:
+    """How a key is shown: "set (…last4)" for the key ID, only "set" for the secret key (not even
+    part of a secret is printed), or MISSING."""
+    if not value:
+        return "MISSING"
+    return f"set (…{value[-4:]})" if last4 else "set"
+
+
+def print_key_lines(rep: Reporter, key_id: str | None, secret: str | None) -> None:
+    rep.say(f"  ALPACA_API_KEY_ID       {key_status(key_id)}")
+    rep.say(f"  ALPACA_API_SECRET_KEY   {key_status(secret, last4=False)}")
 
 
 def print_missing_keys(rep: Reporter, key_id: str | None, secret: str | None) -> None:
-    rep.say(f"  ALPACA_API_KEY_ID       {key_status(key_id)}")
-    rep.say(f"  ALPACA_API_SECRET_KEY   {key_status(secret)}")
+    print_key_lines(rep, key_id, secret)
     rep.say()
     rep.say("The Alpaca paper keys are not (both) configured. Add these two lines to .env in the project root:")
     rep.say()
@@ -447,7 +456,13 @@ async def _amain(a, settings, rep: Reporter, build, read_line, interactive, slee
     try:
         readonly_ok = await run_readonly(broker, data, rep, evidence)
         order_rc = EXIT_OK
-        if a.place_test_order:
+        if a.place_test_order and not getattr(settings, "trading_enabled", True):
+            rep.say()
+            order_rc = refuse(rep, "TRADING_ENABLED is false: the app's kill switch is on, so this script "
+                                   "places no order either.",
+                              "Turn trading back on in the app's Settings (or set TRADING_ENABLED=true in .env) "
+                              "first.")
+        elif a.place_test_order:
             order_rc = await place_test_order(broker, data, rep, interactive=interactive, assume_yes=a.yes_i_am_sure,
                                               read_line=read_line, sleep=sleep, clock=clock)
         rep.say("-" * 68)
@@ -492,8 +507,7 @@ def main(
     if not (key_id and secret):
         print_missing_keys(rep, key_id, secret)
         return EXIT_NO_KEYS
-    rep.say(f"  ALPACA_API_KEY_ID       {key_status(key_id)}")
-    rep.say(f"  ALPACA_API_SECRET_KEY   {key_status(secret)}")
+    print_key_lines(rep, key_id, secret)
     if a.place_test_order:
         rep.say("  mode: read-only checks, then ONE paper test order (needs confirmation)")
     else:
