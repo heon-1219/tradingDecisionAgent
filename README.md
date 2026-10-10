@@ -31,11 +31,13 @@ flowchart LR
     X --> B[("Alpaca PAPER account")]
 ```
 
-![Chat with a proposed ticket](docs/images/app-ticket.png)
+![Chat with a proposed ticket (keyless demo)](docs/images/app-ticket.png)
 
-![Settings: provider, model and research depth](docs/images/app-settings.png)
+![Settings: provider, model and research depth (keyless demo)](docs/images/app-settings.png)
 
-![Phone layout](docs/images/app-phone.png)
+![Phone layout (keyless demo)](docs/images/app-phone.png)
+
+These screenshots are captures of the keyless demo server (see [Setup](#setup)), so the positions and prices are made up.
 
 ### Setup
 
@@ -54,7 +56,7 @@ A tool whose key is missing is left out of the agent's tool list, so the agent o
 
 ### Model provider
 
-Gemini is the default (`gemini-3.8-flash`). In **Settings**, under **Model**, you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. Each provider shows whether its key is saved, and the key field links to the page where the selected provider's keys are made. The model list comes from the provider itself and shows the chat models your key can use: it loads when the panel opens or when you pick a provider whose key is saved, and with **Load models** after you type a new key. Effort is turned off for OpenAI, whose models ignore it. A **custom model id** is accepted too. The key field is never filled in by the app and is emptied after every save; keys are written only to your local `.env`.
+Gemini is the default (`gemini-3.8-flash`). In **Settings**, under **Model**, you can pick **OpenAI** or **Anthropic** instead, enter that provider's API key and choose a model. Each provider shows whether its key is saved, and the key field links to the page where the selected provider's keys are made. The model list comes from the provider itself and shows the chat models your key can use: it loads when the panel opens or when you pick a provider whose key is saved, and with **Load models** after you type a new key. Effort is off for OpenAI: the app does not send it. A **custom model id** is accepted too. The key field is never filled in by the app and is emptied after every save; keys are written only to your local `.env`.
 
 Before anything is saved, a change of provider, model or key is checked with one small model call. A rejected key or an unavailable model is refused, an unreachable provider saves nothing, and a rate-limited key is saved with a warning. A switch applies from the next reply, to `/answer` as well as the chat. To use another OpenAI-compatible server, set `OPENAI_BASE_URL` in `.env`; Settings does not show it. Gemini search grounding needs only a Gemini key, whichever provider runs the chat, and on Gemini 3.x it needs a key with billing enabled.
 
@@ -86,7 +88,7 @@ In Windows PowerShell, set the path first: `$env:PYTHONPATH = "src"; python -m f
 python scripts/demo_server.py          # then open http://127.0.0.1:8770/  (--port changes it)
 ```
 
-It has a fake broker, made-up prices and news, no network access, and a scripted model that reacts to words in your message. It is not a language model, so its answers show how the screens work, not what a real model writes. After Confirm the fake broker fills the order over a few seconds, so the order timeline moves. It starts in a few seconds, keeps its state in a temporary directory that is deleted on exit, and never reads or writes your `.env` or `data/`. Messages to try: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, and `Summarise https://research.example.com/market-note` (a page with a planted instruction). `python scripts/demo_server.py --help` lists the rest.
+It has a fake broker, made-up prices and news, no network access, and a scripted model that reacts to words in your message. It is not a language model, so its answers show how the screens work, not what a real model writes. After Confirm the fake broker fills the order over a few seconds, so the order timeline moves. It starts in a few seconds, keeps its state in a temporary directory that is deleted on exit, and never reads or writes your `.env` or `data/`. In demo mode the top bar shows a **DEMO** badge beside **PAPER** (**데모** in the Korean interface), so a demo window is never mistaken for a connected account. Messages to try: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, and `Summarise https://research.example.com/market-note` (a page with a planted instruction). `python scripts/demo_server.py --help` lists the rest.
 
 The demo accepts test keys in Settings for any provider, and calls no provider: `demo-valid-key` is accepted, `demo-invalid-key` is rejected, `demo-limited-key` is accepted but rate limited (saved with a warning), and any other key counts as unreachable. The demo starts in deep mode, because its Gemini key is declared paid: clear **My Gemini key is on a paid plan (deep mode)** in Settings to see shallow mode.
 
@@ -787,11 +789,13 @@ flowchart LR
     X --> B[("Alpaca 모의투자 계좌")]
 ```
 
-![Chat with a proposed ticket](docs/images/app-ticket.png)
+![제안된 티켓이 있는 채팅 (키 없는 데모)](docs/images/app-ticket.png)
 
-![Settings: provider, model and research depth](docs/images/app-settings.png)
+![설정: 제공자, 모델, 리서치 깊이 (키 없는 데모)](docs/images/app-settings.png)
 
-![Phone layout](docs/images/app-phone.png)
+![휴대폰 레이아웃 (키 없는 데모)](docs/images/app-phone.png)
+
+이 스크린샷은 키 없는 데모 서버([준비](#준비) 참고)를 캡처한 것이므로 보유 종목과 가격은 지어낸 값입니다.
 
 ### 준비
 
@@ -810,7 +814,7 @@ flowchart LR
 
 ### 모델 제공자
 
-기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**의 **모델** 섹션에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 제공자마다 키가 저장돼 있는지 표시하고, 키 입력란에는 선택한 제공자의 키 발급 페이지 링크가 있습니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 패널을 열 때나 키가 저장된 제공자를 고를 때 목록을 불러오고, 새 키를 입력했다면 **모델 목록 불러오기**로 불러옵니다. OpenAI 모델은 추론 강도를 쓰지 않으므로 OpenAI에서는 이 항목이 꺼집니다. **모델 ID 직접 입력**도 받습니다. 앱은 키 입력란을 미리 채우지 않으며 저장할 때마다 비웁니다. 키는 로컬 `.env`에만 기록됩니다.
+기본값은 Gemini(`gemini-3.8-flash`)입니다. **설정**의 **모델** 섹션에서 **OpenAI**나 **Anthropic**을 고르고, 그 제공자의 API 키를 입력하고, 모델을 선택할 수 있습니다. 제공자마다 키가 저장돼 있는지 표시하고, 키 입력란에는 선택한 제공자의 키 발급 페이지 링크가 있습니다. 모델 목록은 제공자에게서 직접 받아 오며, 해당 키로 쓸 수 있는 채팅 모델을 보여 줍니다. 패널을 열 때나 키가 저장된 제공자를 고를 때 목록을 불러오고, 새 키를 입력했다면 **모델 목록 불러오기**로 불러옵니다. OpenAI에서는 앱이 추론 강도를 보내지 않으므로 이 항목이 꺼집니다. **모델 ID 직접 입력**도 받습니다. 앱은 키 입력란을 미리 채우지 않으며 저장할 때마다 비웁니다. 키는 로컬 `.env`에만 기록됩니다.
 
 저장하기 전에, 제공자·모델·키를 바꾸면 작은 모델 호출 한 번으로 확인합니다. 거부된 키나 쓸 수 없는 모델은 저장을 거절하고, 제공자에 닿지 못하면 아무것도 저장하지 않으며, 요청 한도에 걸린 키는 경고와 함께 저장합니다. 전환은 다음 답변부터 적용되며 채팅뿐 아니라 `/answer`에도 적용됩니다. OpenAI 호환 서버를 쓰려면 `.env`에 `OPENAI_BASE_URL`을 지정하십시오. 설정 화면에는 이 항목이 없습니다. Gemini 검색 그라운딩은 어느 제공자가 채팅을 맡든 Gemini 키만 있으면 되고, Gemini 3.x에서는 결제가 활성화된 키가 필요합니다.
 
@@ -842,7 +846,7 @@ Windows PowerShell에서는 먼저 경로를 지정합니다: `$env:PYTHONPATH =
 python scripts/demo_server.py          # 이후 http://127.0.0.1:8770/ 를 엽니다  (--port 로 변경)
 ```
 
-가짜 브로커, 지어낸 가격과 뉴스, 차단된 네트워크, 그리고 메시지의 단어에 반응하는 스크립트 모델로 구성됩니다. 언어 모델이 아니므로 그 답변은 화면이 어떻게 동작하는지를 보여 줄 뿐, 실제 모델이 쓰는 글을 보여 주지는 않습니다. 승인하면 가짜 브로커가 몇 초에 걸쳐 주문을 체결하므로 주문 타임라인이 움직입니다. 몇 초 안에 시작하고, 상태는 종료할 때 삭제되는 임시 디렉터리에 두며, `.env`와 `data/`를 읽거나 쓰지 않습니다. 시험해 볼 메시지: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, `Summarise https://research.example.com/market-note`(지시문이 심어진 페이지). 나머지는 `python scripts/demo_server.py --help`에 있습니다.
+가짜 브로커, 지어낸 가격과 뉴스, 차단된 네트워크, 그리고 메시지의 단어에 반응하는 스크립트 모델로 구성됩니다. 언어 모델이 아니므로 그 답변은 화면이 어떻게 동작하는지를 보여 줄 뿐, 실제 모델이 쓰는 글을 보여 주지는 않습니다. 승인하면 가짜 브로커가 몇 초에 걸쳐 주문을 체결하므로 주문 타임라인이 움직입니다. 몇 초 안에 시작하고, 상태는 종료할 때 삭제되는 임시 디렉터리에 두며, `.env`와 `data/`를 읽거나 쓰지 않습니다. 데모 모드에서는 상단 바의 **모의투자** 배지 옆에 **데모** 배지(영어 화면에서는 **DEMO**)가 표시되므로 데모 창을 연결된 계좌로 착각할 일이 없습니다. 시험해 볼 메시지: `Build a low-cost core ETF portfolio with $5,000`, `Modify: buy 3 VOO limit 610`, `Draft a mandate: $10,000 budget, 15% per position`, `Sell everything`, `Summarise https://research.example.com/market-note`(지시문이 심어진 페이지). 나머지는 `python scripts/demo_server.py --help`에 있습니다.
 
 데모는 설정 화면에서 모든 제공자에 대해 테스트 키를 받으며, 실제 제공자는 호출하지 않습니다. `demo-valid-key`는 통과하고, `demo-invalid-key`는 거절되며, `demo-limited-key`는 통과하지만 요청 한도에 걸린 것으로 처리되어 경고와 함께 저장되고, 그 밖의 키는 연결 불가로 처리됩니다. 데모의 Gemini 키는 유료로 선언되어 있어 심층 리서치 모드로 시작합니다. 얕은 리서치 모드를 보려면 설정에서 **Gemini 키가 유료 요금제입니다 (심층 리서치 모드)** 체크를 해제하십시오.
 
