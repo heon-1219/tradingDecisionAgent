@@ -496,12 +496,18 @@ def _clean(value: Any, max_chars: int) -> str:
 
 
 def _wrapped_per_source(text: str, source_ids: list[str]) -> bool:
-    """True when every id in `source_ids` has its own `<untrusted source="…">` opener (the
-    attribute may list several ids) and no wrapper tag remains outside the well-formed blocks - a
-    literal "<untrusted" in attacker text, or a block opened for some other id, does not count."""
+    """True when every id in `source_ids` opens a well-formed block of its own (the opener's
+    attribute may list several ids) and no wrapper tag is left anywhere else: not outside the
+    blocks, and not inside one. Only the opener that starts a block counts, so a literal
+    "<untrusted" in attacker text - a forged opener inside another block included - or a block
+    opened for some other id does not make an id wrapped."""
     opened: set[str] = set()
-    for match in _UNTRUSTED_OPENER_RE.finditer(text):
-        opened.update(part.strip() for part in match.group(1).split(","))
+    for block in _UNTRUSTED_BLOCK_RE.finditer(text):
+        whole = block.group(0)
+        opener = _UNTRUSTED_OPENER_RE.match(whole)
+        if opener is None or _UNTRUSTED_TAG_RE.search(whole[opener.end():-len("</untrusted>")]):
+            return False
+        opened.update(part.strip() for part in opener.group(1).split(","))
     if any(source_id not in opened for source_id in source_ids):
         return False
     return not _UNTRUSTED_TAG_RE.search(_UNTRUSTED_BLOCK_RE.sub("", text))

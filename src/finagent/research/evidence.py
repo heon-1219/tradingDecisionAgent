@@ -4,7 +4,10 @@ Every connector result (EDGAR filings, web search snippets, grounding output) be
 `SourceRecord` here before it reaches the model, numbered `E1`, `E2`, ... per session so the
 chat layer and the model can both refer to "E3" unambiguously. External text is never trusted
 per the project's global constraints: `sanitize_untrusted` strips it down to plain text and
-`wrap_untrusted` marks the boundary so the model can tell it apart from the system/user turns.
+`wrap_untrusted` marks the boundary so the model can tell it apart from the system/user turns. A
+wrapped body can neither end its block nor open a new one, nor pose as a source: every character
+that reads as "<" is escaped, invisible (default-ignorable) code points are removed, and an
+evidence label such as "[E2]" becomes "(E2 cited in source text)".
 `EvidenceStore` also doubles as a generic TTL cache (`http_cache`) for connector responses.
 """
 from __future__ import annotations
@@ -464,15 +467,42 @@ def sanitize_untrusted(text: str, max_chars: int = 4000) -> str:
     return collapse_whitespace(strip_hidden_markup(text), max_chars)
 
 
-# Matches the wrapper's own closing tag (however it's spaced/cased) so injected text can't fake
-# the end of the untrusted block; nothing else in the body is touched.
-_CLOSE_TAG_RE = re.compile(r"</\s*untrusted\b[^>]*>", re.I)
+# Unicode default-ignorable code points (DerivedCoreProperties.txt, Default_Ignorable_Code_Point)
+# and the C0/C1 controls other than tab and newline. All render as nothing, so inside a word the
+# model reads whole they hide what it is ("</untr<U+00AD>usted>"), and the bidi controls reorder
+# what a person sees. None belongs in text the model reads as data.
+_INVISIBLE_RE = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f"
+    "\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8"
+    "\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
+)
+# Everything that reads as "<": the ASCII sign, its fullwidth and small forms. Sanitized text carries
+# no markup, so in a wrapped body each one becomes U+2039 and no tag (a closer for this block, an
+# opener for a forged one) can be spelled there.
+_LT_LOOKALIKES_RE = re.compile("[<\uff1c\ufe64]")
+_LT_ESCAPE = "\u2039"
+# An evidence label like the tools' own "[E12]", also spaced, lower-case or fullwidth ("［Ｅ１２］").
+_EVIDENCE_LABEL_RE = re.compile("[\\[\uff3b]\\s*[Ee\uff25\uff45]\\s*([0-9\uff10-\uff19]{1,9})\\s*[\\]\uff3d]")
+_FULLWIDTH_DIGITS = str.maketrans("\uff10\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19", "0123456789")
+
+
+def _neutralize_label(match: re.Match) -> str:
+    return f"(E{match.group(1).translate(_FULLWIDTH_DIGITS)} cited in source text)"
+
+
+def neutralize_untrusted_body(text: str) -> str:
+    """What `wrap_untrusted` puts inside a block: invisible code points removed, then evidence
+    labels neutralized (a page cannot pose as the tools' own "[E2]" source), then every "<"
+    look-alike escaped to U+2039 (a page cannot close its block or open a forged one)."""
+    body = _INVISIBLE_RE.sub("", text or "")
+    body = _EVIDENCE_LABEL_RE.sub(_neutralize_label, body)
+    return _LT_LOOKALIKES_RE.sub(_LT_ESCAPE, body)
 
 
 def wrap_untrusted(source_id: str, text: str) -> str:
-    """Wrap sanitized external text as `<untrusted source="...">...</untrusted>`."""
-    body = _CLOSE_TAG_RE.sub("&lt;/untrusted&gt;", text or "")
-    return f'<untrusted source="{source_id}">{body}</untrusted>'
+    """Wrap sanitized external text as `<untrusted source="...">...</untrusted>`; the body goes
+    through `neutralize_untrusted_body`, so the block's own tags are the only ones in it."""
+    return f'<untrusted source="{source_id}">{neutralize_untrusted_body(text)}</untrusted>'
 
 
 # --- records --------------------------------------------------------------------
