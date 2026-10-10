@@ -884,8 +884,9 @@ class Executor:
                 error="the broker did not confirm this order and the follow-up lookup failed; "
                       "check open orders before trying again",
             )
+        base["lookups"] = lookups
         if found is None:
-            self._log(run.session_id, "reconcile", {**base, "outcome": "not_found", "lookups": lookups})
+            self._log(run.session_id, "reconcile", {**base, "outcome": "not_found"})
             self._record_uncertain(run.ticket.id, client_order_id)
             duplicate = isinstance(cause, BrokerError) and cause.code == DUPLICATE_CLIENT_ORDER_ID
             if duplicate:
