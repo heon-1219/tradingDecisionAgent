@@ -136,8 +136,11 @@ def _cross_site(headers: Headers) -> bool:
 
 
 def _declared_length(headers: Headers) -> int | None:
-    """The `Content-Length` as a number, or None when it is absent or not a plain number (the
-    body is then counted as it is read)."""
+    """The `Content-Length` as a number, or None when it is absent, not a plain number, or sent
+    beside a `Transfer-Encoding` (the body is then counted as it is read). uvicorn's h11 parser
+    frames such a body by its Transfer-Encoding, so a small declared length proves nothing."""
+    if "transfer-encoding" in headers:
+        return None
     value = headers.get("content-length")
     if value is None or not value.strip().isdigit():
         return None

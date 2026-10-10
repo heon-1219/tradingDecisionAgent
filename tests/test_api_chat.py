@@ -1054,6 +1054,28 @@ async def test_the_guard_stops_reading_a_streamed_body_past_the_cap():
     assert len(reads) == 3  # 1.5 MiB read: one chunk past the 1 MiB cap, then it stopped
 
 
+async def test_a_small_content_length_beside_transfer_encoding_is_not_trusted():
+    # uvicorn's h11 parser frames the body by Transfer-Encoding even when a Content-Length is also
+    # sent, so a declared length of 4 must not let an 8 MiB chunked body through uncounted.
+    called: list[str] = []
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        called.append("app")
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * (512 * 1024), "more_body": True}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = _scope("/api/sessions", method="POST")
+    scope["headers"] += [(CLIENT_HEADER_BYTES, b"1"), (b"content-length", b"4"),
+                         (b"transfer-encoding", b"chunked")]
+    await LocalApiGuard(app)(scope, receive, send)
+    assert called == [] and sent[0]["status"] == 413
+
+
 async def test_the_guard_replays_a_small_streamed_body_to_the_app():
     chunks = [{"type": "http.request", "body": b'{"ti', "more_body": True},
               {"type": "http.request", "body": b'tle": "x"}', "more_body": False}]
