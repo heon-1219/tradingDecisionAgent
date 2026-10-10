@@ -8,6 +8,10 @@ is `untrusted=True` and every returned line is wrapped with `wrap_untrusted`, af
 through `sanitize_untrusted` (which strips hidden/zero-width text - a common prompt-injection
 vector on fetched pages).
 
+Each search result is shown to the model as its sanitized title, its URL (only when it is a plain
+http(s) URL of safe characters, so the model can pass it verbatim to `fetch_source`), the snippet
+and the date, all inside the result's own untrusted block.
+
 Each source is assigned a trust `tier` by (registrable) domain: SEC/investor-relations/exchanges
 are tier 1, major wire/financial press is tier 2, other media defaults to tier 3, and blogs/forums/
 reddit are tier 4. This is a coarse, regex/suffix-based classification (not a curated allowlist),
@@ -44,6 +48,12 @@ _TTL_FETCH = 12 * 3600
 _SNIPPET_MAX_CHARS = 1000  # per-result search snippet cap, independent of fetch's max_chars
 _TITLE_MAX_CHARS = 200
 _PUBLISHED_MAX_CHARS = 40
+# A result URL is shown only when it is a plain http(s) URL made of RFC 3986 characters (no space,
+# no "<", no brackets) and not too long: the model must be able to copy it exactly, and the
+# untrusted wrapper must not need to change a character of it.
+_SHOWN_URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]+")
+_SHOWN_URL_MAX_CHARS = 500
+_URL_NOT_SHOWN = "(not shown: unusual characters)"
 
 # Hard cap on a fetched page's raw text, applied at ingestion - before caching and before any
 # stripping - independent of the caller's max_chars. Without this, strip_hidden_markup's
@@ -104,6 +114,15 @@ def _tier_for_host(host: str | None) -> int:
     if any(_host_matches(host, d) for d in _TIER4_DOMAINS):
         return 4
     return 3
+
+
+def _shown_url(url: str | None) -> str:
+    """The URL as the model sees it in a search result (see `_SHOWN_URL_RE`)."""
+    if not url:
+        return "(none)"
+    if len(url) <= _SHOWN_URL_MAX_CHARS and _SHOWN_URL_RE.fullmatch(url):
+        return url
+    return _URL_NOT_SHOWN
 
 
 def _hostname(url: str | None) -> str | None:
@@ -244,13 +263,17 @@ class WebSearch:
                 if raw_published
                 else None
             )
-            body = f"{clean_content} ({clean_published})" if clean_published else clean_content
-
             title = (
                 sanitize_untrusted(r.get("title") or "", max_chars=_TITLE_MAX_CHARS)
                 or url
                 or "Untitled"
             )
+            # Title and URL go inside the result's block too: the model needs the URL to open the
+            # result with fetch_source, and both are as untrusted as the snippet.
+            shown_title = sanitize_untrusted(r.get("title") or "", max_chars=_TITLE_MAX_CHARS) or "(none)"
+            body = f"title: {shown_title} | url: {_shown_url(url)} | {clean_content}"
+            if clean_published:
+                body += f" (published {clean_published})"
 
             source = self._evidence.add(
                 session_id,

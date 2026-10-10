@@ -122,6 +122,8 @@ async def test_market_and_research_tools_work_offline(world):
 
 async def test_no_network_only_the_given_pages_are_served(world):
     sid = world.sessions.create()["id"]
+    # fetch_source opens only links the user gave (or research results): the user gives both.
+    world.sessions.append(sid, "user", f"Read {PAGE_URL} and https://research.example.com/other")
     served = await world.runtime.toolbox.execute(sid, "fetch_source", {"url": PAGE_URL}, turn_id="t1")
     assert not served.is_error and "bond yields eased" in served.text and "<untrusted" in served.text
     assert world.refused == []

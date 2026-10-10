@@ -193,6 +193,16 @@ class SessionStore:
             row["meta"] = None if row["meta"] is None else json.loads(row["meta"])
         return rows
 
+    def user_texts(self, session_id: str) -> list[str]:
+        """The text of every `user` message of `session_id`, oldest first (`[]` for an unknown
+        session). What the user wrote, never the assistant: `fetch_source` opens a link only when
+        the user gave it (or a research tool returned it)."""
+        rows = self._db.query(
+            "SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY id",
+            (session_id,),
+        )
+        return [row["content"] or "" for row in rows]
+
     def get_mandate(self, session_id: str) -> Mandate | None:
         """The `Mandate` currently stored for `session_id`, or `None` if none has been saved yet -
         including when `session_id` itself doesn't exist (a pure read, like `history`/`messages`;
