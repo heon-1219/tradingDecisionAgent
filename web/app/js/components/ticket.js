@@ -12,10 +12,11 @@
  * A 200 `submitted` is success only when every leg came back placed. A leg the broker did not
  * confirm (the answer lists fewer orders than the ticket has legs) may still exist: the card says
  * so as for an unfinished confirm, never "placed", and reads the ticket again; only when that read
- * shows no uncertain row (the missing legs failed outright) does it show the ordinary result. While
- * any leg is uncertain (that answer, or a 502, or a read that lists a leg with no order) the header
- * says "Outcome unknown" instead of "Submitted", and the timeline footer does not say that every
- * order is final.
+ * shows no uncertain row (the missing legs failed outright) does it show the ordinary result. A 502
+ * (or no answer) is read the same way: its "did not finish" notice gives way to that ordinary result,
+ * announced once, when a read shows no uncertain row. While any leg is uncertain (that answer, or a
+ * 502, or a read that lists a leg with no order) the header says "Outcome unknown" instead of
+ * "Submitted", and the timeline footer does not say that every order is final.
  *
  * Confirm sends the ticket's `hash` back, is disabled while a request is in flight, has no keyboard
  * shortcut and is never focused by the app. How each answer is handled is decided by
@@ -60,7 +61,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   let ticket = initial;
   let override = null; // a state the UI knows before (or apart from) the stored status
   let busy = false;
-  let unconfirmed = null; // the server's text of a 200 whose legs were not all confirmed placed
+  let unconfirmed = null; // the server's text of a confirm answer (a 200 short of orders, or a 502) until a read settles it
   let uncertainRows = false; // the last read of the ticket lists a leg with no order
   let replaced = false; // the server refused to re-quote this expired ticket: a newer one exists
   let timeline = null;
@@ -231,8 +232,12 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         uncertainRows = anyUncertain(normalizeOrders(orders));
         override = null;
         // Still proposed: nothing was placed, so do not keep "may have been placed" by an active Confirm.
-        if (ticket.status === 'proposed') setNotice({ tone: 'muted', key: 'ticket_uncertain_none' });
-        // A 200 with unconfirmed legs, and no uncertain row: those legs failed; the ordinary result.
+        if (ticket.status === 'proposed') {
+          setNotice({ tone: 'muted', key: 'ticket_uncertain_none' });
+          unconfirmed = null;
+        }
+        // A confirm answer left legs unconfirmed (a 200 short of orders, or a 502), and no row is uncertain
+        // now: any leg without an order failed; the ordinary result.
         const rows = Array.isArray(fresh.orders) ? fresh.orders : [];
         // The first answer was announced as "did not finish": say how it ended, once (`unconfirmed` is cleared).
         if (unconfirmed !== null && ticket.status === 'submitted' && !rows.some((row) => row && !row.order)) {
@@ -337,6 +342,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         break;
       case 'uncertain': // a 5xx or no answer on confirm: orders may exist; never offer a blind retry
         override = 'checking';
+        unconfirmed = said; // a read that settles every row replaces this notice, as for a 200
         unsure('ticket_uncertain', said);
         return;
       case 'not_found': // 404

@@ -789,14 +789,6 @@ await test('an uncertain answer that later settles is announced once, when it se
   await flush();
   assert.deepEqual(await announced(), { calls: 2, text: dict.en.ticket_announce_submitted });
   card.remove();
-  // a 502 whose re-read settles leaves the card's words as they are: nothing new is announced
-  const bad = ticket();
-  card = await confirmed(bad, 502, [{ client_order_id: 'c0', broker_order_id: null, order: null }]);
-  net.routes = [portfolio, ticketRead({ ...bad, status: 'submitted' }, [placed(0)])];
-  checkAgain(card).click();
-  await flush();
-  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
-  card.remove();
   // the Korean wording takes the same numbers
   setLang('ko');
   try {
@@ -804,6 +796,90 @@ await test('an uncertain answer that later settles is announced once, when it se
   } finally {
     setLang('en');
   }
+});
+
+await test('a 502 that later settles: the "did not finish" notice gives way to the ordinary result, announced once', async () => {
+  const lost = { client_order_id: 'c1', broker_order_id: null, order: null };
+  const placed = (n) => ({ client_order_id: `c${n}`, broker_order_id: `o${n}`, order: order({ id: `o${n}`, client_order_id: `c${n}` }) });
+  const badAnswer = (tk) => ({ method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 502, body: {
+    status: 'error', message: '1 of 2 orders placed, 1 uncertain.', ticket: { ...tk, status: 'submitted' }, orders: [], new_ticket: null,
+    reason: null, block_codes: [] } });
+  const checkAgain = (card) => card.querySelector('.ticket-notice').querySelectorAll('button').find((b) => b.textContent === 'Check again');
+  const badgeOf = (card) => card.querySelector('.card-head').querySelector('.badge');
+  const two = () => ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  const confirmed = async (tk, rows) => {
+    net.routes = [portfolio, badAnswer(tk), ticketRead({ ...tk, status: 'submitted' }, rows)];
+    await quietAnnouncer();
+    const { card } = propose(tk);
+    button(card, 'btn-confirm').click();
+    await flush();
+    return card;
+  };
+  // one leg placed, the other failed: the 502 is uncertain until a re-read shows how it ended
+  const half = two();
+  let card = await confirmed(half, [placed(0), lost]);
+  assert.ok(noticeText(card).startsWith(dict.en.ticket_uncertain), noticeText(card));
+  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
+  // still uncertain on the next look: the notice stays, nothing new is announced
+  checkAgain(card).click();
+  await flush();
+  assert.ok(noticeText(card).startsWith(dict.en.ticket_uncertain), noticeText(card));
+  assert.equal(badgeOf(card).textContent, dict.en.ticket_state_checking);
+  assert.deepEqual(await announced(), { calls: 1, text: dict.en.ticket_announce_uncertain });
+  // the second leg turns out to have failed; two re-reads are in flight together
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  net.routes = [portfolio, { ...ticketRead({ ...half, status: 'submitted' }, [placed(0)]), gate }];
+  checkAgain(card).click();
+  checkAgain(card).click();
+  await flush();
+  release();
+  await flush();
+  assert.ok(noticeText(card).startsWith('1 of 2 orders were sent'), noticeText(card));
+  assert.ok(noticeText(card).includes(dict.en.ticket_result_partial));
+  assert.ok(!noticeText(card).includes(dict.en.ticket_uncertain), 'the stale "did not finish" text is gone');
+  assert.equal(checkAgain(card), undefined, 'nothing left to check');
+  assert.equal(card.querySelector('.ticket-notice').getAttribute('data-tone'), 'warn');
+  assert.equal(badgeOf(card).textContent, dict.en.ticket_state_submitted);
+  const partial = await announced();
+  assert.equal(partial.text, '1 of 2 orders were submitted. The rest were not placed.');
+  assert.equal(partial.calls, 2, 'the uncertain answer, then the settled one, once');
+  setLang('ko');
+  try {
+    assert.ok(noticeText(card).startsWith(t('ticket_result_placed', { placed: 1, total: 2 })), noticeText(card));
+  } finally {
+    setLang('en');
+  }
+  card.remove();
+  // every leg was placed after all: the plain result, with the orders listed, and the plain success announced
+  const all = ticket();
+  card = await confirmed(all, [lost]);
+  assert.ok(noticeText(card).startsWith(dict.en.ticket_uncertain), noticeText(card));
+  net.routes = [portfolio, ticketRead({ ...all, status: 'submitted' }, [placed(0)])];
+  checkAgain(card).click();
+  await flush();
+  assert.ok(noticeText(card).startsWith('1 of 1 orders were sent'), noticeText(card));
+  assert.ok(!noticeText(card).includes(dict.en.ticket_result_partial));
+  assert.equal(card.querySelector('.ticket-notice').getAttribute('data-tone'), 'ok');
+  assert.equal(card.querySelectorAll('.notice-order').length, 1);
+  assert.deepEqual(await announced(), { calls: 2, text: dict.en.ticket_announce_submitted });
+  card.remove();
+  // a re-read that finds the ticket still proposed leaves nothing unconfirmed: a later clean 200 is plain "Submitted"
+  const again = ticket();
+  net.routes = [portfolio, badAnswer(again), ticketRead(again)];
+  ({ card } = propose(again));
+  button(card, 'btn-confirm').click();
+  await flush();
+  assert.equal(noticeText(card), dict.en.ticket_uncertain_none);
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${again.id}/confirm`, status: 200, body: {
+    status: 'submitted', message: '1 of 1 orders placed.', ticket: { ...again, status: 'submitted' }, orders: [order()],
+    new_ticket: null, reason: null, block_codes: [] } }, ticketRead({ ...again, status: 'submitted' }, [placed(0)])];
+  button(card, 'btn-confirm').click();
+  await flush();
+  assert.ok(noticeText(card).startsWith('1 of 1 orders were sent'), noticeText(card));
+  assert.equal(badgeOf(card).textContent, dict.en.ticket_state_submitted);
+  assert.equal(card.querySelector('.timeline-foot').textContent, dict.en.timeline_settled);
+  card.remove();
 });
 
 await test('uncertain confirm: a re-read that finds the ticket still proposed says nothing was placed', async () => {
