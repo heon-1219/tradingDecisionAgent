@@ -313,21 +313,24 @@ async def test_a_large_filing_is_cut_at_the_cap_before_it_is_parsed(monkeypatch)
     assert "truncated" in result.text
 
 
-async def test_the_parse_and_the_ranking_run_off_the_event_loop(monkeypatch):
+@pytest.mark.parametrize("half", ["parse", "ranking"])
+async def test_the_parse_and_the_ranking_run_off_the_event_loop(monkeypatch, half):
+    # Each half is slowed on its own (the other one stays real and fast), and the longest stretch in which
+    # the event loop did not tick must stay far below the slowed half's 0.5 s. Moving only that half back
+    # onto the loop leaves a gap of at least 0.5 s; a thread leaves ordinary scheduling jitter (tens of ms).
     import finagent.research.edgar as edgar_mod
 
-    real_extract, real_rank = edgar_mod._extract_chunks, edgar_mod._rank_chunks
+    block, limit = 0.5, 0.25
+    name = {"parse": "_extract_chunks", "ranking": "_rank_chunks"}[half]
+    real = getattr(edgar_mod, name)
+    ran: list[str] = []
 
-    def slow_extract(html):
-        time.sleep(0.5)  # stands in for seconds of html.parser work on a multi-MB filing
-        return real_extract(html)
+    def slow(*args):
+        ran.append(half)
+        time.sleep(block)  # stands in for seconds of html.parser / BM25 work on a multi-MB filing
+        return real(*args)
 
-    def slow_rank(*args):
-        time.sleep(0.3)
-        return real_rank(*args)
-
-    monkeypatch.setattr(edgar_mod, "_extract_chunks", slow_extract)
-    monkeypatch.setattr(edgar_mod, "_rank_chunks", slow_rank)
+    monkeypatch.setattr(edgar_mod, name, slow)
     edgar, _ = _edgar()
     ticks: list[float] = []
 
@@ -339,13 +342,17 @@ async def test_the_parse_and_the_ranking_run_off_the_event_loop(monkeypatch):
     task = asyncio.create_task(ticker())
     try:
         await asyncio.sleep(0.05)
-        first = len(ticks)
+        started = time.perf_counter()
         result = await edgar.filing_passages("s1", ACCN, CIK, "risk", k=3)
-        during = len(ticks) - first
+        finished = time.perf_counter()
     finally:
         task.cancel()
     assert result.is_error is False
-    assert during >= 10, during  # the loop kept ticking through 0.8 s of parsing and ranking
+    assert ran == [half]  # the slowed half really ran, once
+    assert finished - started >= block
+    marks = [started, *(tick for tick in ticks if started <= tick <= finished), finished]
+    longest = max(later - earlier for earlier, later in zip(marks, marks[1:]))
+    assert longest < limit, f"the {half} stalled the event loop for {longest:.2f} s"
 
 
 async def test_a_cache_hit_neither_downloads_nor_parses_the_filing_again(monkeypatch):
