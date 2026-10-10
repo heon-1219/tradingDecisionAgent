@@ -445,6 +445,24 @@ def test_the_help_names_the_test_keys_for_the_provider_settings(capsys):
     assert demo_server.DEMO_LIMITED_KEY in out and "shallow mode" in out
 
 
+def test_the_help_lists_the_messages_to_try_as_the_readme_says(capsys):
+    """The README sends the reader to `--help` for the messages to type; the module docstring shows
+    the same list, so the three must not drift apart."""
+    with pytest.raises(SystemExit):
+        demo_server.main(["--help"])
+    out = capsys.readouterr().out
+    assert "messages to try" in out
+    for message, effect in demo_server.MESSAGES_TO_TRY:
+        assert message in out and effect in out
+        if not message.startswith("("):  # the Korean line is worded differently in the docstring
+            assert message in demo_server.__doc__ and effect in demo_server.__doc__
+    # The README's own examples are in the list.
+    for message in ("Build a low-cost core ETF portfolio with $5,000", "Modify: buy 3 VOO limit 610",
+                    "Draft a mandate: $10,000 budget, 15% per position",
+                    "Summarise https://research.example.com/market-note"):
+        assert message in out
+
+
 # --- main() ------------------------------------------------------------------------------------------
 
 

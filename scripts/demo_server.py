@@ -73,6 +73,28 @@ DEMO_PAGES = {
 }
 
 
+# What to type, and what the scripted model does with it. The module docstring shows the same
+# list; `--help` prints it too (the README points there), and a test keeps the three in step.
+MESSAGES_TO_TRY = (
+    ("Build a low-cost core ETF portfolio with $5,000", "research, tool cards, sources, a ticket"),
+    ("Modify: buy 3 VOO limit 610", "a new ticket replaces the old one"),
+    ("Draft a mandate: $10,000 budget, 15% per position", "the mandate draft card"),
+    ("Give me a grounded answer about index funds", "Google-style search suggestions (sandboxed)"),
+    ("Explain it in plain words", "an answer with a number the sources lack"),
+    ("Summarise https://research.example.com/market-note", "a fetched page with an injected instruction"),
+    ("Sell everything / Rebalance to 60/40", "sells; a sell and a buy"),
+    ("error", "a failed model step"),
+    ("(a message in Korean)", "is answered in Korean"),
+)
+
+
+def _messages_help() -> str:
+    width = max(len(message) for message, _ in MESSAGES_TO_TRY[:-1]) + 2
+    lines = [f"  {message.ljust(width)}{effect}" for message, effect in MESSAGES_TO_TRY[:-1]]
+    lines.append(f"  {MESSAGES_TO_TRY[-1][0]} {MESSAGES_TO_TRY[-1][1]}")
+    return "messages to try (the scripted model reacts to these words):\n" + "\n".join(lines) + "\n\n"
+
+
 def build_demo_world(tmp_dir: pathlib.Path | str) -> FakeWorld:
     """The fake world as the demo uses it: orders that fill, grounded search, one fetchable page."""
     world = build_fake_world(llm=DemoLLM(), tmp_dir=tmp_dir, web_pages=DEMO_PAGES, grounded=True,
@@ -115,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Keyless demo server for the FinAgent web app (fake broker, scripted model).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=("model provider test keys (Settings, any provider; no provider is ever called):\n"
+        epilog=(_messages_help() +
+                "model provider test keys (Settings, any provider; no provider is ever called):\n"
                 f"  {DEMO_VALID_KEY}    accepted\n"
                 f"  {DEMO_INVALID_KEY}  rejected\n"
                 f"  {DEMO_LIMITED_KEY}  accepted, but rate limited (saved with a warning)\n"
