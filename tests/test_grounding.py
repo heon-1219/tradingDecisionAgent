@@ -285,3 +285,13 @@ def test_grounded_web_instance_holds_no_cache_or_evidence_reference():
 def test_grounded_answer_error_defaults_to_none():
     answer = GroundedAnswer(text="t", sources=[], search_suggestions_html=None, queries=[])
     assert answer.error is None
+
+
+async def test_a_timeout_is_a_clean_network_error():
+    # Final review C-m4: a transport error is an HttpError with status 0 now.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    gw, _ = _grounded_web(handler)
+    result = await gw.answer("q")
+    assert result.error == "Gemini grounding request failed (no response: network error or timeout)."

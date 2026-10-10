@@ -150,3 +150,43 @@ async def test_url_with_key_param_logged_without_query_string(caplog):
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "shh" not in text
     assert "apikey" not in text
+
+
+# --- final review C-m4: transport errors and timeouts are HttpErrors too -----------------------
+
+
+async def _no_sleep(_sec: float) -> None:
+    return None
+
+
+@pytest.mark.parametrize("error_cls", [httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout,
+                                       httpx.RemoteProtocolError])
+async def test_transport_errors_become_http_errors_without_retries(error_cls):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        raise error_cls("upstream gone https://example.com/?apikey=shh", request=request)
+
+    client = _client(handler, sleep=_no_sleep)
+    for call in (client.get_json("https://example.com/a"), client.get_text("https://example.com/b"),
+                 client.post_json("https://example.com/c", json={})):
+        with pytest.raises(HttpError) as info:
+            await call
+        assert info.value.status == 0
+        assert error_cls.__name__ in str(info.value) and "shh" not in str(info.value)
+    assert calls == ["GET", "GET", "POST"]  # GET retry rules unchanged: only 429/5xx are retried
+
+
+async def test_get_still_retries_a_503_three_times_and_post_never():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(503, text="busy")
+
+    client = _client(handler, sleep=_no_sleep)
+    for call in (client.get_json("https://example.com/a"), client.post_json("https://example.com/b", json={})):
+        with pytest.raises(HttpError):
+            await call
+    assert calls == ["GET", "GET", "GET", "POST"]

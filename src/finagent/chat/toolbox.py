@@ -1008,7 +1008,8 @@ class ChatToolbox:
             return ToolOutput(self._broker_error_text(exc), is_error=True)
         except HttpError as exc:
             log.warning("tool %s: upstream HTTP %s", tool.name, exc.status)
-            return ToolOutput(f"Upstream data request failed (HTTP {exc.status}).", is_error=True)
+            why = f"HTTP {exc.status}" if exc.status else "no response: network error or timeout"
+            return ToolOutput(f"Upstream data request failed ({why}).", is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures go back to the model, never raise
             # Frames only: the exception message and any chained causes can carry provider text
             # or secrets, so they are never logged (no exc_info).

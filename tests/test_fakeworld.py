@@ -25,6 +25,7 @@ import _fakeworld as fw  # noqa: E402
 
 from finagent.agent.llm import ToolSpec  # noqa: E402
 from finagent.i18n import detect_lang  # noqa: E402
+from finagent.research.http import HttpError  # noqa: E402
 from finagent.trading.models import Mandate, TicketStatus  # noqa: E402
 
 PAGE_URL = "https://research.example.com/market-note"
@@ -131,9 +132,9 @@ async def test_no_network_only_the_given_pages_are_served(world):
     missing = await world.runtime.toolbox.execute(
         sid, "fetch_source", {"url": "https://research.example.com/other"}, turn_id="t1")
     assert missing.is_error
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(HttpError, match="ConnectError"):  # no response: status 0
         await world.runtime.http.get_text("https://example.com/")
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(HttpError, match="ConnectError"):  # no response: status 0
         await world.runtime.http.post_json("https://paper-api.alpaca.markets/v2/orders", json={})
     refused = [url for _method, url in world.refused]
     assert any("research.example.com/other" in url for url in refused)
@@ -410,7 +411,7 @@ async def test_without_the_grounded_option_the_tool_is_absent_and_its_host_is_re
     _sid, events, text = await turn(world, "Give me a grounded answer about index funds.")
     assert tools(events) == [] and of(events, "source-grounding") == []
     assert "not available" in text
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(HttpError, match="ConnectError"):  # no response: status 0
         await world.runtime.http.post_json(f"https://{fw.GROUNDING_HOST}/v1beta/models/x:generateContent", json={})
 
 

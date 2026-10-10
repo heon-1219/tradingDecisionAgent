@@ -4,6 +4,12 @@ Every research/broker connector (EDGAR, Tavily, Jina Reader, Alpaca) goes throug
 the project's global constraints hold in one place instead of being re-implemented per connector:
 secrets never reach logs, and slow or rate-limited upstream hosts get a per-host minimum-interval
 throttle.
+
+Every failure is an `HttpError`, so a caller guards against one exception type and can fall back
+(Tavily extract -> Jina Reader): a 4xx/5xx left after retries carries its status, a 200 that is not
+JSON where JSON was asked for carries 200, and a request that got no HTTP response at all (a
+connection error, a timeout, a protocol error: any `httpx.RequestError`) carries status 0 and only
+the exception's type name. GETs are retried only on 429 and 5xx; nothing else is retried.
 """
 from __future__ import annotations
 
@@ -38,7 +44,8 @@ _SECRET_PARAM_RE = re.compile(r"key|token", re.I)
 
 
 class HttpError(Exception):
-    """Raised for any 4xx/5xx response left after retries."""
+    """Raised for any 4xx/5xx response left after retries, a non-JSON 200 where JSON was asked
+    for, and (`status` 0) a request that got no HTTP response: connection error, timeout, ..."""
 
     def __init__(self, status: int, body: str):
         super().__init__(f"HTTP {status}: {body[:200]}")
@@ -118,6 +125,14 @@ class HttpClient:
     def _log(self, method: str, url: httpx.URL, headers: dict[str, str] | None) -> None:
         logger.debug("%s %s headers=%s", method, _redact_url(url), _redact_headers(headers))
 
+    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """One request. A request that gets no HTTP response is an `HttpError` with status 0 and
+        only the exception's type name: its message may carry a URL with a key in it."""
+        try:
+            return await self._client.request(method, url, **kwargs)
+        except httpx.RequestError as exc:
+            raise HttpError(0, f"{type(exc).__name__} (no response)") from None
+
     async def _get(
         self, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: float = 20.0
     ) -> httpx.Response:
@@ -127,7 +142,7 @@ class HttpClient:
         for attempt in range(_MAX_GET_ATTEMPTS):
             await self._limiter.wait(host)
             self._log("GET", request_url, headers)
-            resp = await self._client.get(url, params=params, headers=headers, timeout=timeout)
+            resp = await self._send("GET", url, params=params, headers=headers, timeout=timeout)
             if resp.status_code == 429 or resp.status_code >= 500:
                 if attempt < _MAX_GET_ATTEMPTS - 1:
                     await self._sleep(_RETRY_BACKOFF_SEC[attempt])
@@ -166,7 +181,7 @@ class HttpClient:
         host = request_url.host
         await self._limiter.wait(host)
         self._log("POST", request_url, headers)
-        resp = await self._client.post(url, json=json, headers=headers, timeout=timeout)
+        resp = await self._send("POST", url, json=json, headers=headers, timeout=timeout)
         if resp.status_code >= 400:
             raise HttpError(resp.status_code, resp.text)
         try:

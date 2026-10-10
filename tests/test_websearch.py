@@ -601,3 +601,27 @@ async def test_a_hostile_title_stays_inside_the_block_and_an_odd_url_is_withheld
     assert result.text.count("</untrusted>") == 1 and result.text.endswith("</untrusted>")
     assert "url: (not shown: unusual characters)" in block
     assert "evil.example/a b" not in result.text
+
+
+# --- final review C-m4: a Tavily timeout falls back to Jina Reader -----------------------------
+
+
+async def test_a_tavily_extract_timeout_falls_back_to_jina_reader():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.tavily.com":
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(200, text="Jina page text about chips.")
+
+    ws, calls, _ = _websearch(handler)
+    result = await ws.fetch("s1", "https://example.com/x")
+    assert result.is_error is False and "Jina page text about chips." in result.text
+    assert [r.url.host for r in calls] == ["api.tavily.com", "r.jina.ai"]
+
+
+async def test_a_search_that_cannot_reach_tavily_is_a_clean_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host", request=request)
+
+    ws, _, _ = _websearch(handler)
+    result = await ws.search("s1", "chips")
+    assert result.is_error is True and "Tavily search failed" in result.text

@@ -71,7 +71,7 @@ def hint_for(exc: BaseException) -> str | None:
         return "The service rejected the credentials or the User-Agent; check the matching value in .env."
     if status == 429:
         return "Rate limited. Wait a bit and run the check again."
-    if isinstance(exc, (httpx.RequestError, TimeoutError, OSError)):
+    if status == 0 or isinstance(exc, (httpx.RequestError, TimeoutError, OSError)):
         return "Could not reach the service (network, proxy or firewall?)."
     return None
 

@@ -94,6 +94,8 @@ class GroundedWeb:
         # takes the risk of a body accidentally containing something sensitive.
         if exc.status in _FREE_TIER_STATUSES:
             return f"{_FREE_TIER_ERROR} (HTTP {exc.status})"
+        if exc.status == 0:  # no HTTP response at all (see research.http.HttpError)
+            return "Gemini grounding request failed (no response: network error or timeout)."
         return f"Gemini grounding request failed (HTTP {exc.status})."
 
     @staticmethod
