@@ -445,8 +445,9 @@ async def test_requote_on_verdict_change_drops_the_rejected_leg_from_the_new_tic
 
 async def test_requote_on_clamp(world):
     ticket = await world.propose([aapl()])
+    # $6,500 less the 5% buffer of $100,000 equity leaves $1,500 for the $2,000 leg
     world.broker.account_snapshot = make_account(
-        buying_power=D("1500"), non_marginable_buying_power=D("1500"), cash=D("1500")
+        buying_power=D("6500"), non_marginable_buying_power=D("6500"), cash=D("6500")
     )
 
     result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)

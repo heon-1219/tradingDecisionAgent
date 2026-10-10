@@ -20,8 +20,8 @@ effects into the legs after it (`_Book`), always in the conservative direction:
 - each leg counts towards `max_orders_per_day`, and a buy into a symbol not yet held (or on
   order) opens a position for `max_positions`.
 Rejected legs have no effect. Pending open BUY orders in `ctx.open_orders` count as position value,
-as invested budget and as held symbols (remaining qty x limit price, else x the reference price;
-or the unfilled notional).
+as invested budget, as cash already committed and as held symbols (remaining qty x limit price,
+else x the reference price; or the unfilled notional).
 
 Prices and estimates:
 - reference price: the last trade, else the bid/ask midpoint (both sides needed); a missing or
@@ -31,7 +31,13 @@ Prices and estimates:
   bid, falling back to the reference price.
 - `est_cost_usd`: est_price x qty, or the notional. Every leg must come to at least $1.00.
 - A notional sell counts as notional / min(bid, reference) shares, never fewer.
-- Buying power is cash only: min(buying_power, non_marginable_buying_power), never margin.
+- Buying power is cash only, never margin. Usable = min(buying_power, non_marginable_buying_power,
+  cash - pending open buys) - cash_buffer_pct% of equity - buys accepted earlier in the ticket.
+  Alpaca's `cash` is not reduced by open orders, so the pending buys come off it here; and on a
+  margin account holding positions `non_marginable_buying_power` can exceed the cash, so it is
+  never trusted alone. The buffer is a share of equity, as the mandate's label says ("% of equity
+  always kept in cash"). Nothing left (<= 0) rejects every buy; a pending open buy that can't be
+  priced rejects every buy too (fail closed: the cash it commits is unknown).
 - Rejected legs report `leg == original` and the estimates of the original leg.
 
 Clamps: a qty clamp floors to whole shares unless fractional trading is allowed for the leg
@@ -280,6 +286,7 @@ class _Book:
     qty_available: dict[str, Decimal]  # shares available to sell; only sells change it
     value: dict[str, Decimal]  # position + pending open buys + earlier buys, per symbol
     invested: Decimal  # all positions' value + all pending open buys (budget), before this ticket
+    pending_buys: Decimal  # what the priced pending open buys commit (comes out of cash)
     unpriced: tuple[str, ...]  # symbols with a pending open buy that can't be valued
     sides: dict[str, set[str]]  # sides already traded in this ticket, per symbol
 
@@ -288,6 +295,7 @@ class _Book:
         held = {s for s, p in ctx.positions.items() if p.qty != 0}
         value = {s: abs(p.market_value) for s, p in ctx.positions.items()}
         invested = sum(value.values(), _ZERO)
+        pending_buys = _ZERO
         unpriced: list[str] = []
         for order in ctx.open_orders:
             if order.side.lower() != "buy":
@@ -300,6 +308,7 @@ class _Book:
                 continue
             value[symbol] = value.get(symbol, _ZERO) + pending
             invested += pending
+            pending_buys += pending
         return cls(
             bought=_ZERO,
             orders=0,
@@ -307,6 +316,7 @@ class _Book:
             qty_available={s: p.qty_available for s, p in ctx.positions.items()},
             value=value,
             invested=invested,
+            pending_buys=pending_buys,
             unpriced=tuple(unpriced),
             sides={},
         )
@@ -696,19 +706,47 @@ def _max_positions(c: _Check) -> None:
 
 
 def _buying_power(c: _Check) -> None:
+    """Cash only, never margin: usable = min(buying_power, non_marginable_buying_power, cash -
+    pending open buys) - cash_buffer_pct% of equity - earlier buys in this ticket (see the module
+    docstring)."""
     if c.leg.side != "buy":
         return
+    book = c.book
+    if book.unpriced:
+        symbols = ", ".join(book.unpriced)
+        c.block(
+            "buying_power",
+            f"Cannot check buying power: a pending open buy order for {symbols} has no price and "
+            "no quote",
+        )
+        return
     account = c.ctx.account
-    cash = account.buying_power
-    if account.non_marginable_buying_power is not None:  # cash only: never trade on margin
-        cash = min(cash, account.non_marginable_buying_power)
-    used = c.book.bought
-    usable = cash * (_HUNDRED - c.mandate.cash_buffer_pct) / _HUNDRED - used
+    available = min(account.buying_power, account.cash - book.pending_buys)
+    if account.non_marginable_buying_power is not None:
+        available = min(available, account.non_marginable_buying_power)
+    pct = c.mandate.cash_buffer_pct
+    buffer = max(account.equity, _ZERO) * pct / _HUNDRED  # kept in cash, a share of equity
+    used = book.bought
+    usable = available - buffer - used
     cost = c.est_cost
-    if cost > usable:
-        after = f" (after {_usd(used)} committed by earlier legs)" if used > 0 else ""
-        _shrink(c, "buying_power", usable,
-                f"estimated cost {_usd(cost)} exceeds usable buying power {_usd(usable)}{after}")
+    if cost <= usable:
+        return
+    notes = []
+    if book.pending_buys > 0:
+        notes.append(f"{_usd(book.pending_buys)} in open buy orders")
+    if used > 0:
+        notes.append(f"{_usd(used)} committed by earlier legs")
+    after = f" (after {' and '.join(notes)})" if notes else ""
+    if usable <= 0:
+        kept = f" once {_pct(pct)} of equity ({_usd(buffer)}) is kept in cash" if buffer > 0 else ""
+        c.block(
+            "buying_power",
+            f"Estimated cost {_usd(cost)} exceeds usable buying power {_usd(_ZERO)}: nothing is "
+            f"left{kept}{after}",
+        )
+        return
+    _shrink(c, "buying_power", usable,
+            f"estimated cost {_usd(cost)} exceeds usable buying power {_usd(usable)}{after}")
 
 
 def _budget(c: _Check) -> None:

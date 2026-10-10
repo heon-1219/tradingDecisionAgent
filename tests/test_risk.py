@@ -1,8 +1,9 @@
 """Tests for `finagent.trading.risk` - the deterministic pre-trade risk rules.
 
-Fixture world (see the factories below): an account with $20,000 equity and $1,000 buying power,
-the default `Mandate()` (20% max position, 5% cash buffer -> $950 usable, 3% price band, 10 orders
-a day), the market open, and four symbols:
+Fixture world (see the factories below): an account with $20,000 equity and $1,950 of cash,
+buying power and non-marginable buying power, the default `Mandate()` (20% max position, a 5% cash
+buffer = 5% of the $20,000 equity, so $1,950 - $1,000 = $950 usable; 3% price band, 10 orders a
+day), the market open, and four symbols:
 
 - VOO  last $500, bid $499.90, ask $500.10 - a *whole-share* asset in this fixture
        (`fractionable=False`), so a clamp lands on an integer the way the brief's cases expect;
@@ -40,9 +41,9 @@ def make_account(**over) -> AccountSnapshot:
     fields = dict(
         status="ACTIVE",
         equity=D("20000"),
-        cash=D("1000"),
-        buying_power=D("1000"),
-        non_marginable_buying_power=D("1000"),
+        cash=D("1950"),
+        buying_power=D("1950"),
+        non_marginable_buying_power=D("1950"),
         last_equity=D("20000"),
         trading_blocked=False,
         account_blocked=False,
@@ -191,7 +192,7 @@ def mandate() -> Mandate:
 # --- the brief's exact cases ---------------------------------------------------------------
 
 
-def test_buy_clamped_to_buying_power(ctx, mandate):   # buying_power 1000, cash buffer 5% -> 950 usable
+def test_buy_clamped_to_buying_power(ctx, mandate):   # cash 1,950 less 5% of 20,000 equity -> 950 usable
     d = evaluate([OrderLeg(symbol="VOO", side="buy", qty=Decimal("5"), type="limit", limit_price=Decimal("500"))], ctx, mandate)[0]
     assert d.verdict == "clamp" and d.leg.qty == Decimal("1") and "buying_power" in {r.code for r in d.reasons}
 
@@ -229,8 +230,9 @@ _NOTIONAL_GTC = OrderLeg.model_construct(
     symbol="AAPL", side="buy", qty=None, notional=D("100"), type="market", time_in_force="gtc",
     limit_price=None,
 )
-# Enough cash buying power that it never binds (risk uses min(buying_power, non_marginable)).
-_RICH = dict(buying_power=D("100000"), non_marginable_buying_power=D("100000"))
+# Enough cash buying power that it never binds (risk uses the lowest of buying_power,
+# non_marginable_buying_power and cash).
+_RICH = dict(buying_power=D("100000"), non_marginable_buying_power=D("100000"), cash=D("100000"))
 
 CASES = [
     # account_blocked
@@ -340,7 +342,7 @@ CASES = [
     # buying_power
     pytest.param(buy("VOO", 5, limit="500"), make_ctx(), Mandate(),
                  "clamp", "buying_power", id="buying-power-clamp"),
-    pytest.param(buy("VOO", 1, limit="500"), make_ctx(buying_power=D("100")), Mandate(),
+    pytest.param(buy("VOO", 1, limit="500"), make_ctx(buying_power=D("1100")), Mandate(),
                  "reject", "buying_power", id="buying-power-nothing-fits"),
     # budget
     pytest.param(buy("VOO", 2, limit="500"), ctx_with_position(20, "AAPL", "200", **_RICH),
@@ -575,7 +577,8 @@ def test_non_fractionable_asset_clamps_to_integer():
 
 
 def test_whole_share_clamp_that_reaches_zero_rejects_with_the_rules_code():
-    [d] = evaluate([buy("VOO", 1, limit="500")], make_ctx(buying_power=D("100")), Mandate())
+    # $1,095 of buying power less the $1,000 buffer (5% of $20,000 equity) leaves $95
+    [d] = evaluate([buy("VOO", 1, limit="500")], make_ctx(buying_power=D("1095")), Mandate())
     assert d.verdict == "reject" and codes(d) == ["buying_power"]
     assert reason(d, "buying_power").message == (
         "Estimated cost $500.00 exceeds usable buying power $95.00, and no whole-share quantity fits"
@@ -603,8 +606,8 @@ def test_notional_clamp_floors_to_cents(ctx):
 
 
 def test_notional_clamp_below_one_dollar_rejects():
-    [d] = evaluate([buy("AAPL", notional="5")], make_ctx(buying_power=D("1.05")), Mandate())
-    assert d.verdict == "reject" and codes(d) == ["buying_power"]  # usable $0.9975 -> $0.99 < $1.00
+    [d] = evaluate([buy("AAPL", notional="5")], make_ctx(buying_power=D("1000.99")), Mandate())
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]  # usable $0.99 < $1.00
     [d] = evaluate([buy("AAPL", notional="5")], make_ctx(), Mandate(max_order_usd=D("0.50")))
     assert d.verdict == "reject" and codes(d) == ["max_order_usd"]
 
@@ -840,7 +843,7 @@ def test_pending_market_buy_counts_conservatively_toward_budget():
 
 def test_buying_power_is_cash_only_on_a_margin_account():
     # Reg T margin: buying_power is 2x the cash (non-marginable) figure; only the cash counts.
-    context = make_ctx(buying_power=D("2000"), non_marginable_buying_power=D("1000"))
+    context = make_ctx(buying_power=D("4000"), non_marginable_buying_power=D("1950"))
     [d] = evaluate([buy("VOO", 5, limit="500")], context, Mandate())
     assert d.verdict == "clamp" and d.leg.qty == D("1")
     assert reason(d, "buying_power").message == (
@@ -849,9 +852,109 @@ def test_buying_power_is_cash_only_on_a_margin_account():
 
 
 def test_buying_power_uses_the_lower_of_the_two_figures():
-    context = make_ctx(buying_power=D("1000"), non_marginable_buying_power=D("5000"))
+    context = make_ctx(buying_power=D("1950"), non_marginable_buying_power=D("5000"), cash=D("5000"))
     [d] = evaluate([buy("VOO", 5, limit="500")], context, Mandate())
-    assert d.leg.qty == D("1")  # min(1000, 5000) x 95% = $950
+    assert d.leg.qty == D("1")  # min(1950, 5000, 5000) - 5% x $20,000 = $950
+
+
+# Final review A-I1 / A-m8: usable = min(buying_power, non_marginable_buying_power,
+# cash - pending open buys) - cash_buffer_pct x equity - earlier legs.
+
+
+def test_cash_caps_a_buy_even_when_non_marginable_buying_power_is_higher():
+    # The reviewer's probe: a margin paper account holding $60k of MSFT with $40k cash reports
+    # non_marginable_buying_power $70k. Only the cash may be spent: 40,000 - 5% x 100,000 = 35,000.
+    context = make_ctx(
+        equity=D("100000"), cash=D("40000"), buying_power=D("140000"),
+        non_marginable_buying_power=D("70000"), positions=[make_position("MSFT", 150, 400)],
+    )
+    [d] = evaluate([buy("AAPL", 330, limit="200")], context,
+                   Mandate(max_position_pct=D("100"), max_positions=20))
+    assert d.verdict == "clamp" and d.leg.qty == D("175") and d.est_cost_usd == D("35000")
+    assert reason(d, "buying_power").message == (
+        "Clamped qty 330 → 175: estimated cost $66,000.00 exceeds usable buying power $35,000.00"
+    )
+    assert D("40000") - d.est_cost_usd >= D("5000")  # cash never goes below the buffer
+
+
+@pytest.mark.parametrize("bp,nmbp,cash", [
+    ("4000", "1950", "1950"),  # Reg T margin: buying_power is double the cash figures
+    ("1950", "5000", "5000"),  # buying_power is the lowest
+    ("5000", "1950", "5000"),  # non_marginable_buying_power is the lowest
+    ("5000", "5000", "1950"),  # cash is the lowest (the probe's case)
+])
+def test_usable_cash_is_the_lowest_of_the_three_figures_less_the_buffer(bp, nmbp, cash):
+    # equity $20,000, 5% buffer = $1,000 kept in cash: 1,950 - 1,000 = 950 usable either way
+    context = make_ctx(buying_power=D(bp), non_marginable_buying_power=D(nmbp), cash=D(cash))
+    [d] = evaluate([buy("AAPL", 50, limit="200")], context, Mandate(max_position_pct=D("100")))
+    assert d.verdict == "clamp" and d.est_cost_usd == D("950") and d.leg.qty == D("4.75")
+    assert codes(d) == ["buying_power"]
+
+
+def test_pending_open_buys_come_out_of_cash():
+    # Alpaca's cash is not reduced by open orders: a $500 open VOO buy leaves 1,950 - 500 = 1,450,
+    # less the $1,000 buffer = $450 for this ticket.
+    context = make_ctx(buying_power=D("5000"), non_marginable_buying_power=D("5000"), cash=D("1950"),
+                       open_orders=[make_order("VOO", "buy")])
+    [d] = evaluate([buy("AAPL", 5, limit="200")], context, Mandate(max_position_pct=D("100")))
+    assert d.verdict == "clamp" and d.leg.qty == D("2.25") and d.est_cost_usd == D("450")
+    assert reason(d, "buying_power").message == (
+        "Clamped qty 5 → 2.25: estimated cost $1,000.00 exceeds usable buying power $450.00 "
+        "(after $500.00 in open buy orders)"
+    )
+
+
+def test_pending_open_buys_and_earlier_legs_both_count():
+    context = make_ctx(buying_power=D("5000"), non_marginable_buying_power=D("5000"), cash=D("1950"),
+                       open_orders=[make_order("VOO", "buy", limit_price=D("100"))])
+    first, second = evaluate([buy("AAPL", 2, limit="200"), buy("AAPL", 5, limit="200")], context,
+                             Mandate(max_position_pct=D("100")))
+    assert first.verdict == "accept"
+    assert second.verdict == "clamp" and second.est_cost_usd == D("450")  # 1,950 - 100 - 1,000 - 400
+    assert reason(second, "buying_power").message.endswith(
+        "(after $100.00 in open buy orders and $400.00 committed by earlier legs)"
+    )
+
+
+def test_the_cash_buffer_is_a_share_of_equity_not_of_cash():
+    # The label says "% of equity kept in cash": equity 100k, cash 30k, buffer 20% -> keep 20k,
+    # spend 10k (20% of the cash figure would have allowed 24k).
+    context = make_ctx(equity=D("100000"), cash=D("30000"), buying_power=D("30000"),
+                       non_marginable_buying_power=D("30000"), positions=[make_position("MSFT", 175, 400)])
+    [d] = evaluate([buy("AAPL", 150, limit="200")], context,
+                   Mandate(max_position_pct=D("100"), max_positions=20, cash_buffer_pct=D("20")))
+    assert d.verdict == "clamp" and d.est_cost_usd == D("10000")
+
+
+def test_a_buffer_that_takes_all_the_cash_rejects_buys_but_not_sells():
+    context = ctx_with_position(2, buying_power=D("1000"), non_marginable_buying_power=D("1000"),
+                                cash=D("1000"))  # 5% of $20,000 equity is the whole $1,000
+    bought, sold = evaluate([buy("AAPL", 1, limit="200")], context, Mandate()), evaluate(
+        [sell("VOO", 1, limit="500")], context, Mandate())
+    assert bought[0].verdict == "reject" and codes(bought[0]) == ["buying_power"]
+    assert reason(bought[0], "buying_power").message == (
+        "Estimated cost $200.00 exceeds usable buying power $0.00: nothing is left once 5% of "
+        "equity ($1,000.00) is kept in cash"
+    )
+    assert sold[0].verdict == "accept"
+
+
+def test_negative_cash_rejects_every_buy():
+    context = make_ctx(buying_power=D("5000"), non_marginable_buying_power=D("5000"), cash=D("-100"))
+    [d] = evaluate([buy("AAPL", 1, limit="200")], context, Mandate(cash_buffer_pct=D("0")))
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]
+
+
+def test_an_unpriced_pending_open_buy_blocks_buys_fail_closed():
+    # NOQ has no quote and no position: what that open market buy commits is unknown, so the cash
+    # left can't be known either.
+    order = make_order("NOQ", "buy", type="market", limit_price=None)
+    context = make_ctx(open_orders=[order], **_RICH)
+    [d] = evaluate([buy("AAPL", 1, limit="200")], context, Mandate())
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]
+    assert reason(d, "buying_power").message == (
+        "Cannot check buying power: a pending open buy order for NOQ has no price and no quote"
+    )
 
 
 # --- budget -----------------------------------------------------------------------------------
@@ -884,13 +987,15 @@ def test_budget_counts_positions_and_pending_open_buys():
     )
 
 
-def test_budget_fails_closed_on_an_unpriceable_pending_buy():
+def test_an_unpriceable_pending_buy_fails_closed_with_or_without_a_budget():
+    # The cash it commits is unknown, so the buying-power rule (which runs before `budget`) blocks
+    # every buy, budget or not (final review A-I1; it used to pass without a budget).
     order = make_order("NOQ", "buy", qty=D("5"), type="market", limit_price=None)
     context = make_ctx(open_orders=[order], **_RICH)
     [d] = evaluate([buy("VOO", 1, limit="500")], context, Mandate(budget_usd=D("5000")))
-    assert d.verdict == "reject" and codes(d) == ["budget"]
+    assert d.verdict == "reject" and codes(d) == ["buying_power"]
     [no_budget] = evaluate([buy("VOO", 1, limit="500")], context, Mandate())
-    assert no_budget.verdict == "accept"
+    assert no_budget.verdict == "reject" and codes(no_budget) == ["buying_power"]
 
 
 # --- minimum sizes and plain-form output ------------------------------------------------------
@@ -956,7 +1061,7 @@ def test_no_accepted_or_clamped_leg_costs_less_than_one_dollar():
     ]
     survivors = 0
     for mandate_ in (Mandate(), Mandate(max_order_usd=D("1.20")), Mandate(max_order_usd=D("0.90"))):
-        for context_ in (context, ctx_with_position(1000, "PNY", "0.5", buying_power=D("1.10"))):
+        for context_ in (context, ctx_with_position(1000, "PNY", "0.5", buying_power=D("1001.10"))):
             for leg in legs:
                 [d] = evaluate([leg], context_, mandate_)
                 if d.verdict != "reject":
