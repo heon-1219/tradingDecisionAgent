@@ -480,17 +480,20 @@ def _settings_body(rt) -> dict:
         alpaca = "not_paper"
     else:
         alpaca = "missing" if rt.broker is None else (rt.alpaca_status or "unreachable")
-    return {
+    body = {
         "alpaca": alpaca,
         "tavily": _set(s.tavily_api_key),
         "sec_user_agent": _set(s.sec_user_agent),
         "gemini": _set(s.gemini_api_key),
         "trading_enabled": bool(s.trading_enabled),
         "api_allow_remote": bool(getattr(s, "api_allow_remote", False)),
-        # Names of writable settings that only the process environment provides (see env_fallbacks).
+        # Names of settings that only the process environment provides (see env_fallbacks).
         "env_fallbacks": env_fallbacks(rt.env_path),
         **api_llm.llm_settings_body(rt),  # provider, model, effort, mode, limits, gemini_paid, providers
     }
+    if getattr(rt, "demo", False) is True:  # the keyless demo server (scripts/demo_server.py)
+        body["demo"] = True
+    return body
 
 
 @router.get("/settings")

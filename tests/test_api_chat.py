@@ -936,6 +936,165 @@ def test_api_responses_forbid_framing_and_sniffing(world):
         assert "access-control-allow-origin" not in r.headers
 
 
+# --- final review B (security) -------------------------------------------------------------------------------
+
+
+def test_the_auto_docs_and_the_schema_are_not_served(world):
+    # B-I1: /docs and /redoc load unpinned CDN scripts on the API's origin.
+    with world.client() as client:
+        for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+            assert client.get(path).status_code == 404, path
+
+
+FORWARDED_HEADERS = ["X-Forwarded-For", "Forwarded", "X-Real-IP", "X-Forwarded-Host"]
+CLIENT_HEADER_BYTES = b"x-finagent-client"
+
+
+@pytest.mark.parametrize("header", FORWARDED_HEADERS)
+def test_api_requests_carrying_proxy_headers_are_refused(world, header):
+    # B-I2: a local browser never sends these; a proxy (or a forged request) does.
+    value = "for=127.0.0.1" if header == "Forwarded" else "127.0.0.1"
+    with world.client() as client:
+        r = client.get("/api/sessions", headers={header: value})
+        assert r.status_code == 403 and r.json()["error"] == "forwarded_request"
+        r = client.post("/api/kill-switch", json={}, headers={header: value})
+        assert r.status_code == 403 and world.settings.trading_enabled is True
+        r = client.get("/answer", params={"question_id": "Q-1", "question": "hi"}, headers={header: value})
+        assert r.status_code == 200 and set(r.json()) == {
+            "question_id", "question", "retrieved_context", "think_trace", "answer"}
+
+
+def test_proxy_headers_are_let_through_when_remote_clients_are_allowed(tmp_path):
+    # With api_allow_remote the loopback rule is off already (your own authenticating proxy sits in
+    # front and adds these headers), so they decide nothing.
+    world = ApiWorld(tmp_path, api_allow_remote=True)
+    with world.client() as client:
+        assert client.get("/api/sessions", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200
+
+
+def test_the_docker_image_runs_uvicorn_without_proxy_headers():
+    from finagent.paths import ROOT
+
+    cmd = next(line for line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+               if line.startswith("CMD"))
+    assert '"--no-proxy-headers"' in cmd
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site", "CROSS-SITE"])
+def test_cross_site_browser_requests_are_refused_on_the_api_and_answer(world, site):
+    # B-M1/M2: a page on another site (or a sibling subdomain) cannot drive the API or burn /answer.
+    with world.client() as client:
+        headers = {"Sec-Fetch-Site": site}
+        for method, path, kw in (("GET", "/api/sessions", {}), ("POST", "/api/sessions", {"json": {}}),
+                                 ("GET", "/api/settings", {}), ("POST", "/api/kill-switch", {"json": {}}),
+                                 ("GET", "/answer", {"params": {"question": "hi"}}),
+                                 ("GET", "/answer/stream", {"params": {"question": "hi"}})):
+            r = client.request(method, path, headers=headers, **kw)
+            assert r.status_code == 403 and r.json()["error"] == "cross_site", (method, path)
+        assert world.settings.trading_enabled is True
+
+
+@pytest.mark.parametrize("site", ["same-origin", "none", None])
+def test_same_origin_direct_and_non_browser_requests_pass(world, site):
+    headers = {} if site is None else {"Sec-Fetch-Site": site}
+    with world.client() as client:
+        assert client.get("/api/sessions", headers=headers).status_code == 200
+        assert client.post("/api/sessions", json={}, headers=headers).status_code == 201
+        r = client.get("/answer", params={"question_id": "Q-1", "question": "hi"}, headers=headers)
+        assert r.status_code == 200 and r.json()["question_id"] == "Q-1"
+        assert client.get("/", headers=headers).status_code == 200
+
+
+def test_a_link_from_another_site_still_opens_the_web_app(world):
+    with world.client() as client:
+        assert client.get("/", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+
+def test_an_api_body_over_one_mebibyte_is_refused_by_its_length(world):
+    # B-M6: Content-Length says it before anything is read.
+    with world.client() as client:
+        big = b'{"title": "' + b"x" * (1024 * 1024) + b'"}'
+        r = client.post("/api/sessions", content=big, headers={"Content-Type": "application/json"})
+        assert r.status_code == 413 and r.json()["error"] == "too_large"
+        just_under = json.dumps({"title": "t", "pad": "x" * 1000}).encode()
+        assert client.post("/api/sessions", content=just_under,
+                           headers={"Content-Type": "application/json"}).status_code == 422  # extra field
+
+
+def test_a_chunked_api_body_over_one_mebibyte_is_refused_while_it_streams(world):
+    def chunks():
+        for _ in range(17):
+            yield b"x" * 65536  # 17 x 64 KiB = 1.0625 MiB, no Content-Length
+
+    with world.client() as client:
+        r = client.put("/api/settings", content=chunks(), headers={"Content-Type": "application/json"})
+        assert r.status_code == 413 and r.json()["error"] == "too_large"
+        assert world.settings.trading_enabled is True
+
+
+async def test_the_guard_stops_reading_a_streamed_body_past_the_cap():
+    reads: list[int] = []
+    called: list[str] = []
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        called.append("app")
+
+    async def receive():
+        reads.append(1)
+        return {"type": "http.request", "body": b"x" * (512 * 1024), "more_body": True}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = _scope("/api/sessions", method="POST")
+    scope["headers"].append((CLIENT_HEADER_BYTES, b"1"))
+    await LocalApiGuard(app)(scope, receive, send)
+    assert called == [] and sent[0]["status"] == 413
+    assert len(reads) == 3  # 1.5 MiB read: one chunk past the 1 MiB cap, then it stopped
+
+
+async def test_the_guard_replays_a_small_streamed_body_to_the_app():
+    chunks = [{"type": "http.request", "body": b'{"ti', "more_body": True},
+              {"type": "http.request", "body": b'tle": "x"}', "more_body": False}]
+    seen: list[dict] = []
+
+    async def app(scope, receive, send):
+        seen.append(await receive())
+        seen.append(await receive())
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive():
+        return chunks.pop(0)
+
+    async def send(message):
+        pass
+
+    scope = _scope("/api/sessions", method="POST")
+    scope["headers"].append((CLIENT_HEADER_BYTES, b"1"))
+    await LocalApiGuard(app)(scope, receive, send)
+    assert b"".join(m["body"] for m in seen) == b'{"title": "x"}'
+
+
+def test_api_allow_remote_is_warned_at_startup_and_reported(tmp_path, monkeypatch, caplog):
+    # B-M4: an unsafe setting must not be silent; from the process environment it is named too.
+    monkeypatch.setenv("API_ALLOW_REMOTE", "true")
+    world = ApiWorld(tmp_path, api_allow_remote=True)
+    with caplog.at_level(logging.WARNING), world.client() as client:
+        body = client.get("/api/settings").json()
+        assert body["api_allow_remote"] is True
+        assert "API_ALLOW_REMOTE" in body["env_fallbacks"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("API_ALLOW_REMOTE is true" in w for w in warnings), warnings
+
+
+def test_api_allow_remote_off_is_not_warned(world, caplog):
+    with caplog.at_level(logging.WARNING), world.client() as client:
+        client.get("/api/settings")
+    assert "API_ALLOW_REMOTE" not in caplog.text
+
+
 # --- 11. startup sweep ----------------------------------------------------------------------------------------
 
 

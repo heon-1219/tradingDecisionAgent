@@ -265,6 +265,10 @@ class ChatRuntime:
         # (session_id, turn_id) -> ticket id: the toolbox's one-proposal-per-turn slots. Owned here
         # and handed to every toolbox built, so a rebuild in the middle of a turn cannot reset them.
         self.turn_slots: OrderedDict[tuple[str, str], str] = OrderedDict()
+        # Set by `scripts/demo_server.py`: `GET /api/settings` then says `demo: true` (the web app
+        # shows a DEMO badge), and a key typed in Settings is kept in memory only, never written to
+        # the env file.
+        self.demo = False
         self.http = self.ledger = self.edgar = self.web = self.grounded = None
         self.broker = self.data = self.executor = self.toolbox = None
         self.rebuild()
@@ -401,11 +405,18 @@ class ChatRuntime:
     # --- lifecycle -------------------------------------------------------------------------------
 
     async def startup(self) -> None:
-        """Warn about environment-only settings, expire stale tickets, settle stuck ones and check the
-        Alpaca keys. Never raises."""
+        """Warn about environment-only settings and an open `api_allow_remote`, expire stale
+        tickets, settle stuck ones and check the Alpaca keys. Never raises."""
         for name in env_fallbacks(self.env_path):
-            log.warning("startup: %s comes from the process environment, not .env; clearing it in "
-                        "the app will not survive a restart", name)
+            if name in ENV_NAMES.values():
+                log.warning("startup: %s comes from the process environment, not .env; clearing it "
+                            "in the app will not survive a restart", name)
+            else:
+                log.warning("startup: %s comes from the process environment, not .env", name)
+        if getattr(self.settings, "api_allow_remote", False):
+            log.warning("startup: API_ALLOW_REMOTE is true: /api/* answers clients on other machines "
+                        "too. That is unsafe unless your own authentication sits in front: /api/* "
+                        "can place paper orders and write keys")
         try:
             expired = self.tickets.expire_stale()
             if expired:
@@ -665,9 +676,13 @@ class ChatRuntime:
                 new_llm = self._llm_factory(self._candidate(changes)) if self._needs_new_llm(changes) else None
                 if new_llm is not None:
                     made.append(new_llm)
-                update_env_file(
-                    self.env_path, {ENV_NAMES[name]: _env_value(value) for name, value in changes.items()}
-                )
+                env_changes = {
+                    ENV_NAMES[name]: _env_value(value) for name, value in changes.items()
+                    # The demo server keeps a typed key in memory only (see `demo`).
+                    if not (self.demo and name in SECRET_FIELDS)
+                }
+                if env_changes:
+                    update_env_file(self.env_path, env_changes)
             except BaseException:
                 self._retire(made)
                 raise

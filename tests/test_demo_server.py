@@ -307,6 +307,42 @@ def test_saving_keys_in_the_demo_never_builds_a_real_broker(tmp_path, monkeypatc
         fw.release_sqlite(world.runtime.db, getattr(world.registry, "rdb", None))
 
 
+def test_the_demo_says_so_in_its_settings(demo):
+    # Final review B-M8 (backend): the web app shows a DEMO badge from this flag.
+    client, world = demo
+    assert world.runtime.demo is True
+    assert client.get("/api/settings").json()["demo"] is True
+
+
+def test_typed_keys_stay_in_memory_in_the_demo(demo, tmp_path):
+    # Final review B-M8: nothing persistent gets a key a visitor typed into the demo.
+    client, world = demo
+    env_before = (tmp_path / ".env").read_text(encoding="utf-8")
+    r = client.put("/api/settings", headers=WRITE, json={
+        "alpaca_key_id": "typed-key-id-123", "alpaca_secret": "typed-secret-456",
+        "tavily_key": "tvly-typed-key-789", "gemini_key": "demo-valid-key"})
+    assert r.status_code == 200, r.text
+    assert world.runtime.settings.tavily_api_key == "tvly-typed-key-789"  # in use, in memory
+    assert world.runtime.settings.alpaca_api_key_id == "typed-key-id-123"
+    env_after = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert env_after == env_before
+    stored = " ".join(row["payload"] for row in world.runtime.db.query("SELECT payload FROM ledger"))
+    for typed in ("typed-key-id-123", "typed-secret-456", "tvly-typed-key-789", "demo-valid-key"):
+        assert typed not in env_after and typed not in stored
+    # Non-secret settings still behave as in the real app (the kill switch is persisted).
+    client.post("/api/kill-switch", json={}, headers=WRITE)
+    assert "TRADING_ENABLED=false" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_the_real_app_has_no_demo_flag(tmp_path):
+    from test_api_chat import ApiWorld
+
+    world = ApiWorld(tmp_path)
+    with world.client() as client:
+        assert "demo" not in client.get("/api/settings").json()
+    assert world.runtime.demo is False
+
+
 def test_switching_the_model_provider_in_the_demo_never_reaches_a_provider(tmp_path, monkeypatch):
     import finagent.app_state as app_state
     import finagent.llm_admin as llm_admin

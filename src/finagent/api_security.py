@@ -6,15 +6,31 @@ machines and from other websites open in the user's browser. For every HTTP requ
 1. **Loopback only.** The client address must be loopback (`127.0.0.0/8`, `::1` or an IPv4-mapped
    loopback), unless `allow_remote()` is true (the `api_allow_remote` setting, unsafe without your
    own auth in front). A request with no client address is refused too. Otherwise 403
-   `local_only`. The address is the socket peer: `main()` runs uvicorn with `proxy_headers=False`,
-   so an `X-Forwarded-For` header can never make a remote client look local.
-2. **Host allowlist** (DNS-rebinding defence). The `Host` header must parse strictly
+   `local_only`. The address is the socket peer: `main()` and the Docker image run uvicorn without
+   proxy headers (`proxy_headers=False`, `--no-proxy-headers`), so an `X-Forwarded-For` header can
+   never make a remote client look local.
+2. **No proxied requests** (defence in depth for the rule above). A request carrying
+   `X-Forwarded-For`, `Forwarded`, `X-Real-IP` or `X-Forwarded-Host` came through a proxy, or is
+   forged: a local browser never sends them. 403 `forwarded_request`, unless `allow_remote()` is
+   true (the loopback rule is off then anyway, and your own authenticating proxy adds them).
+3. **Host allowlist** (DNS-rebinding defence). The `Host` header must parse strictly
    (`parse_host`: `name[:port]` or `[ipv6][:port]`, digits-only port) to `127.0.0.1`, `localhost`
    or `[::1]`, whatever `allow_remote()` says. Otherwise 400 `bad_host`.
-3. **Anti-CSRF** for POST, PUT, PATCH and DELETE: the header `X-FinAgent-Client: 1` is required (a
+4. **No cross-site browser requests**, for every method. A `Sec-Fetch-Site` header (browsers send
+   it on every request) other than `same-origin` or `none` - so `cross-site` or `same-site` - is
+   403 `cross_site`. No header at all is allowed: non-browser clients do not send it.
+5. **Anti-CSRF** for POST, PUT, PATCH and DELETE: the header `X-FinAgent-Client: 1` is required (a
    cross-site page cannot send a custom header without a CORS preflight, and no CORS middleware is
    installed), else 403 `csrf_header_missing`. An `Origin` header, when present, must be
    `http://<Host>` or `https://<Host>`, else 403 `origin_mismatch`.
+6. **Body cap.** A request body over `MAX_BODY_BYTES` (1 MiB) is 413 `too_large`: by its
+   `Content-Length` before anything is read, or, without one (chunked), counted while it is read.
+   The guard reads such a body itself, up to the cap, before the route sees it, and stops at the
+   first chunk past the cap.
+
+`/answer` and `/answer/stream` get rule 4 only (403 `cross_site`): another site's page must not be
+able to spend the model budget through a visitor's browser. Graders' HTTP clients send no
+`Sec-Fetch-Site`, so the competition contract is unchanged for them.
 
 There are no test-only allowances: tests use a real loopback address and Host. WebSocket
 connections under `/api` are refused outright (close code 1008): there are no WebSocket routes, and
@@ -23,9 +39,10 @@ one added later would otherwise run without the checks above.
 Responses under `/api/`, `/` and `/app/` also get anti-framing and no-sniff headers, so a hostile
 page cannot frame the app and trick the user into pressing Confirm. The web app itself (`/` and
 `/app/`) is always sent with `Cache-Control: no-cache`: the browser may keep a copy but must
-revalidate it, so it never runs a stale script after an update. `/answer`, `/answer/stream`,
-`/health` and `/ui` pass through untouched. This is a pure ASGI middleware (not `BaseHTTPMiddleware`)
-so streaming responses and cancellation behave exactly as without it.
+revalidate it, so it never runs a stale script after an update. A link from another site still
+opens it (rule 4 is for `/api/*` and `/answer` only). `/health` and `/ui` pass through untouched,
+and so do `/answer` and `/answer/stream` apart from rule 4. This is a pure ASGI middleware (not
+`BaseHTTPMiddleware`) so streaming responses and cancellation behave exactly as without it.
 """
 from __future__ import annotations
 
@@ -41,6 +58,12 @@ API_PREFIX = "/api"
 CLIENT_HEADER = "x-finagent-client"
 ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
 STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# Headers only a proxy adds: a local browser never sends them (rule 2).
+FORWARDED_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip", "x-forwarded-host")
+# `Sec-Fetch-Site` values let through (rule 4); a missing header is let through too.
+SAME_SITE_FETCH = frozenset({"same-origin", "none"})
+ANSWER_PATHS = frozenset({"/answer", "/answer/stream"})
+MAX_BODY_BYTES = 1024 * 1024  # rule 6
 _HOST_RE = re.compile(
     r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?)(?::(?P<port>[0-9]{1,5}))?"
 )
@@ -103,6 +126,54 @@ def _is_api(scope: Scope) -> bool:
     return is_api_path(_route_path(scope)) or is_api_path(scope.get("path", ""))  # never under-match
 
 
+def _is_answer(scope: Scope) -> bool:
+    return _route_path(scope) in ANSWER_PATHS or scope.get("path", "") in ANSWER_PATHS
+
+
+def _cross_site(headers: Headers) -> bool:
+    site = headers.get("sec-fetch-site")
+    return site is not None and site.strip().lower() not in SAME_SITE_FETCH
+
+
+def _declared_length(headers: Headers) -> int | None:
+    """The `Content-Length` as a number, or None when it is absent or not a plain number (the
+    body is then counted as it is read)."""
+    value = headers.get("content-length")
+    if value is None or not value.strip().isdigit():
+        return None
+    return int(value.strip())
+
+
+async def _read_capped(receive: Receive, cap: int) -> tuple[list[Message], bool]:
+    """Read a body of unknown length up to `cap` bytes: the messages read, and whether the body
+    went past the cap (reading stops at the first chunk that does)."""
+    messages: list[Message] = []
+    total = 0
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message.get("type") != "http.request":
+            return messages, False  # a disconnect: the route will see it
+        total += len(message.get("body", b""))
+        if total > cap:
+            return messages, True
+        if not message.get("more_body", False):
+            return messages, False
+
+
+def _replay(messages: list[Message], receive: Receive) -> Receive:
+    """`receive` for the route: the messages the guard has read already, then the real one (for
+    a disconnect)."""
+    pending = list(messages)
+
+    async def replayed() -> Message:
+        if pending:
+            return pending.pop(0)
+        return await receive()
+
+    return replayed
+
+
 def _origin_matches(origin: str, host_header: str) -> bool:
     origin = origin.strip().lower().rstrip("/")
     host = host_header.strip().lower()
@@ -127,6 +198,10 @@ def _refusal(status: int, code: str, message: str):
     return respond
 
 
+_CROSS_SITE = _refusal(403, "cross_site", "This request came from another website and was refused.")
+_TOO_LARGE = _refusal(413, "too_large", "The request body is too large.")
+
+
 class LocalApiGuard:
     """See the module docstring. `allow_remote` is read on every request, so a settings change
     applies without a restart."""
@@ -143,6 +218,12 @@ class LocalApiGuard:
             await self.app(scope, receive, send)
             return
         api = _is_api(scope)
+        if not api and _is_answer(scope):
+            if _cross_site(Headers(scope=scope)):
+                await _CROSS_SITE(send)
+                return
+            await self.app(scope, receive, send)
+            return
         if not api and not _is_app_path(_route_path(scope)):
             await self.app(scope, receive, send)
             return
@@ -151,6 +232,12 @@ class LocalApiGuard:
             if refusal is not None:
                 await refusal(send)
                 return
+            if _declared_length(Headers(scope=scope)) is None:
+                messages, too_large = await _read_capped(receive, MAX_BODY_BYTES)
+                if too_large:
+                    await _TOO_LARGE(send)
+                    return
+                receive = _replay(messages, receive)
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -168,12 +255,18 @@ class LocalApiGuard:
     def _check(self, scope: Scope):
         client = scope.get("client")
         client_host = client[0] if client else None
-        if not is_loopback(client_host) and not self._remote_allowed():
+        remote_allowed = self._remote_allowed()
+        if not is_loopback(client_host) and not remote_allowed:
             return _refusal(403, "local_only", "This API only answers requests from this computer.")
         headers = Headers(scope=scope)
+        if not remote_allowed and any(name in headers for name in FORWARDED_HEADERS):
+            return _refusal(403, "forwarded_request",
+                            "This API does not answer requests that came through a proxy.")
         host_header = headers.get("host", "")
         if parse_host(host_header) not in ALLOWED_HOSTNAMES:
             return _refusal(400, "bad_host", "Open the app at http://127.0.0.1 or http://localhost.")
+        if _cross_site(headers):
+            return _CROSS_SITE
         if scope.get("method", "GET").upper() in STATE_CHANGING:
             if headers.get(CLIENT_HEADER) != "1":
                 return _refusal(403, "csrf_header_missing",
@@ -182,6 +275,9 @@ class LocalApiGuard:
             if origin is not None and not _origin_matches(origin, host_header):
                 return _refusal(403, "origin_mismatch",
                                 "This request came from another website and was refused.")
+        declared = _declared_length(headers)
+        if declared is not None and declared > MAX_BODY_BYTES:
+            return _TOO_LARGE
         return None
 
     def _remote_allowed(self) -> bool:

@@ -68,7 +68,10 @@ def create_app(state_factory: Callable | None = None, *, web_app_dir: Path | Non
             if chat is not None:
                 await chat.shutdown()
 
-    app = FastAPI(title="Financial Product Agent API", version="0.1.0", lifespan=lifespan)
+    # No auto-docs and no schema endpoint: /docs and /redoc load unpinned CDN scripts on this origin,
+    # next to an API that can place paper orders.
+    app = FastAPI(title="Financial Product Agent API", version="0.1.0", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
 
     def allow_remote() -> bool:
         settings = getattr(getattr(app.state, "fin", None), "settings", None)

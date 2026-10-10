@@ -217,12 +217,21 @@ ENV_NAMES = {
 }
 
 
+# Settings the app reads but never writes, and that `env_fallbacks` reports all the same: one set
+# only in the process environment (a Compose file, a shell export) is easy to forget.
+ENV_READ_ONLY_NAMES = {
+    "api_allow_remote": "API_ALLOW_REMOTE",
+}
+
+
 def env_fallbacks(env_path: Path | str | None = None) -> list[str]:
-    """Names (never values) of the app-writable settings that only the process environment
-    provides: set there, and absent or empty in the `.env` file (which wins when it has a value).
-    Saving such a setting from the app works, since that writes it to `.env`; clearing it there
-    does not survive a restart, because the environment value comes back."""
+    """Names (never values) of the app-writable settings, and of `API_ALLOW_REMOTE` (which the app
+    only reads), that only the process environment provides: set there, and absent or empty in the
+    `.env` file (which wins when it has a value). Saving a writable setting from the app works,
+    since that writes it to `.env`; clearing it there does not survive a restart, because the
+    environment value comes back."""
     path = Path(env_path) if env_path is not None else ROOT / ".env"
     in_file = {name.upper() for name, value in dotenv_values(path).items() if value} if path.is_file() else set()
     in_env = {name.upper() for name, value in os.environ.items() if value}
-    return sorted(name for name in ENV_NAMES.values() if name in in_env and name not in in_file)
+    names = [*ENV_NAMES.values(), *ENV_READ_ONLY_NAMES.values()]
+    return sorted(name for name in names if name in in_env and name not in in_file)

@@ -31,7 +31,9 @@ answering. The demo starts in deep mode (its Gemini key is declared paid); clear
 on a paid plan" in Settings to see shallow mode.
 
 The server binds 127.0.0.1 only. Its state (app DB, env file, product DB) lives in a fresh temporary
-directory that is removed on exit; it never reads or writes the project's `.env` or `data/`.
+directory that is removed on exit; it never reads or writes the project's `.env` or `data/`. The
+runtime is marked as the demo's (`ChatRuntime.demo`): `GET /api/settings` says `"demo": true`, and an
+Alpaca, Tavily or model key typed in Settings is kept in memory only, never written to that env file.
 """
 from __future__ import annotations
 
@@ -75,6 +77,8 @@ def build_demo_world(tmp_dir: pathlib.Path | str) -> FakeWorld:
     """The fake world as the demo uses it: orders that fill, grounded search, one fetchable page."""
     world = build_fake_world(llm=DemoLLM(), tmp_dir=tmp_dir, web_pages=DEMO_PAGES, grounded=True,
                              broker_cls=FillingBroker)
+    # GET /api/settings says demo: true, and keys typed in Settings stay in memory only.
+    world.runtime.demo = True
 
     def price_of(symbol: str):
         quote = world.data.quotes.get(symbol)

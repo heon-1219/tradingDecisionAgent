@@ -4,9 +4,12 @@ provider settings and `POST /api/llm/models`) are built from these; `api_chat` r
 under their earlier names.
 
 **Errors** are `{"error": "<code>", "message": "<friendly English>"}`, never exception text:
-unexpected failures are logged by exception type only, and request-validation errors list field
-locations and pydantic's own messages (`fields: [{loc, msg}]`) without echoing any input, so a
-rejected secret is never sent back. Every JSON body is built here with Decimals as strings.
+unexpected failures are logged by exception type only. Request-validation errors list
+`fields: [{loc, msg}]`: `loc` echoes field names (and, for an unknown field, the name the client
+sent), and `msg` is pydantic's own message, which for some validators can quote the offending value.
+Such an echo goes back only to the client that sent the value (a local, guarded request); it is
+never logged or stored, and the routes that take keys (`PUT /api/settings`) refuse unsafe values
+with their own message that quotes nothing. Every JSON body is built here with Decimals as strings.
 Without a chat runtime (`app.state.fin.chat is None`) every route answers 503 `chat_unavailable`.
 """
 from __future__ import annotations
