@@ -514,19 +514,93 @@ async def test_timeout_then_reconcile_finds_the_order_without_a_second_submit(wo
     assert "reconcile" in world.ledger_kinds()
 
 
-async def test_timeout_and_reconcile_finds_nothing_marks_the_leg_not_placed(world):
+async def test_timeout_and_a_lookup_that_finds_nothing_leaves_the_leg_uncertain(world):
+    # Final review A-m5: a 404 right after a timeout proves nothing (the order may not be visible
+    # yet). One more lookup after a pause - still never a resubmit - then the leg is uncertain.
     ticket = await world.propose([aapl()])
     world.broker.submit_actions = ["timeout"]
 
     result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
 
-    assert result.status == "error"
-    assert "not placed" in result.message
-    stored = world.tickets.get(ticket.id)
-    assert stored.status == TicketStatus.failed
-    assert stored.broker_order_ids == [None]
     assert world.broker.submits == 1
-    assert world.order_rows() == []
+    assert world.broker.reconcile_calls == [ticket.client_order_ids[0]] * 2
+    assert world.sleeps[:1] == [2.0]
+    assert result.status == "submitted"  # an uncertain leg may have been placed
+    assert "No order was placed" not in result.message
+    assert "not found at lookup time" in result.message and "check open orders" in result.message
+    stored = world.tickets.get(ticket.id)
+    assert stored.status == TicketStatus.submitted and stored.broker_order_ids == [None]
+    rows = world.order_rows()  # an uncertain row: it counts towards the daily limit
+    assert [(r["client_order_id"], r["broker_order_id"]) for r in rows] == [(ticket.client_order_ids[0], None)]
+    [entry] = [e["payload"] for e in world.ledger_entries() if e["kind"] == "reconcile"]
+    assert entry["outcome"] == "not_found" and entry["lookups"] == 2
+
+
+async def test_a_5xx_and_a_lookup_that_finds_nothing_leaves_the_leg_uncertain(world):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = [BrokerError(503, None, "upstream down")]
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 1 and len(world.broker.reconcile_calls) == 2
+    assert result.status == "submitted" and "No order was placed" not in result.message
+    assert "not found at lookup time" in result.message
+    assert world.tickets.get(ticket.id).status == TicketStatus.submitted
+    assert [r["broker_order_id"] for r in world.order_rows()] == [None]
+
+
+async def test_a_duplicate_client_order_id_with_no_order_found_is_uncertain(world):
+    # Alpaca says the id was used already: an order with it exists somewhere, even if the lookup
+    # cannot see it yet.
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = [BrokerError(422, 40010001, "client_order_id must be unique")]
+
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 1 and len(world.broker.reconcile_calls) == 2
+    assert result.status == "submitted" and "No order was placed" not in result.message
+    assert "already used" in result.message and "check open orders" in result.message
+    assert world.tickets.get(ticket.id).status == TicketStatus.submitted
+    assert [r["client_order_id"] for r in world.order_rows()] == ticket.client_order_ids
+
+
+async def test_the_delayed_second_lookup_can_still_find_the_order(world):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = ["timeout"]
+    lookups = []
+    original = world.broker.get_order_by_client_id
+
+    async def visible_on_the_second_lookup(cid):
+        lookups.append(cid)
+        if len(lookups) == 2:
+            world.broker.place(ticket.legs[0], cid)  # it reached Alpaca after all
+        return await original(cid)
+
+    world.broker.get_order_by_client_id = visible_on_the_second_lookup
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 1 and lookups == [ticket.client_order_ids[0]] * 2
+    assert result.status == "submitted" and "found by reconcile" in result.message
+    assert world.tickets.get(ticket.id).broker_order_ids == [result.orders[0].id]
+
+
+async def test_a_failing_second_lookup_leaves_the_leg_uncertain(world):
+    ticket = await world.propose([aapl()])
+    world.broker.submit_actions = ["timeout"]
+    original = world.broker.get_order_by_client_id
+
+    async def down_on_the_second_lookup(cid):
+        if world.broker.reconcile_calls:
+            world.broker.reconcile_calls.append(cid)
+            raise BrokerError(503, None, "down")
+        return await original(cid)
+
+    world.broker.get_order_by_client_id = down_on_the_second_lookup
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 1
+    assert result.status == "submitted" and "uncertain" in result.message
+    assert [r["broker_order_id"] for r in world.order_rows()] == [None]
 
 
 async def test_duplicate_client_order_id_reconciles_to_the_existing_order(world):
@@ -972,6 +1046,60 @@ async def test_kill_switch_thrown_mid_confirm_stops_the_remaining_legs(world):
     assert result.status == "submitted"
     assert "kill switch" in result.message
     assert world.tickets.get(ticket.id).broker_order_ids[1] is None
+
+
+async def test_kill_switch_during_the_recheck_is_disabled_not_an_error(world):
+    # Final review A-m3(a): nothing was placed, so this is the kill switch's answer (423), not a
+    # 502; the claimed ticket ends `failed`, a terminal state that was never submitted.
+    ticket = await world.propose([aapl(), key_market()])
+    original = world.broker.clock
+
+    async def kill_during_the_recheck():
+        world.settings.trading_enabled = False
+        return await original()
+
+    world.broker.clock = kill_during_the_recheck
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 0
+    assert result.status == "disabled"
+    assert "kill switch" in result.message and "nothing was submitted" in result.message
+    assert result.ticket.status == TicketStatus.failed
+    assert world.tickets.get(ticket.id).status == TicketStatus.failed
+
+
+async def test_a_non_paper_drop_between_legs_stops_the_remaining_legs(world):
+    # Final review A-m6: the runtime drops a non-paper broker (say, from the chat's get_account)
+    # while a confirm sits between legs; the executor is told, and submits nothing more.
+    ticket = await world.propose([aapl(), key_market()])
+
+    def place_then_drop(broker, leg, cid):
+        world.executor.mark_not_paper()
+        return broker.place(leg, cid)
+
+    world.broker.submit_actions = [place_then_drop]
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 1
+    assert result.status == "submitted"
+    assert "not to be a paper account" in result.message and "Leg 2" in result.message
+    assert world.tickets.get(ticket.id).broker_order_ids[1] is None
+
+
+async def test_a_non_paper_drop_before_the_first_leg_submits_nothing(world):
+    ticket = await world.propose([aapl()])
+    original = world.broker.clock
+
+    async def drop_during_the_recheck():
+        world.executor.mark_not_paper()
+        return await original()
+
+    world.broker.clock = drop_during_the_recheck
+    result = await world.executor.confirm(ticket.id, SESSION, ticket.hash)
+
+    assert world.broker.submits == 0
+    assert result.status == "rejected" and "not a paper account" in result.message
+    assert world.tickets.get(ticket.id).status == TicketStatus.failed
 
 
 async def test_kill_switch_still_cancels_when_suspension_fails():

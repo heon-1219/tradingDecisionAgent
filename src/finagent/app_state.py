@@ -53,6 +53,13 @@ build for the new values, write the env file, and only then update the settings 
 turns do not take it. The one rebuild that may run without it is the not-paper drop from a chat
 tool or a proposal (see `rebuild`).
 
+**The kill switch** (`kill_switch`) turns trading off in memory, bumps `kill_generation` and writes
+`TRADING_ENABLED=false` to the env file at once, before it waits for the lock; the broker steps
+follow under the lock. A settings write that started before the press may not turn trading back
+on (`KillSwitchPressed`). Re-enabling trading resumes the broker the kill switch suspended. Every
+settings write is ledgered as `settings_changed` (field names only) and a non-paper drop as
+`broker_dropped`, both under the system session.
+
 `startup()` (from the app lifespan) warns, by name only, about writable settings that the process
 environment-only settings (`config.env_fallbacks`), expires stale tickets, settles tickets stuck in
 `submitting` (`Executor.recover_stuck`; without a broker it only logs how many there are) and
@@ -134,6 +141,11 @@ _REBUILD_FIELDS = frozenset(ENV_NAMES) - {"trading_enabled", "gemini_paid"} - _L
 # Changing any of these changes what a chat conversation was built with (the client, or the mode in
 # its system prompt): cached provider conversations are dropped.
 _CONVERSATION_FIELDS = _LLM_CLIENT_FIELDS | {"gemini_paid", *llm_admin.KEY_FIELDS.values()}
+
+
+class KillSwitchPressed(Exception):
+    """`apply_settings` refused to turn trading on: the kill switch was pressed after the request
+    started (see `ChatRuntime.kill_generation`). Nothing was written."""
 
 
 @dataclass
@@ -227,6 +239,12 @@ class ChatRuntime:
         self.sessions = SessionStore(self.db)
         self.tickets = TicketStore(self.db, clock=clock) if clock is not None else TicketStore(self.db)
         self.lock = asyncio.Lock()
+        # Bumped by every kill-switch press, before it waits for the lock: a settings write that
+        # started earlier may not turn trading back on (`apply_settings`).
+        self.kill_generation = 0
+        # Whether the kill switch suspended trading at the broker (for the keys now in service):
+        # re-enabling trading then resumes it. In memory only (the ledger keeps the history).
+        self._broker_suspended_by_app = False
         # connected | missing | invalid | unreachable | not_paper; None = unchecked
         self.alpaca_status: str | None = None
         # The Alpaca key pair found to belong to a non-paper account: no broker is built for it.
@@ -483,12 +501,24 @@ class ChatRuntime:
         service; returns whether it did."""
         if broker is None or broker is not self.broker:
             return False  # already replaced (new keys were saved meanwhile): nothing to drop
+        executor = self.executor
+        if executor is not None:
+            # Built with this broker: a confirm still running on it submits no further leg.
+            executor.mark_not_paper()
         self._not_paper_keys = self._alpaca_keys()
         self.alpaca_status = "not_paper"
         self._alpaca_checked_at = self._monotonic()
         log.warning("the Alpaca keys belong to a non-paper account: trading is not connected")
+        self._audit("broker_dropped", {"reason": "not_paper"})
         self.rebuild()
         return True
+
+    def _audit(self, kind: str, payload: dict[str, Any]) -> None:
+        """A system ledger entry; a failed audit write never stops the action it records."""
+        try:
+            self.ledger.append(SYSTEM_SESSION, kind, payload)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s ledger entry failed (%s)", kind, type(exc).__name__)
 
     async def drop_non_paper_broker(self, broker: Any) -> bool:
         """`broker`, which has just read a non-paper account, is dropped if it is still in service:
@@ -502,7 +532,9 @@ class ChatRuntime:
         """Try candidate keys with a temporary broker (`account()` on the paper host) and close it.
         Returns connected, invalid, unreachable or not_paper (a live account's keys). It changes
         nothing: a mark on a non-paper pair is cleared only by `apply_settings`, once the write that
-        applies the pair is in (the rest of the request may still fail)."""
+        applies the pair is in (the rest of the request may still fail). The candidate keys join
+        the log scrub first, before anything is built or called with them."""
+        self._note_secrets(key_id, secret)
         try:
             broker = self._broker_factory(key_id, secret)
         except ValueError:
@@ -587,7 +619,9 @@ class ChatRuntime:
     # --- settings writes -------------------------------------------------------------------------
 
     async def apply_settings(self, changes: dict[str, Any], *, alpaca_status: str | None = None,
-                             llm_context: tuple[Any, Any, Any] | None = None) -> str | None:
+                             llm_context: tuple[Any, Any, Any] | None = None,
+                             kill_generation: int | None = None,
+                             outcome: dict[str, Any] | None = None) -> str | None:
         """Apply `changes` (settings field -> value; None removes the key), all or nothing:
         1. build the new components for the changed keys, and the new model client if the
            provider, the model, the effort or that provider's key changes (a failure changes
@@ -601,11 +635,28 @@ class ChatRuntime:
         that time). If another write changed the provider, the model or a key in between, the
         configuration these changes now produce is checked again here, under the lock: a failure
         raises `llm_admin.LLMCheckFailed` and changes nothing. Returns that re-check's status
-        (`ok` or `rate_limited`), or None when none was needed."""
+        (`ok` or `rate_limited`), or None when none was needed.
+
+        **The kill switch wins.** `kill_generation` is `self.kill_generation` as the caller saw it
+        when its request started (default: now). If the kill switch has been pressed since, a
+        write that turns trading on is refused with `KillSwitchPressed` and changes nothing. The
+        check runs after the last await before the write, so a press while this call waits for
+        the lock or re-checks the model is always seen.
+
+        **Re-enabling.** When the write turns trading on and the kill switch had suspended trading
+        at the broker (for the keys still in service), trading is resumed there too
+        (`set_suspend_trade(False)`, best effort). `outcome`, when given, receives
+        `broker_resumed`: True, False (it failed: the next re-enable tries again) or None
+        (nothing to resume). Every write is ledgered as `settings_changed` under the system
+        session with the changed field names only, never a value (plus the new `trading_enabled`
+        when that switch is among them, and `broker_resumed`)."""
+        generation = self.kill_generation if kill_generation is None else kill_generation
         async with self.lock:
             recheck = None
             if llm_context is not None and self.llm_context(changes) != llm_context:
                 recheck = await self._recheck_llm(changes)
+            if changes.get("trading_enabled") is True and self.kill_generation != generation:
+                raise KillSwitchPressed()
             made: list[Any] = []
             try:
                 built = self._build(changes) if _REBUILD_FIELDS & set(changes) else None
@@ -638,31 +689,67 @@ class ChatRuntime:
                 # The caller has just checked the new keys; without keys there is no broker.
                 self.alpaca_status = "missing" if self.broker is None else alpaca_status
                 self._alpaca_checked_at = self._monotonic()
+                # Another account (or none): a suspension the app made is not this one's.
+                self._broker_suspended_by_app = False
+            audit: dict[str, Any] = {"fields": ", ".join(sorted(changes))}
+            if "trading_enabled" in changes:
+                audit["trading_enabled"] = bool(self.settings.trading_enabled)
+            if changes.get("trading_enabled") is True:
+                resumed = await self._resume_broker()
+                if outcome is not None:
+                    outcome["broker_resumed"] = resumed
+                if resumed is not None:
+                    audit["broker_resumed"] = resumed
+            self._audit("settings_changed", audit)
             return recheck
 
+    async def _resume_broker(self) -> bool | None:
+        """Undo the kill switch's broker suspension, best effort: True when resumed, False when
+        the call failed (the mark stays, so the next re-enable tries again), None when the app had
+        not suspended anything."""
+        if not self._broker_suspended_by_app:
+            return None
+        broker = self.broker
+        if broker is None:
+            return False
+        try:
+            await broker.set_suspend_trade(False)
+        except Exception as exc:  # noqa: BLE001 - logged by type only; reported to the caller
+            log.warning("re-enable: resuming trading at the broker failed (%s)", type(exc).__name__)
+            return False
+        self._broker_suspended_by_app = False
+        return True
+
+    def _persist_trading_off(self) -> bool:
+        try:
+            update_env_file(self.env_path, {ENV_NAMES["trading_enabled"]: "false"})
+            return True
+        except Exception as exc:  # noqa: BLE001 - the switch is already off in memory
+            log.warning("kill switch: writing TRADING_ENABLED failed (%s)", type(exc).__name__)
+            return False
+
     async def kill_switch(self, suspend_broker: bool) -> dict:
-        """Trading off now (before waiting for the lock, so an in-flight confirm stops before its
-        next leg), then the broker steps and the env file under the lock."""
+        """Trading off now, before waiting for the lock: the shared flag (a confirm in flight
+        stops before its next leg), the kill generation (a settings write already under way can no
+        longer turn trading on, see `apply_settings`) and `TRADING_ENABLED=false` in the env file
+        (a restart keeps it off even while the broker steps below hang on their timeouts). Then,
+        under the lock, the broker steps (`Executor.kill_switch`) and the ledger entry. Whether
+        the broker was suspended is remembered, so that re-enabling can resume it."""
         self.settings.trading_enabled = False
+        self.kill_generation += 1
+        persisted = self._persist_trading_off()
         async with self.lock:
+            self.settings.trading_enabled = False
             executor = self.executor
             if executor is not None:
-                await executor.kill_switch(suspend_broker)
+                payload = await executor.kill_switch(suspend_broker, persisted=persisted)
+                if payload.get("broker_suspended"):
+                    self._broker_suspended_by_app = True
             else:
-                self.settings.trading_enabled = False
-                try:
-                    self.ledger.append(SYSTEM_SESSION, "kill_switch", {
-                        "trading_enabled": False, "suspend_broker": suspend_broker,
-                        "broker_connected": False,
-                    })
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("kill switch ledger entry failed (%s)", type(exc).__name__)
-            try:
-                update_env_file(self.env_path, {ENV_NAMES["trading_enabled"]: "false"})
-                persisted = True
-            except Exception as exc:  # noqa: BLE001 - the switch is already off in memory
-                log.warning("kill switch: writing TRADING_ENABLED failed (%s)", type(exc).__name__)
-                persisted = False
+                self._audit("kill_switch", {
+                    "trading_enabled": False, "suspend_broker": suspend_broker,
+                    "broker_connected": False, "persisted": persisted,
+                })
         return {
             "trading_enabled": False,
             "suspend_broker": suspend_broker,

@@ -27,6 +27,11 @@ error 502. No broker: confirm and refresh answer 503 `broker_not_connected`; rej
 is a local state change, `execution.reject_ticket`), so a card can be dismissed after the keys are
 cleared.
 
+**Settings.** `PUT /api/settings` is refused with 409 `kill_switch_pressed` (nothing saved) when it
+would turn trading on but the kill switch was pressed after the request started. A write that turns
+trading on answers `broker_resumed`: true or false when the kill switch had suspended trading at
+the broker and resuming it worked or failed, null when there was nothing to resume.
+
 **Errors** are `{"error": "<code>", "message": "<friendly English>"}`, never exception text (see
 `api_common`). Without a chat runtime every route answers 503 `chat_unavailable`.
 
@@ -60,6 +65,7 @@ from .api_common import Body as _Body
 from .api_common import GuardedRoute as _GuardedRoute
 from .api_common import error_response as _error
 from .api_common import field_errors as _field_errors
+from .app_state import KillSwitchPressed
 from .config import env_fallbacks
 from .envfile import EnvFileError, check_env_value
 from .llm_admin import LLMCheckFailed
@@ -497,6 +503,8 @@ async def get_settings_status(rt: Runtime):
 
 @router.put("/settings")
 async def put_settings(body: SettingsUpdate, rt: Runtime):
+    # A kill-switch press from here on wins: this request may then not turn trading back on.
+    kill_generation = rt.kill_generation
     changes: dict[str, Any] = {}
     for field, value in body.model_dump(exclude_unset=True).items():
         if value is None:
@@ -535,18 +543,28 @@ async def put_settings(body: SettingsUpdate, rt: Runtime):
                            "Nothing was saved; try again shortly.")
     # may make one live model call; raises ApiError. `llm_context`: what the decision was made for
     warning, llm_context = await api_llm.check_llm_changes(rt, changes)
+    outcome: dict[str, Any] = {}
     if changes:
         try:
-            recheck = await _shielded(rt.apply_settings(changes, alpaca_status=alpaca_status,
-                                                        llm_context=llm_context))
+            recheck = await _shielded(rt.apply_settings(
+                changes, alpaca_status=alpaca_status, llm_context=llm_context,
+                kill_generation=kill_generation, outcome=outcome))
             if recheck is not None:  # a concurrent write changed the configuration: checked again
                 warning = api_llm.raise_for_llm_status(recheck)
+        except KillSwitchPressed:
+            raise ApiError(409, "kill_switch_pressed", "The kill switch was pressed while these settings "
+                           "were being saved, so trading stays off. Nothing was saved.") from None
         except LLMCheckFailed as exc:
             api_llm.raise_for_llm_status(exc.status, rt.llm_context(changes)[0])
         except Exception as exc:  # noqa: BLE001 - logged by type only
             log.warning("saving settings failed: %s", type(exc).__name__)
             raise ApiError(500, "settings_not_saved", "The settings could not be saved.") from None
-    return respond({**_settings_body(rt), **({"warning": warning} if warning else {})})
+    extra: dict[str, Any] = {"warning": warning} if warning else {}
+    if changes.get("trading_enabled") is True:
+        # True or False: the kill switch had suspended trading at the broker and resuming it worked
+        # (or not); None: nothing to resume.
+        extra["broker_resumed"] = outcome.get("broker_resumed")
+    return respond({**_settings_body(rt), **extra})
 
 
 @router.post("/kill-switch")

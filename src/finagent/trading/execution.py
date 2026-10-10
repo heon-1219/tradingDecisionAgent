@@ -36,15 +36,21 @@ confirm then ends `rejected` with the ticket `failed` and nothing submitted; a r
    path never submits. If the re-check itself fails (the broker or market data is unreachable), the
    claimed ticket is marked `failed` and nothing is submitted: a claimed ticket can't go back to
    `proposed`.
-8. **Submit** each leg once, sequentially, with its pre-assigned `client_order_id` (a leg reached
-   after the kill switch was thrown mid-confirm is not submitted). There are no blind retries. An
+8. **Submit** each leg once, sequentially, with its pre-assigned `client_order_id`. Before every
+   leg the run checks for a stop: a leg reached after the kill switch was thrown, or after this
+   executor learned that its account is not a paper account (`mark_not_paper`: the runtime calls
+   it when it drops the broker, whichever path noticed), is not submitted. If no leg was submitted
+   at all, the result is the stop's own: `disabled` for the kill switch, `rejected` with the
+   not-paper message otherwise, and the ticket is `failed`. There are no blind retries. An
    `OrderUncertain` (timeout, 5xx, 3xx, unparseable 2xx), a 422 duplicate `client_order_id` (code
    40010001), an HTTP-level failure, a `ValueError` *subclass* (a `JSONDecodeError`, a pydantic
    `ValidationError` or a `UnicodeDecodeError` can all surface while reading a response, i.e. after
    the order may have been placed), or any other unexpected exception may mean the order reached
-   Alpaca, so it is reconciled with ONE `get_order_by_client_id` call:
+   Alpaca, so it is reconciled by `get_order_by_client_id` lookups (never a resubmission):
    - an order whose `client_order_id`, symbol and side match the leg -> the leg is placed;
-   - no order -> the leg failed ("not placed");
+   - no order -> one more lookup `RECONCILE_RETRY_SEC` later (an order that just reached Alpaca
+     may not be visible yet); still none -> the leg is `uncertain` ("not found at lookup time";
+     after a 422 duplicate, "already used"), never "not placed";
    - an order that does *not* match the leg, or a lookup that itself failed -> the leg is
      `uncertain`: never adopted, never resubmitted.
    A clean 4xx `BrokerError`, or a plain `ValueError` (exactly that type: the broker raises it for
@@ -174,6 +180,14 @@ NOT_PAPER_MESSAGE = (
     "The connected Alpaca account is not a paper account, so nothing was submitted. This app trades paper "
     "accounts only: trading is disconnected until paper-trading keys are saved in Settings."
 )
+_STOP_ERRORS = {
+    "kill_switch": "not submitted: trading was disabled (kill switch)",
+    "not_paper": "not submitted: the account turned out not to be a paper account, so trading was "
+                 "disconnected",
+}
+# After an uncertain submit, a lookup that finds nothing is repeated once after this pause: an order
+# that just reached Alpaca may not be visible yet. A lookup, never a resubmit.
+RECONCILE_RETRY_SEC = 2.0
 _DEFAULT_TTL_SEC = 300
 _NEWER_TICKET = "ticket is expired and a newer ticket exists; nothing was re-quoted"
 _CENT = Decimal("0.01")
@@ -444,7 +458,17 @@ class Executor:
         self._db = db if db is not None else tickets.db
         self._sleep = sleep
         self._now = now or tickets.clock
+        # Set once this executor's broker is known to read a non-paper account (`mark_not_paper`):
+        # a confirm in flight submits no further leg, like a thrown kill switch.
+        self._not_paper_seen = False
         _ensure_orders_created_at(self._db)
+
+    def mark_not_paper(self) -> None:
+        """This executor's broker reads a non-paper account: any confirm still in flight submits
+        no further leg. Called by `build_context` when it sees such an account, and by the runtime
+        when it drops this executor's broker for that reason (the chat's `get_account` can notice
+        first, without the lock, while a confirm sits between legs)."""
+        self._not_paper_seen = True
 
     # --- market context -------------------------------------------------------------------------
 
@@ -487,6 +511,7 @@ class Executor:
 
     def _not_paper(self) -> None:
         logger.warning("the broker's account is not a paper account: refusing to trade")
+        self.mark_not_paper()
         if self._on_not_paper is not None:
             try:
                 self._on_not_paper()
@@ -615,12 +640,15 @@ class Executor:
         if changes:
             return self._requote_on_confirm(run, decisions, mandate, changes)
 
+        stopped_by: str | None = None
         for index, (leg, client_order_id) in enumerate(zip(ticket.legs, ticket.client_order_ids)):
-            if not self._settings.trading_enabled:
-                # The kill switch was thrown mid-confirm: submit nothing more.
+            stop = self._stop_reason()
+            if stop is not None:
+                # The kill switch was thrown, or the account turned out not to be a paper account,
+                # mid-confirm: submit nothing more.
+                stopped_by = stopped_by or stop
                 run.outcomes.append(_LegOutcome(
-                    index, leg, client_order_id, "error",
-                    error="not submitted: trading was disabled (kill switch)",
+                    index, leg, client_order_id, "error", error=_STOP_ERRORS[stop],
                 ))
                 continue
             self._log(run.session_id, "submit", {
@@ -633,8 +661,30 @@ class Executor:
             run.outcomes.append(await self._submit_one(run, index, leg, client_order_id))
 
         self._persist(run)
+        if run.attempted == 0 and stopped_by is not None:
+            # Stopped before the first leg (during the re-check): nothing can exist at the broker,
+            # so this is the stop's own answer, not an error. The ticket is `failed`.
+            return self._stopped_result(run, stopped_by)
         await self._poll(run)
         return self._submission_result(run)
+
+    def _stop_reason(self) -> Literal["kill_switch", "not_paper"] | None:
+        """Why no further leg may be submitted now, if anything: checked before every leg."""
+        if not self._settings.trading_enabled:
+            return "kill_switch"
+        if self._not_paper_seen:
+            return "not_paper"
+        return None
+
+    def _stopped_result(self, run: _Run, stop: str) -> ConfirmResult:
+        ticket = self._latest(run.ticket.id, run.final_ticket)
+        if stop == "not_paper":
+            return ConfirmResult("rejected", ticket, [], NOT_PAPER_MESSAGE)
+        return ConfirmResult(
+            "disabled", ticket, [],
+            "Trading was disabled (kill switch) while this ticket was being re-checked; nothing "
+            "was submitted.",
+        )
 
     def _requote_reasons(self, ticket: Ticket, decisions: list[RiskDecision]) -> list[str]:
         """Why this ticket can't be submitted as-is; empty when nothing material changed."""
@@ -802,7 +852,11 @@ class Executor:
     async def _reconcile(
         self, run: _Run, index: int, leg: OrderLeg, client_order_id: str, cause: Exception
     ) -> _LegOutcome:
-        """ONE lookup by client_order_id - never a resubmission."""
+        """Look the order up by client_order_id - never a resubmission. A lookup that finds
+        nothing is repeated once after `RECONCILE_RETRY_SEC` (an order that just reached Alpaca
+        may not be visible yet); if it still finds nothing, the leg is uncertain, not "not
+        placed": after a timeout, a 5xx or an unreadable answer a 404 proves nothing, and after a
+        422 duplicate the id is in use somewhere."""
         base = {
             "ticket_id": run.ticket.id,
             "leg": index,
@@ -810,11 +864,19 @@ class Executor:
             "symbol": leg.symbol,
             "cause": self._short(cause),
         }
+        lookups = 0
+        found: OrderSnapshot | None = None
         try:
-            found = await self._broker.get_order_by_client_id(client_order_id)
+            for attempt in range(2):
+                if attempt:
+                    await self._sleep(RECONCILE_RETRY_SEC)
+                lookups += 1
+                found = await self._broker.get_order_by_client_id(client_order_id)
+                if found is not None:
+                    break
         except Exception as exc:  # noqa: BLE001 - the leg's fate is unknown; never resubmit
             self._log(run.session_id, "reconcile", {
-                **base, "outcome": "failed", "message": self._short(exc),
+                **base, "outcome": "failed", "lookups": lookups, "message": self._short(exc),
             })
             self._record_uncertain(run.ticket.id, client_order_id)
             return _LegOutcome(
@@ -823,10 +885,17 @@ class Executor:
                       "check open orders before trying again",
             )
         if found is None:
-            self._log(run.session_id, "reconcile", {**base, "outcome": "not_found"})
+            self._log(run.session_id, "reconcile", {**base, "outcome": "not_found", "lookups": lookups})
+            self._record_uncertain(run.ticket.id, client_order_id)
+            duplicate = isinstance(cause, BrokerError) and cause.code == DUPLICATE_CLIENT_ORDER_ID
+            if duplicate:
+                why = ("the broker said this client_order_id was already used, but no order with "
+                       "it was found at lookup time")
+            else:
+                why = f"not found at lookup time ({base['cause']})"
             return _LegOutcome(
-                index, leg, client_order_id, "error",
-                error=f"not placed (the broker has no order with this id; {base['cause']})",
+                index, leg, client_order_id, "uncertain",
+                error=f"{why}; check open orders before trying again",
             )
         mismatch = _reconcile_mismatch(found, leg, client_order_id)
         if mismatch:
@@ -1208,13 +1277,20 @@ class Executor:
 
     # --- kill switch ----------------------------------------------------------------------------
 
-    async def kill_switch(self, suspend_broker: bool = False) -> None:
+    async def kill_switch(
+        self, suspend_broker: bool = False, *, persisted: bool | None = None
+    ) -> dict[str, Any]:
         """Turn trading off locally (`settings.trading_enabled = False`), and optionally suspend
         trading at the broker and cancel every open order (up to `OPEN_ORDERS_LIMIT`). Broker
         failures are logged and recorded in the ledger, never raised: the local switch is already
-        off, and one failed step must not stop the others."""
+        off, and one failed step must not stop the others. `persisted` (whether the caller has
+        already written `TRADING_ENABLED=false` to the env file) goes into the ledger entry when
+        given. Returns that entry's payload: `broker_suspended` says whether this call suspended
+        trading at the broker."""
         self._settings.trading_enabled = False
         payload: dict[str, Any] = {"trading_enabled": False, "suspend_broker": suspend_broker}
+        if persisted is not None:
+            payload["persisted"] = persisted
         if suspend_broker:
             try:
                 await self._broker.set_suspend_trade(True)
@@ -1246,6 +1322,7 @@ class Executor:
             payload["cancelled"] = cancelled
             payload["cancel_failures"] = cancel_failures
         self._log(SYSTEM_SESSION, "kill_switch", payload)
+        return payload
 
     # --- plumbing -------------------------------------------------------------------------------
 
