@@ -2,6 +2,8 @@
 
 Status: approved direction (2026-09-26). The user asked for this pivot and said to go ahead with planning and implementation. This document is the reference for the implementation plan in `docs/superpowers/plans/2026-09-26-trading-agent.md`.
 
+This is the design as approved, not a description of the shipped app: `docs/architecture.md` and `docs/api_spec.md` describe the shipped behaviour and take precedence wherever this spec differs (for example the ticket states, the ledger export route, `APP_DB_PATH`, the news cache and the `budget_usd` default).
+
 ## 1. Goal
 
 The user supplies an Alpaca **paper-trading** API key and a direction in plain language, for example "build a dividend ETF sleeve with $20k, moderate risk" or "I think AI semiconductors outperform over the next quarter". The agent then:
