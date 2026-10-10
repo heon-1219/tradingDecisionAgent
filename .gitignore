@@ -1,7 +1,11 @@
 .venv/
 __pycache__/
 *.pyc
-.env
+# Every env file (.env, .env.local, ...) and the env file's atomic-write temp files (..env.*.tmp);
+# only the documented template is kept.
+.env*
+..env.*.tmp
+!.env.example
 data/store/
 data/enrichment/constituents/.cache/
 data/external/cache/
