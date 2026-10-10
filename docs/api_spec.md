@@ -12,7 +12,7 @@ English | [한국어](#한국어)
 | Response time | Organizer's rule: **a response that takes more than 300 seconds counts as no response**; anything within that limit is still scored, even if slow (scores are graded). Internal server budget is 120 seconds; when it is exceeded, the server answers immediately from the evidence gathered so far |
 | Answer-generation LLM | Google Gemini (`LLM_PROVIDER=gemini`, default `LLM_MODEL=gemini-3.8-flash`, called through Gemini's OpenAI-compatible endpoint); Anthropic and OpenAI remain available as alternate providers. The competition build used NCP HyperCLOVA X (`HCX-005`, CLOVA Studio OpenAI-compatible endpoint), as the competition rules required |
 | Answer language | `answer` follows the language of the question: English by default, Korean when the question is written in Korean. Korean product or company names inside an English question do not make it a Korean question. Labels in `think_trace` and `retrieved_context` are always English |
-| Auxiliary | `GET /health` (status, table base dates, index size, graph asserted/inferred triple counts, vector backend), `GET /` (info message) |
+| Auxiliary | `GET /health` (status, table base dates, index size, graph asserted/inferred triple counts, vector backend), `GET /` (the paper-trading web app; a plain-text notice if `web/app/` is missing) |
 | Reference data | 5 SQLite views (`v_bond_kr` · `v_etf_kr` · `v_etf_gl` · `v_fund_pub` · `v_etf_constituent`) · 53,375 product rows + 22,599 constituent rows · knowledge graph of 1,082,874 triples |
 
 ## Request (Query String)
@@ -126,7 +126,7 @@ The chat and trading API is the HTTP surface of the local paper-trading app (`we
 | Host allowlist | The `Host` header must be exactly `127.0.0.1`, `localhost` or `[::1]`, with an optional numeric port. This holds even when remote access is allowed | 400 `bad_host` |
 | No cross-site requests | On every method, a `Sec-Fetch-Site` header other than `same-origin` or `none` (so `cross-site` or `same-site`) is refused. A request without the header (curl, scripts) is not affected. `GET /answer` and `GET /answer/stream` apply this rule too | 403 `cross_site` |
 | Anti-CSRF header | `POST`, `PUT`, `PATCH` and `DELETE` must send `X-FinAgent-Client: 1`. `GET` does not need it | 403 `csrf_header_missing` |
-| Origin | If an `Origin` header is present it must be `http://<Host>` or `https://<Host>`, using the value of the `Host` header. Clients that send no `Origin` (curl, scripts) are not affected | 403 `origin_mismatch` |
+| Origin | On `POST`, `PUT`, `PATCH` and `DELETE` (not on `GET`), if an `Origin` header is present it must be `http://<Host>` or `https://<Host>`, using the value of the `Host` header. Clients that send no `Origin` (curl, scripts) are not affected | 403 `origin_mismatch` |
 | Body size | A request body may be at most 1 MiB: a larger `Content-Length` is refused before anything is read, and a chunked body is counted while it is read | 413 `too_large` |
 | No CORS, no WebSocket | No CORS headers are sent. WebSocket connections under `/api` are closed with code 1008 | |
 | No API docs pages | FastAPI's `/docs`, `/redoc` and `/openapi.json` are not served | 404 |
@@ -135,7 +135,7 @@ The chat and trading API is the HTTP surface of the local paper-trading app (`we
 
 ## Errors and conventions
 
-- **Error envelope.** Errors are `{"error": "<code>", "message": "<text>"}`, with the message in English. Some add a field: `fields` (a list of `{loc, msg}`, on 422) or `field` (on 400 `invalid_value`). An error never contains exception text, the input that was sent, or a secret.
+- **Error envelope.** Errors are `{"error": "<code>", "message": "<text>"}`, with the message in English. Some add a field: `fields` (a list of `{loc, msg}`, on 422) or `field` (on 400 `invalid_value`). An error never contains exception text, a key or other secret, or broker internals. The one thing it can quote is what the local client itself sent: a 422 `fields` list names the offending field (for an unknown field, the name the client used) and, for some validators, the value (for example `invalid symbol: '<b>x</b>'`). That echo goes back only to the client that sent it and is never logged or stored. The routes that take keys refuse an unsafe value with a message that quotes nothing.
 - **Unexpected failures** on any route answer 500 `internal_error` with a fixed message. They are logged by exception type only.
 - **Where the envelope does not apply.**
     - Confirm, reject and refresh answer with their result body (`status`, `message`, `ticket`, `orders`, `new_ticket`, `reason`, `block_codes`) for every outcome, including 404, 409, 410, 423 and 502. See [Status mapping](#status-mapping).
@@ -584,7 +584,7 @@ data: {"type":"data-trade-proposal","ticket":{"id":"T4HQ7ZB2NAK","status":"propo
 
 data: {"type":"text-delta","delta":"I propose buying 4 shares of VOO with a limit order ... [E1]. Review the ticket and confirm or reject it."}
 
-data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342}
+data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}
 ```
 
 The `data-trade-proposal` event holds the ticket. Keep its `id` and `hash`. (The proposal needs saved Alpaca paper keys; without them the agent can research but has no `propose_trades` tool.)
@@ -628,7 +628,7 @@ If the price moved, you get `HTTP 409` with `"status": "requote"` and the replac
 | 응답 시간 | 주최측 기준: **300초 초과 시 미응답 처리**, 그 안이면 늦어도 채점(점수 차등). 서버 내부 예산 120초, 초과 시 확보된 근거로 즉시 답변 |
 | 답변 생성 LLM | Google Gemini (`LLM_PROVIDER=gemini`, 기본 `LLM_MODEL=gemini-3.8-flash`, Gemini의 OpenAI 호환 엔드포인트로 호출). Anthropic·OpenAI는 선택 가능한 대체 제공자로 남아 있습니다. 대회 제출본은 대회 규정에 따라 NCP HyperCLOVA X (`HCX-005`, CLOVA Studio OpenAI 호환 엔드포인트)를 사용했습니다 |
 | 답변 언어 | `answer`는 질문의 언어를 따릅니다: 기본은 영어, 질문이 한국어로 작성되면 한국어. 영어 질문 안에 한국어 상품명·기업명이 들어 있어도 영어 질문으로 봅니다. `think_trace`·`retrieved_context`의 라벨은 항상 영어입니다 |
-| 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (안내 문구) |
+| 보조 | `GET /health` (상태·테이블 기준일·색인 규모·그래프 명시/추론 트리플 수·벡터 백엔드), `GET /` (모의투자 웹 앱. `web/app/`이 없으면 평문 안내 문구) |
 | 참조 데이터 | SQLite 뷰 5개(`v_bond_kr` · `v_etf_kr` · `v_etf_gl` · `v_fund_pub` · `v_etf_constituent`) · 상품 53,375행 + 편입종목 22,599행 · 지식그래프 1,082,874 트리플 |
 
 ## Request (Query String)
@@ -724,7 +724,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 | Host 허용 목록 | `Host` 헤더가 정확히 `127.0.0.1`, `localhost`, `[::1]` 중 하나여야 하며 숫자 포트는 붙을 수 있습니다. 원격 접근을 허용해도 이 규칙은 유지됩니다 | 400 `bad_host` |
 | 교차 사이트 요청 거부 | 메서드와 상관없이 `Sec-Fetch-Site` 헤더가 `same-origin`이나 `none`이 아니면(즉 `cross-site`나 `same-site`이면) 거부합니다. 이 헤더가 없는 요청(curl, 스크립트)은 영향을 받지 않습니다. `GET /answer`와 `GET /answer/stream`에도 이 규칙을 적용합니다 | 403 `cross_site` |
 | CSRF 방지 헤더 | `POST`, `PUT`, `PATCH`, `DELETE`는 `X-FinAgent-Client: 1`을 보내야 합니다. `GET`에는 필요하지 않습니다 | 403 `csrf_header_missing` |
-| Origin | `Origin` 헤더가 있으면 `Host` 헤더 값을 사용한 `http://<Host>` 또는 `https://<Host>`여야 합니다. `Origin`을 보내지 않는 클라이언트(curl, 스크립트)는 영향을 받지 않습니다 | 403 `origin_mismatch` |
+| Origin | `POST`, `PUT`, `PATCH`, `DELETE`에서만(`GET`에서는 검사하지 않음) `Origin` 헤더가 있으면 `Host` 헤더 값을 사용한 `http://<Host>` 또는 `https://<Host>`여야 합니다. `Origin`을 보내지 않는 클라이언트(curl, 스크립트)는 영향을 받지 않습니다 | 403 `origin_mismatch` |
 | 본문 크기 | 요청 본문은 최대 1MiB입니다. `Content-Length`가 더 크면 아무것도 읽기 전에 거부하고, 청크 본문은 읽으면서 셉니다 | 413 `too_large` |
 | CORS·WebSocket 없음 | CORS 헤더를 보내지 않습니다. `/api` 아래 WebSocket 연결은 코드 1008로 닫습니다 | |
 | API 문서 페이지 없음 | FastAPI의 `/docs`, `/redoc`, `/openapi.json`은 제공하지 않습니다 | 404 |
@@ -733,7 +733,7 @@ requests.get("https://{endpoint}/answer", params={"question_id": "Q-001", "quest
 
 ## 오류와 공통 규칙
 
-- **오류 형식.** 오류는 `{"error": "<code>", "message": "<text>"}`이며 메시지는 영어입니다. 일부는 필드를 더 담습니다. `fields`(422일 때 `{loc, msg}` 목록) 또는 `field`(400 `invalid_value`일 때)입니다. 오류에는 예외 문구, 보낸 입력값, 비밀값이 들어가지 않습니다.
+- **오류 형식.** 오류는 `{"error": "<code>", "message": "<text>"}`이며 메시지는 영어입니다. 일부는 필드를 더 담습니다. `fields`(422일 때 `{loc, msg}` 목록) 또는 `field`(400 `invalid_value`일 때)입니다. 오류에는 예외 문구, 키나 그 밖의 비밀값, 브로커 내부 정보가 들어가지 않습니다. 인용할 수 있는 것은 로컬 클라이언트가 직접 보낸 내용뿐입니다. 422의 `fields` 목록은 문제가 된 필드 이름(알 수 없는 필드라면 클라이언트가 쓴 이름)을 적고, 일부 검증기에서는 그 값도 적습니다(예: `invalid symbol: '<b>x</b>'`). 이렇게 되돌려 주는 내용은 보낸 클라이언트에게만 가며 로그나 저장소에는 남지 않습니다. 키를 받는 라우트는 안전하지 않은 값을 아무것도 인용하지 않는 메시지로 거부합니다.
 - **예기치 못한 실패**는 어느 라우트에서든 고정된 메시지와 함께 500 `internal_error`로 답합니다. 로그에는 예외 유형만 남깁니다.
 - **이 형식을 쓰지 않는 경우.**
     - confirm, reject, refresh는 404, 409, 410, 423, 502를 포함한 모든 결과에서 결과 본문(`status`, `message`, `ticket`, `orders`, `new_ticket`, `reason`, `block_codes`)으로 답합니다. [상태 코드 매핑](#상태-코드-매핑)을 참고하세요.
@@ -1182,7 +1182,7 @@ data: {"type":"data-trade-proposal","ticket":{"id":"T4HQ7ZB2NAK","status":"propo
 
 data: {"type":"text-delta","delta":"I propose buying 4 shares of VOO with a limit order ... [E1]. Review the ticket and confirm or reject it."}
 
-data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342}
+data: {"type":"finish","usage":{"input":4210,"output":380},"elapsed_ms":18342,"mode":"deep","max_rounds":12,"time_budget_sec":300,"budget_exhausted":false}
 ```
 
 티켓은 `data-trade-proposal` 이벤트에 들어 있습니다. 그 `id`와 `hash`를 보관하세요. (제안을 받으려면 저장된 Alpaca 모의투자 키가 필요합니다. 키가 없으면 에이전트는 리서치만 할 수 있고 `propose_trades` 도구가 없습니다.)
