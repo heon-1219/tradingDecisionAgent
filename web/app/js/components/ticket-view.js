@@ -7,10 +7,13 @@
  * decimal arithmetic.
  */
 import { formatMoney, formatPercent, formatQty } from '../decimal.js';
+import { bindText } from '../i18n.js';
 import { badge, el, label, str } from './dom.js';
 import { sideBadge, sizeNode, termsNode } from './order-view.js';
 import { sourceChip } from './sources.js';
-import { buyingPowerAfter, clampChanges, legSide, positionPercentAfter, ticketTotals } from './ticket-model.js';
+import {
+  buyingPowerAfter, clampChanges, legSide, positionPercentAfter, spendable, ticketTotals,
+} from './ticket-model.js';
 
 const VERDICT = {
   accept: ['verdict_accept', 'ok'],
@@ -130,9 +133,12 @@ export function ticketBody(ticket, sessionId) {
     setPortfolio(snapshot) {
       const body = snapshot && snapshot.status === 'ready' ? snapshot.body : null;
       for (const leg of legs) leg.setPortfolio(body);
-      const after = body && totals.buys > 0 ? buyingPowerAfter(body.account?.buying_power, totals) : null;
+      // Cash only, as the risk engine counts it; "Cash after" when the account lacks a figure.
+      const spend = body && totals.buys > 0 ? spendable(body.account, body.open_orders) : null;
+      const after = spend ? buyingPowerAfter(spend.amount, totals) : null;
       power.hidden = !after;
       if (after) {
+        bindText(power.firstChild, spend.key);
         power.lastChild.textContent = formatMoney(after);
         power.setAttribute('data-short', String(after.int < 0n));
       }

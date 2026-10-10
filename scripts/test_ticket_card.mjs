@@ -7,7 +7,9 @@
 // the card ends in, and that no state offers a blind retry. The setup is scripts/component_harness.mjs.
 import assert from 'node:assert/strict';
 import {
-  advance, clock, decision, dispatch, document, emit, finish, flush, leg, liveTurn, net, on, order, panel, replayTurn,
+  advance, clock, decision, dict, dispatch, document, emit, finish, flush, leg, liveTurn, net, on, order, panel,
+  refreshPortfolio,
+  replayTurn,
   setState, sources, test, thread, ticker, ticket,
 } from './component_harness.mjs';
 import { setLang } from '../web/app/js/i18n.js';
@@ -32,7 +34,8 @@ function propose(tk, sessionId = 's1') {
 }
 const ticketRead = (tk, orders = []) => ({ method: 'GET', match: `/api/tickets/${tk.id}?`, status: 200, body: { ticket: tk, orders } });
 const portfolio = { method: 'GET', match: '/api/portfolio', status: 200, body: { connected: true, paper: true,
-  account: { equity: '132100.00', cash: '100000.00', buying_power: '100000.00', last_equity: '131000.00', paper: true },
+  account: { equity: '132100.00', cash: '100000.00', buying_power: '100000.00', non_marginable_buying_power: '100000.00',
+    last_equity: '131000.00', paper: true },
   positions: [{ symbol: 'VOO', market_value: '12000.00' }], open_orders: [] } };
 setState({ sessionId: 's1' });
 
@@ -579,6 +582,94 @@ await test('reload: each unlisted ticket goes under the answer written before it
   emit('session:loaded', { session: { id: 's1' }, messages: [], active_ticket: live });
   assert.deepEqual(ids(only), [live.id]);
   thread.replaceChildren();
+});
+
+await test('after the buys: cash only, never margin; a missing figure is said as "Cash after"', async () => {
+  const withAccount = (account, openOrders = []) => ({ ...portfolio, body: { ...portfolio.body, account: { ...portfolio.body.account, ...account }, open_orders: openOrders } });
+  const after = async (route) => {
+    net.routes = [route];
+    await refreshPortfolio();
+    const { card } = propose(ticket());
+    await flush();
+    const figure = card.querySelector('.ticket-totals').querySelectorAll('.figure')[1];
+    const text = figure.hidden ? null : figure.textContent;
+    card.remove();
+    return text;
+  };
+  // a margin account: buying power is twice the cash; the card counts the cash (1,830 of buys)
+  assert.equal(await after(withAccount({ cash: '10000.00', buying_power: '20000.00', non_marginable_buying_power: '10000.00' })),
+    'Buying power after (est.)$8,170.00');
+  // a pending open buy is spoken for
+  assert.equal(await after(withAccount({ cash: '10000.00', buying_power: '20000.00', non_marginable_buying_power: '10000.00' },
+    [{ side: 'buy', type: 'limit', qty: '2', filled_qty: '0', limit_price: '500.00' }])), 'Buying power after (est.)$7,170.00');
+  // the account does not send the non-marginable figure: cash, labelled as such
+  assert.equal(await after(withAccount({ cash: '10000.00', buying_power: '20000.00', non_marginable_buying_power: undefined })),
+    'Cash after (est.)$8,170.00');
+  net.routes = [portfolio];
+  await refreshPortfolio();
+});
+
+await test('a 200 "submitted" with a leg the broker did not confirm is uncertain, never "placed"', async () => {
+  const sent = (n, total) => `${n} of ${total} orders were sent to the paper account.`;
+  const answer = (tk, placed, message) => ({ method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 200, body: {
+    status: 'submitted', message, ticket: { ...tk, status: 'submitted' }, orders: placed, new_ticket: null, reason: null, block_codes: [] } });
+  const confirmed = async (tk, placed, rows, message) => {
+    net.routes = [portfolio, answer(tk, placed, message), ticketRead({ ...tk, status: 'submitted' }, rows)];
+    calls.length = 0;
+    const { card } = propose(tk);
+    button(card, 'btn-confirm').click();
+    await flush();
+    return card;
+  };
+  // every leg uncertain: "0 of 1 orders placed, 1 uncertain"
+  const one = ticket();
+  let card = await confirmed(one, [], [{ client_order_id: 'c0', broker_order_id: null, order: null }],
+    '0 of 1 orders placed, 1 uncertain. Leg 1 BUY 3 VOO @ limit $612.00: uncertain - not found at lookup time; do not resubmit.');
+  assert.equal(noticeText(card).startsWith(dict.en.ticket_result_uncertain), true);
+  assert.ok(noticeText(card).includes(dict.en.ticket_check_orders));
+  assert.ok(!noticeText(card).includes('were sent'), 'never "placed"');
+  assert.equal(card.querySelector('.ticket-notice').getAttribute('data-tone'), 'bad');
+  assert.deepEqual(card.querySelector('.ticket-notice').querySelectorAll('button').map((b) => b.textContent), ['Open Orders', 'Check again']);
+  assert.equal(button(card, 'btn-confirm'), null, 'nothing to confirm again');
+  assert.ok(calls.some((c) => c.method === 'GET' && c.path.includes(one.id)), 'the ticket is read again');
+  assert.ok(card.querySelector('.timeline-row.is-uncertain'), 'the timeline shows the uncertain leg');
+  card.remove();
+  // one placed, one uncertain
+  const two = ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  card = await confirmed(two, [order()], [{ client_order_id: 'c0', broker_order_id: 'o1', order: order() },
+    { client_order_id: 'c1', broker_order_id: null, order: null }], '1 of 2 orders placed, 1 uncertain.');
+  assert.equal(noticeText(card).startsWith(dict.en.ticket_result_uncertain), true);
+  assert.ok(!noticeText(card).includes(sent(1, 2)));
+  card.remove();
+  // one placed, one failed outright (no row): after the re-read, the ordinary partial result
+  const failed = ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  card = await confirmed(failed, [order()], [{ client_order_id: 'c0', broker_order_id: 'o1', order: order() }],
+    '1 of 2 orders placed, 1 failed. Leg 2 BUY 3 VTI @ limit $612.00: error - insufficient buying power.');
+  assert.ok(noticeText(card).startsWith(sent(1, 2)), noticeText(card));
+  assert.ok(noticeText(card).includes(dict.en.ticket_result_partial));
+  card.remove();
+  // every leg placed: the plain success
+  const all = ticket();
+  card = await confirmed(all, [order()], [{ client_order_id: 'c0', broker_order_id: 'o1', order: order() }], '1 of 1 orders placed.');
+  assert.ok(noticeText(card).startsWith(sent(1, 1)));
+  card.remove();
+});
+
+await test('uncertain confirm: a re-read that finds the ticket still proposed says nothing was placed', async () => {
+  const tk = ticket();
+  net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 504, body: { error: 'http_504' } },
+    ticketRead(tk)];
+  const { card } = propose(tk);
+  button(card, 'btn-confirm').click();
+  await flush();
+  assert.equal(card.getAttribute('data-state'), 'proposed', 'the re-read found it still proposed');
+  assert.equal(noticeText(card), 'The server shows nothing was placed for this ticket.');
+  assert.ok(!noticeText(card).includes('may have been placed'));
+  assert.equal(button(card, 'btn-confirm').disabled, false);
+  setLang('ko');
+  assert.equal(noticeText(card), '서버 기록상 이 티켓으로는 주문이 들어가지 않았습니다.');
+  setLang('en');
+  card.remove();
 });
 
 finish('ticket card checks');

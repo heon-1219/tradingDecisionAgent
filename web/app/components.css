@@ -1007,8 +1007,14 @@ button.source-item[aria-expanded="true"] {
   box-shadow: var(--shadow-1);
 }
 
+/* The card takes the focus after Confirm and from "Show the newer ticket": a keyboard user sees where. */
 .ticket:focus {
   outline: 0;
+}
+
+.ticket:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .ticket[data-state="proposed"] {

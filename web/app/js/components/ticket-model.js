@@ -81,7 +81,36 @@ export function ticketTotals(ticket) {
 
 /* Buying power left after the buys (sale proceeds are not counted: they settle later). */
 export function buyingPowerAfter(buyingPower, totals) {
-  return sub(text(buyingPower), totals.buy);
+  return sub(typeof buyingPower === 'object' && buyingPower ? buyingPower : text(buyingPower), totals.buy);
+}
+
+/* What open buy orders have spoken for: a notional, or the unfilled quantity at the limit price. A
+ * market order without a notional has no price here and is left out (the figure is an estimate). */
+function pendingBuys(openOrders) {
+  let total = '0';
+  for (const order of Array.isArray(openOrders) ? openOrders : []) {
+    if (!order || legSide(order) !== 'buy') continue;
+    const notional = parseDecimal(text(order.notional));
+    const left = sub(text(order.qty), text(order.filled_qty) || '0');
+    const amount = notional || (left && parseDecimal(text(order.limit_price)) ? mul(left, text(order.limit_price)) : null);
+    if (amount && cmp(amount, '0') > 0) total = add(total, amount);
+  }
+  return total;
+}
+
+/* What can still be spent on buys, cash only, as the risk engine counts it (without the mandate's
+ * cash buffer, which the card does not know): min(buying_power, non_marginable_buying_power, cash -
+ * pending open buys). Never margin, never more than cash. Returns {amount, key}: key
+ * 'ticket_power_after' when the account sent all three figures, else 'ticket_cash_after' (the figure
+ * then rests on cash); null without cash. */
+export function spendable(account, openOrders) {
+  const cash = parseDecimal(text(account?.cash));
+  if (!cash) return null;
+  let amount = sub(cash, pendingBuys(openOrders));
+  const power = parseDecimal(text(account.buying_power));
+  const cashOnly = parseDecimal(text(account.non_marginable_buying_power));
+  for (const limit of [power, cashOnly]) if (limit && cmp(limit, amount) < 0) amount = limit;
+  return { amount, key: power && cashOnly ? 'ticket_power_after' : 'ticket_cash_after' };
 }
 
 /* A position's share of equity after this leg fills, in percent (est.), or null. */
@@ -159,9 +188,10 @@ export function interpretResult(action, result) {
   if (http === 423) return { ...base, kind: 'disabled' };
   if (http === 503 && result.error === 'broker_not_connected') return { ...base, kind: 'no_broker' };
   if (http === 404) return { ...base, kind: 'not_found' };
-  // 502 (an executor error), 500 confirm_failed, or no answer at all: a confirm may have reached the
-  // broker, so the card says "check open orders" rather than "failed".
-  if (action === 'confirm' && (http === 502 || http === 500 || http === 0)) return { ...base, kind: 'uncertain' };
+  // Any 5xx but "no broker" (an executor error, confirm_failed, a gateway timeout, a proxy), or no
+  // answer at all: a confirm may have reached the broker, so the card says "check open orders" and
+  // reads the ticket again, never "nothing changed".
+  if (action === 'confirm' && (http === 0 || http >= 500)) return { ...base, kind: 'uncertain' };
   return { ...base, kind: 'failed' };
 }
 

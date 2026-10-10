@@ -12,6 +12,7 @@ import {
   sources, t, test, ticker, ticket, timeline, toolcard,
 } from './component_harness.mjs';
 import { externalLink } from '../web/app/js/components/dom.js';
+import { formatMoney } from '../web/app/js/decimal.js';
 import { createKillSwitch } from '../web/app/js/components/settings-kill.js';
 import { noteTicket } from '../web/app/js/components/ticket-store.js';
 
@@ -62,6 +63,24 @@ await test('totals, buying power and position share use exact decimals', () => {
   assert.deepEqual(totals.buy, { int: 30n, scale: 2 }); // 0.10 + 0.20 is exactly 0.30
   assert.deepEqual(model.buyingPowerAfter('100000.00', totals), { int: 9999970n, scale: 2 });
   assert.equal(model.buyingPowerAfter(undefined, totals), null);
+  // what can be spent: cash only, as the risk engine counts it (never margin, never more than cash)
+  const money = (spend) => (spend ? [formatMoney(spend.amount), spend.key] : null);
+  const margin = { cash: '10000.00', buying_power: '20000.00', non_marginable_buying_power: '10000.00' };
+  assert.deepEqual(money(model.spendable(margin, [])), ['$10,000.00', 'ticket_power_after'], 'margin is not cash');
+  const pending = [
+    { side: 'buy', type: 'limit', qty: '10', filled_qty: '4', limit_price: '100.00' }, // 6 left at 100
+    { side: 'buy', type: 'market', notional: '250.00', qty: null },
+    { side: 'sell', type: 'limit', qty: '5', filled_qty: '0', limit_price: '1.00' }, // a sale reserves nothing
+  ];
+  assert.deepEqual(money(model.spendable(margin, pending)), ['$9,150.00', 'ticket_power_after']);
+  assert.deepEqual(money(model.spendable({ ...margin, buying_power: '5000.00' }, [])), ['$5,000.00', 'ticket_power_after']);
+  assert.deepEqual(money(model.spendable({ ...margin, non_marginable_buying_power: '8000.00' }, [])), ['$8,000.00', 'ticket_power_after']);
+  // a figure the account does not send: cash alone, said as "Cash after"
+  assert.deepEqual(money(model.spendable({ cash: '10000.00', buying_power: '20000.00' }, [])), ['$10,000.00', 'ticket_cash_after']);
+  assert.deepEqual(money(model.spendable({ cash: '10000.00' }, pending)), ['$9,150.00', 'ticket_cash_after']);
+  assert.equal(model.spendable({ buying_power: '20000.00' }, []), null);
+  assert.equal(model.spendable(null, []), null);
+  assert.ok(dict.en.ticket_cash_after && dict.ko.ticket_cash_after);
   const partial = model.ticketTotals(ticket({ decisions: [decision(0, {}, { est_cost_usd: null })] }));
   assert.equal(partial.complete, false);
   // 12,000 held + 1,830 bought, of 132,100 equity = 10.469%
@@ -101,7 +120,11 @@ await test('every answer of the ticket endpoints maps to one outcome', () => {
   assert.equal(kind('confirm', 410, { status: 'expired' }), 'expired');
   assert.equal(kind('confirm', 423, { status: 'disabled' }), 'disabled');
   assert.equal(kind('confirm', 503, {}, 'broker_not_connected'), 'no_broker');
-  assert.equal(kind('confirm', 503, {}, 'chat_unavailable'), 'failed');
+  // any other 5xx, a gateway timeout or no answer at all: orders may exist, so "uncertain", never "nothing changed"
+  for (const [status, error] of [[503, 'chat_unavailable'], [503, 'http_503'], [504, 'http_504'], [501, 'http_501'],
+    [599, 'http_599'], [500, 'confirm_failed'], [0, 'network_error']]) {
+    assert.equal(kind('confirm', status, {}, error), 'uncertain', `${status} ${error}`);
+  }
   assert.equal(kind('confirm', 502, { status: 'error' }), 'uncertain');
   assert.equal(kind('confirm', 500, {}, 'confirm_failed'), 'uncertain');
   assert.equal(kind('confirm', 0, {}, 'network_error'), 'uncertain');

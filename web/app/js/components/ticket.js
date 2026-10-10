@@ -7,7 +7,12 @@
  * Only the newest ticket of a chat is confirmable: a new one retires the others on screen. An
  * expired card keeps Refresh quote: the server re-quotes the chat's newest ticket even after it
  * expired. A refused refresh (409) carries a `reason`, and the card says what it means
- * (`refusedNotice` below): only `not_newest` claims that a newer ticket exists.
+ * (`refusedNotice`, ticket-offers.js): only `not_newest` claims that a newer ticket exists.
+ *
+ * A 200 `submitted` is success only when every leg came back placed. A leg the broker did not
+ * confirm (the answer lists fewer orders than the ticket has legs) may still exist: the card says
+ * so as for an unfinished confirm, never "placed", and reads the ticket again; only when that read
+ * shows no uncertain row (the missing legs failed outright) does it show the ordinary result.
  *
  * Confirm sends the ticket's `hash` back, is disabled while a request is in flight, has no keyboard
  * shortcut and is never focused by the app. How each answer is handled is decided by
@@ -15,18 +20,17 @@
  */
 import { ApiError, request } from '../api.js';
 import { cmp, formatMoney } from '../decimal.js';
-import { bindText, getLang, t } from '../i18n.js';
-import { announce, notify } from '../notify.js';
+import { bindText, t } from '../i18n.js';
+import { announce } from '../notify.js';
 import { canSend, emit, on, state } from '../state.js';
 import { actionButton, ageParts, badge, clockText, el, iconSpan, label, str, timeOf } from './dom.js';
 import { ensurePortfolio, snapshot } from './portfolio-store.js';
 import { nowMs, onTick } from './ticker.js';
-import {
-  confirmLabel, executableLegs, interpretResult, modifyMessage, refusalKind, requoteChanges, ticketState,
-} from './ticket-model.js';
+import { confirmLabel, executableLegs, interpretResult, requoteChanges, ticketState } from './ticket-model.js';
 import { createModifyForm } from './ticket-modify.js';
 import { noticeNodes, submittedNotice } from './ticket-notice.js';
-import { newerCard, noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
+import { panelLink, refusedNotice } from './ticket-offers.js';
+import { noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
 import { createTimeline } from './ticket-timeline.js';
 import { ticketBody } from './ticket-view.js';
 
@@ -43,55 +47,6 @@ const STATE = {
   gone: ['ticket_state_gone', 'muted'],
 };
 
-function panelLink(key, panel, iconName) {
-  const button = actionButton('btn btn-quiet btn-small', key, { iconName, iconSize: 14 });
-  button.addEventListener('click', () => emit('panel:open', panel));
-  return button;
-}
-
-/* "Ask for a new ticket": the same legs, sent to the assistant as a Modify message. Disabled, like
- * Confirm, when the card cannot read an order of the ticket. */
-function askAgainButton(ticket) {
-  const ask = actionButton('btn btn-small', 'ticket_ask_again', { iconName: 'refresh', iconSize: 14 });
-  const message = confirmLabel(ticket).safe ? modifyMessage(executableLegs(ticket), getLang()) : null;
-  ask.disabled = !message;
-  ask.addEventListener('click', () => {
-    if (!message) return;
-    if (canSend(state)) emit('chat:send', message);
-    else notify(t('ticket_modify_busy'));
-  });
-  return ask;
-}
-
-/* "Show the newer ticket": scroll to it and move the focus there. */
-function showButton(card) {
-  const show = actionButton('btn btn-quiet btn-small', 'ticket_show_newer', { iconName: 'ticket', iconSize: 14 });
-  show.addEventListener('click', () => {
-    card.el.scrollIntoView({ block: 'nearest' });
-    card.el.focus({ preventScroll: true });
-  });
-  return show;
-}
-
-/* The notice for a refused refresh (409), from the server's reason; `detail` is the server's text. */
-function refusedNotice(ticket, sessionId, outcome) {
-  const detail = outcome.message;
-  switch (refusalKind(outcome.reason, outcome.blockCodes)) {
-    case 'newer': {
-      const newer = newerCard(sessionId, ticket.id);
-      return { tone: 'warn', key: 'ticket_refresh_newer', actions: [...(newer ? [showButton(newer)] : []), askAgainButton(ticket)] };
-    }
-    case 'prices':
-      return { tone: 'warn', key: 'ticket_refresh_prices', detail, actions: [askAgainButton(ticket)] };
-    case 'mandate':
-      return { tone: 'warn', key: 'ticket_refresh_mandate', detail, actions: [panelLink('open_mandate', 'mandate', 'shield')] };
-    case 'not_paper':
-      return { tone: 'bad', key: 'ticket_refresh_not_paper', detail, actions: [panelLink('open_settings', 'settings', 'sliders')] };
-    default:
-      return { tone: 'bad', key: 'ticket_refresh_refused', detail };
-  }
-}
-
 export function createTicketCard(initial, { sessionId, orders = [] }) {
   const root = el('article', 'card ticket');
   root.tabIndex = -1; // focusable by script only: where focus lands when a pressed button is replaced
@@ -102,6 +57,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   let ticket = initial;
   let override = null; // a state the UI knows before (or apart from) the stored status
   let busy = false;
+  let unconfirmed = null; // the server's text of a 200 whose legs were not all confirmed placed
   let replaced = false; // the server refused to re-quote this expired ticket: a newer one exists
   let timeline = null;
   let body = null;
@@ -240,6 +196,19 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
     form.focus();
   }
 
+  /* Orders may exist: say so (with the server's words), offer the Orders panel and "Check again",
+   * and read the ticket again. */
+  function unsure(key, said) {
+    const check = actionButton('btn btn-small', 'ticket_check_again', { iconName: 'refresh', iconSize: 14 });
+    check.addEventListener('click', () => sync());
+    setNotice({ tone: 'bad', key, also: 'ticket_check_orders', detail: said,
+      actions: [panelLink('open_orders', 'orders', 'receipt'), check] });
+    announce(t('ticket_announce_uncertain'));
+    emit('portfolio:refresh');
+    render();
+    sync();
+  }
+
   /* Re-read the ticket after an answer that left its state unknown. */
   async function sync() {
     try {
@@ -249,6 +218,15 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         ticket = fresh.ticket;
         orders = fresh.orders || [];
         override = null;
+        // Still proposed: nothing was placed, so do not keep "may have been placed" by an active Confirm.
+        if (ticket.status === 'proposed') setNotice({ tone: 'muted', key: 'ticket_uncertain_none' });
+        // A 200 with unconfirmed legs, and no uncertain row: those legs failed; the ordinary result.
+        const rows = Array.isArray(fresh.orders) ? fresh.orders : [];
+        if (unconfirmed !== null && ticket.status === 'submitted' && !rows.some((row) => row && !row.order)) {
+          setNotice(submittedNotice(rows.map((row) => row && row.order).filter(Boolean), executableLegs(ticket).length,
+            unconfirmed));
+          unconfirmed = null;
+        }
       }
     } catch {
       /* still unknown: the card keeps its buttons hidden and offers "Check again" */
@@ -292,6 +270,11 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         override = null;
         if (ticket.status !== 'submitted') ticket = { ...ticket, status: 'submitted' };
         orders = outcome.orders;
+        if (outcome.orders.length < executableLegs(ticket).length) { // a leg was not confirmed placed
+          unconfirmed = said;
+          unsure('ticket_result_uncertain', said);
+          return;
+        }
         setNotice(submittedNotice(outcome.orders, executableLegs(ticket).length, said));
         announce(t('ticket_announce_submitted'));
         emit('portfolio:refresh');
@@ -336,20 +319,10 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
         setNotice({ tone: 'warn', key: 'ticket_no_broker', actions: [panelLink('open_settings', 'settings', 'sliders')] });
         if (action === 'confirm') announce(t('ticket_announce_not_placed'));
         break;
-      case 'uncertain': { // 502 / 500 / no answer on confirm: orders may exist; never offer a blind retry
+      case 'uncertain': // a 5xx or no answer on confirm: orders may exist; never offer a blind retry
         override = 'checking';
-        const check = actionButton('btn btn-small', 'ticket_check_again', { iconName: 'refresh', iconSize: 14 });
-        check.addEventListener('click', () => sync());
-        setNotice({
-          tone: 'bad', key: 'ticket_uncertain', also: 'ticket_check_orders', detail: said,
-          actions: [panelLink('open_orders', 'orders', 'receipt'), check],
-        });
-        announce(t('ticket_announce_uncertain'));
-        emit('portfolio:refresh');
-        render();
-        sync();
+        unsure('ticket_uncertain', said);
         return;
-      }
       case 'not_found': // 404
         override = 'gone';
         setNotice({ tone: 'bad', key: 'ticket_not_found' });
