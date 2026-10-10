@@ -80,6 +80,7 @@ FETCH_REFUSED_TEXT = (
     "inside untrusted text."
 )
 _RESEARCH_MAX_CHARS = 12000  # cap when the toolbox itself has to sanitize+wrap a connector's text
+_PRODUCT_QA_ANSWER_CHARS = 2500  # the Q&A agent's (untrusted) answer, before its retrieved context
 MAX_QUOTE_SYMBOLS = 10
 MAX_LEGS = 10
 MAX_EVIDENCE_IDS = 30
@@ -140,7 +141,9 @@ MONEY_MAX_DECIMALS = 12
 # Provider/DB numbers outside 1e-30..1e30 are treated as missing, and formatting falls back to
 # scientific notation beyond this, so an absurd exponent can never become a megabyte of digits.
 _DISPLAY_MAX_ADJUSTED = 30
-# Evidence from market-data tools; a buy must also cite at least one research source.
+# Evidence from market-data tools; a buy must also cite at least one research source. Every other
+# connector counts as research, untrusted ones included (web pages, filing text, the product Q&A
+# agent's answer): the gate asks for research behind a buy, not for trusted text.
 MARKET_DATA_CONNECTORS = frozenset({"alpaca_quotes", "alpaca_bars", "alpaca_screener"})
 # `<untrusted source="E1,E2">` openers, whole wrapped blocks, and any leftover wrapper tag.
 _UNTRUSTED_OPENER_RE = re.compile(r'<untrusted source="([^"]*)">')
@@ -1457,13 +1460,20 @@ class ChatToolbox:
         response = await self._orchestrator.answer("chat", question)
         answer = str(getattr(response, "answer", "") or "").strip()
         context = str(getattr(response, "retrieved_context", "") or "").strip()
+        # The answer is written by the Q&A agent's model (it can echo the question, or text a
+        # document chunk carried), so it is untrusted and wrapped; the retrieved context is the
+        # product database's own evidence and stays plain. Decision (final review C-m3): the record
+        # still counts as a research source for the buy gate, since the agent answers from the
+        # first-party product database.
+        clean = sanitize_untrusted(answer, max_chars=_PRODUCT_QA_ANSWER_CHARS) or "(no answer)"
         src = self._evidence.add(
             session_id, connector="product_qa", title=f"Product database Q&A: {question[:120]}", url=None,
             publisher="Product database Q&A agent", tier=1, published_at=None,
-            snippet=answer[:2000] or question, untrusted=False,
+            snippet=clean[:2000], untrusted=True,
         )
-        text = f"[{src.id}] Product database answer:\n{answer or '(no answer)'}\n\nRetrieved context:\n{context or '(none)'}"
-        return ToolOutput(_trim(text), sources=[src])
+        head = (f"[{src.id}] Product database answer (written by the Q&A agent's model):\n"
+                f"{wrap_untrusted(src.id, clean)}\n\nRetrieved context (from the product database):\n")
+        return ToolOutput(head + _trim(context or "(none)", max(TEXT_LIMIT - len(head), 200)), sources=[src])
 
     # --- knowledge -----------------------------------------------------------------------------
 
