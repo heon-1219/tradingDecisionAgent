@@ -183,6 +183,7 @@ export default {
   timeline_empty: 'No order was recorded for this ticket.',
   timeline_updating: 'Updating every 3 seconds…',
   timeline_settled: 'Every order is final.',
+  timeline_unsettled: 'Not every order is confirmed. Check your open orders.',
   timeline_paused: 'Stopped updating after a minute.',
   timeline_refresh: 'Update now',
   order_pending_new: 'Sent',

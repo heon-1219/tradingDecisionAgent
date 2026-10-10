@@ -237,6 +237,10 @@ await test('order statuses: the final ones match the server, every label exists'
   assert.equal(timeline.anyPending(timeline.normalizeOrders([order()])), false);
   // an uncertain leg (no order) does not keep the polling alive
   assert.equal(timeline.anyPending([{ client_order_id: 'c1', broker_order_id: null, order: null }]), false);
+  // ...but it is what keeps the footer, and the card's header, from saying that everything is settled
+  assert.equal(timeline.anyUncertain([{ client_order_id: 'c1', broker_order_id: null, order: null }]), true);
+  assert.equal(timeline.anyUncertain(timeline.normalizeOrders([order(), order({ status: 'new' })])), false);
+  assert.equal(timeline.anyUncertain([]), false);
   assert.deepEqual(timeline.normalizeOrders([order()])[0].broker_order_id, 'o1');
 });
 

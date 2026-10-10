@@ -655,6 +655,68 @@ await test('a 200 "submitted" with a leg the broker did not confirm is uncertain
   card.remove();
 });
 
+await test('while any row is uncertain the header says "Outcome unknown" and the footer never says every order is final', async () => {
+  const badgeOf = (card) => card.querySelector('.card-head').querySelector('.badge');
+  const footOf = (card) => card.querySelector('.timeline-foot');
+  const checkAgain = (card) => card.querySelector('.ticket-notice').querySelectorAll('button').find((b) => b.textContent === 'Check again');
+  const row = (n, placed) => ({ client_order_id: `c${n}`, broker_order_id: placed ? `o${n}` : null, order: placed ? order({ id: `o${n}`, client_order_id: `c${n}` }) : null });
+  const confirmAnswer = (tk, status, orders) => ({ method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status, body: {
+    status: status === 200 ? 'submitted' : 'error', message: '1 uncertain.', ticket: { ...tk, status: 'submitted' }, orders, new_ticket: null,
+    reason: null, block_codes: [] } });
+  const two = () => ticket({ decisions: [decision(0), decision(1, { symbol: 'VTI' })] });
+  const flows = [
+    { name: '200, no order listed for the one leg', tk: ticket(), status: 200, listed: [], rows: [row(0, false)], settled: [row(0, true)] },
+    { name: '200, one order listed for two legs', tk: two(), status: 200, listed: [order()], rows: [row(0, true), row(1, false)], settled: [row(0, true), row(1, true)] },
+    { name: '502 with an uncertain row', tk: ticket(), status: 502, listed: [], rows: [row(0, false)], settled: [row(0, true)] },
+  ];
+  for (const { name, tk, status, listed, rows, settled } of flows) {
+    net.routes = [portfolio, confirmAnswer(tk, status, listed), ticketRead({ ...tk, status: 'submitted' }, rows)];
+    const { card } = propose(tk);
+    button(card, 'btn-confirm').click();
+    await flush();
+    assert.equal(badgeOf(card).textContent, dict.en.ticket_state_checking, name);
+    assert.equal(badgeOf(card).getAttribute('data-tone'), 'warn', name);
+    assert.equal(footOf(card).textContent, dict.en.timeline_unsettled, name);
+    assert.ok(!/final/i.test(footOf(card).textContent), name);
+    assert.ok(card.querySelector('.timeline-row.is-uncertain'), name);
+    setLang('ko');
+    try {
+      assert.equal(badgeOf(card).textContent, dict.ko.ticket_state_checking, name);
+      assert.equal(footOf(card).textContent, dict.ko.timeline_unsettled, name);
+    } finally {
+      setLang('en');
+    }
+    // a re-read that is still uncertain changes nothing
+    checkAgain(card).click();
+    await flush();
+    assert.equal(badgeOf(card).textContent, dict.en.ticket_state_checking, name);
+    assert.equal(footOf(card).textContent, dict.en.timeline_unsettled, name);
+    // a re-read that settles every row brings the ordinary display back
+    net.routes = [portfolio, ticketRead({ ...tk, status: 'submitted' }, settled)];
+    checkAgain(card).click();
+    await flush();
+    assert.equal(badgeOf(card).textContent, dict.en.ticket_state_submitted, name);
+    assert.equal(badgeOf(card).getAttribute('data-tone'), 'ok', name);
+    assert.equal(footOf(card).textContent, dict.en.timeline_settled, name);
+    assert.equal(card.querySelectorAll('.timeline-row.is-uncertain').length, 0, name);
+    card.remove();
+  }
+  // one leg placed, one failed outright: unsure until the first re-read answers, then the ordinary display
+  const half = two();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  net.routes = [portfolio, confirmAnswer(half, 200, [order()]), { ...ticketRead({ ...half, status: 'submitted' }, [row(0, true)]), gate }];
+  const { card } = propose(half);
+  button(card, 'btn-confirm').click();
+  await flush();
+  assert.equal(badgeOf(card).textContent, dict.en.ticket_state_checking, 'unsure while the re-read is outstanding');
+  release();
+  await flush();
+  assert.equal(badgeOf(card).textContent, dict.en.ticket_state_submitted);
+  assert.equal(footOf(card).textContent, dict.en.timeline_settled);
+  card.remove();
+});
+
 await test('uncertain confirm: a re-read that finds the ticket still proposed says nothing was placed', async () => {
   const tk = ticket();
   net.routes = [portfolio, { method: 'POST', match: `/api/tickets/${tk.id}/confirm`, status: 504, body: { error: 'http_504' } },

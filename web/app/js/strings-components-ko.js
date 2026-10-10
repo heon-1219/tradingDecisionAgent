@@ -182,6 +182,7 @@ export default {
   timeline_empty: '이 티켓으로 기록된 주문이 없습니다.',
   timeline_updating: '3초마다 갱신하는 중…',
   timeline_settled: '모든 주문이 확정되었습니다.',
+  timeline_unsettled: '확인되지 않은 주문이 있습니다. 미체결 주문을 확인해 주세요.',
   timeline_paused: '1분이 지나 자동 갱신을 멈췄습니다.',
   timeline_refresh: '지금 갱신',
   order_pending_new: '전송됨',

@@ -3,7 +3,7 @@
  * One row per order: direction, symbol, size, a three-step track (sent, working, filled) and the
  * status in words, with what has filled so far. A leg whose outcome the server could not establish
  * has no order; it is shown as "uncertain: check open orders" and is never offered for
- * resubmission.
+ * resubmission. While such a row is there the footer does not say that every order is final.
  *
  * While any order is not final, the ticket is re-read every 3 s for up to 60 s
  * (`GET /api/tickets/{id}?session_id=`; the server re-reads those orders from the broker). Polling
@@ -33,6 +33,12 @@ export function normalizeOrders(orders) {
  * will not resolve by polling. */
 export function anyPending(rows) {
   return rows.some((row) => row.order && !isFinalOrder(row.order));
+}
+
+/* True while a leg has no order: its outcome is unknown, so the timeline cannot say "every order is
+ * final". The card's header reads the same rows (`onOrders`). */
+export function anyUncertain(rows) {
+  return rows.some((row) => !row.order);
 }
 
 /* Poll `read()` every `every` ms for at most `limit` ms, while `alive()` and `pending(result)`.
@@ -108,9 +114,10 @@ function row(tracked) {
 }
 
 /* Build the timeline for `ticket`. `orders` is what is known now (either API shape). It keeps
- * itself up to date and calls `onTicket(ticket)` when a read returns the ticket. `timers`
- * ({now, delay, cancel}, for the tests) replaces the real clock of the poller. */
-export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) {
+ * itself up to date and calls `onTicket(ticket)` when a read returns the ticket and `onOrders(rows)`
+ * with the rows of every read. `update(body)` takes a read made elsewhere (the card's own "Check
+ * again"). `timers` ({now, delay, cancel}, for the tests) replaces the real clock of the poller. */
+export function createTimeline({ ticket, sessionId, orders, onTicket, onOrders, timers }) {
   const root = el('section', 'timeline');
   const list = el('ol', 'timeline-list');
   const foot = el('p', 'timeline-foot');
@@ -128,8 +135,16 @@ export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) 
     else list.replaceChildren(...rows.map(row));
   }
 
+  /* The footer once nothing is pending: "every order is final" only when no leg is uncertain. */
+  function settledFoot() {
+    bindText(foot, anyUncertain(rows) ? 'timeline_unsettled' : 'timeline_settled');
+  }
+
   function apply(body) {
-    if (Array.isArray(body?.orders)) rows = normalizeOrders(body.orders);
+    if (Array.isArray(body?.orders)) {
+      rows = normalizeOrders(body.orders);
+      if (onOrders) onOrders(rows);
+    }
     if (body?.ticket && onTicket) onTicket(body.ticket);
     draw();
   }
@@ -147,7 +162,8 @@ export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) 
         poller = null;
         if (reason === 'gone') return;
         const settled = reason === 'settled';
-        bindText(foot, settled ? 'timeline_settled' : 'timeline_paused');
+        if (settled) settledFoot();
+        else bindText(foot, 'timeline_paused');
         again.hidden = settled;
         emit('portfolio:refresh');
       },
@@ -165,7 +181,7 @@ export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) 
     again.disabled = false;
     if (anyPending(rows)) start();
     else {
-      bindText(foot, 'timeline_settled');
+      settledFoot();
       again.hidden = true;
     }
   });
@@ -176,7 +192,7 @@ export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) 
     if (!alive()) return;
     apply(body);
     if (anyPending(rows) || body?.ticket?.status === 'submitting') start();
-    else bindText(foot, 'timeline_settled');
+    else settledFoot();
   }).catch(() => {
     if (!alive()) return;
     if (anyPending(rows)) start();
@@ -186,5 +202,16 @@ export function createTimeline({ ticket, sessionId, orders, onTicket, timers }) 
     }
   });
   bindText(foot, 'timeline_updating');
-  return { el: root };
+  return {
+    el: root,
+    update(body) {
+      apply(body);
+      if (poller) return; // a running poll reads the same rows and settles the footer itself
+      if (anyPending(rows) || body?.ticket?.status === 'submitting') start();
+      else {
+        settledFoot();
+        again.hidden = true;
+      }
+    },
+  };
 }

@@ -12,7 +12,10 @@
  * A 200 `submitted` is success only when every leg came back placed. A leg the broker did not
  * confirm (the answer lists fewer orders than the ticket has legs) may still exist: the card says
  * so as for an unfinished confirm, never "placed", and reads the ticket again; only when that read
- * shows no uncertain row (the missing legs failed outright) does it show the ordinary result.
+ * shows no uncertain row (the missing legs failed outright) does it show the ordinary result. While
+ * any leg is uncertain (that answer, or a 502, or a read that lists a leg with no order) the header
+ * says "Outcome unknown" instead of "Submitted", and the timeline footer does not say that every
+ * order is final.
  *
  * Confirm sends the ticket's `hash` back, is disabled while a request is in flight, has no keyboard
  * shortcut and is never focused by the app. How each answer is handled is decided by
@@ -31,7 +34,7 @@ import { createModifyForm } from './ticket-modify.js';
 import { noticeNodes, submittedNotice } from './ticket-notice.js';
 import { panelLink, refusedNotice } from './ticket-offers.js';
 import { noteTicket, registerCard, supersedeOthers } from './ticket-store.js';
-import { createTimeline } from './ticket-timeline.js';
+import { anyUncertain, createTimeline, normalizeOrders } from './ticket-timeline.js';
 import { ticketBody } from './ticket-view.js';
 
 // state -> [badge key, tone]
@@ -58,12 +61,15 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
   let override = null; // a state the UI knows before (or apart from) the stored status
   let busy = false;
   let unconfirmed = null; // the server's text of a 200 whose legs were not all confirmed placed
+  let uncertainRows = false; // the last read of the ticket lists a leg with no order
   let replaced = false; // the server refused to re-quote this expired ticket: a newer one exists
   let timeline = null;
   let body = null;
   let clockNodes = null;
 
   const currentState = () => override || ticketState(ticket, nowMs());
+  /* Some leg may or may not exist at the broker: the header must not say "Submitted" for it. */
+  const outcomeUnknown = () => unconfirmed !== null || uncertainRows;
 
   /* Show a message in the card (see ticket-notice.js for the description it takes); `null` clears it. */
   function setNotice(spec) {
@@ -80,6 +86,11 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
     if (timeline) return;
     timeline = createTimeline({
       ticket, sessionId, orders: known,
+      onOrders(rows) {
+        const before = outcomeUnknown();
+        uncertainRows = anyUncertain(rows);
+        if (outcomeUnknown() !== before) render();
+      },
       onTicket(next) {
         if (next && next.id === ticket.id && next.status !== ticket.status) {
           ticket = next;
@@ -159,7 +170,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
     root.setAttribute('data-ticket-id', str(ticket.id));
     root.setAttribute('data-state', current);
     root.setAttribute('aria-busy', String(busy));
-    const [stateKey, tone] = STATE[current] || STATE.gone;
+    const [stateKey, tone] = STATE[current === 'submitted' && outcomeUnknown() ? 'checking' : current] || STATE.gone;
     const head = el('header', 'card-head');
     const title = el('div', 'card-title');
     title.append(iconSpan('ticket', 18), label('h3', 'card-h', 'ticket_title'), el('span', 'ticket-id', str(ticket.id)));
@@ -217,6 +228,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
       if (fresh && fresh.ticket) {
         ticket = fresh.ticket;
         orders = fresh.orders || [];
+        uncertainRows = anyUncertain(normalizeOrders(orders));
         override = null;
         // Still proposed: nothing was placed, so do not keep "may have been placed" by an active Confirm.
         if (ticket.status === 'proposed') setNotice({ tone: 'muted', key: 'ticket_uncertain_none' });
@@ -227,6 +239,7 @@ export function createTicketCard(initial, { sessionId, orders = [] }) {
             unconfirmed));
           unconfirmed = null;
         }
+        if (timeline) timeline.update(fresh); // its rows and footer follow this read
       }
     } catch {
       /* still unknown: the card keeps its buttons hidden and offers "Check again" */
