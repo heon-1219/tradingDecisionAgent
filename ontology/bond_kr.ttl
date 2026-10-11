@@ -1,21 +1,21 @@
 # ============================================================================
-# bond_kr.ttl — 국내채권 마스터 (v_bond_kr / PRBD01N001) TBox
+# bond_kr.ttl — domestic bond master (v_bond_kr / PRBD01N001) TBox
 #
-# 목적
-#   국내채권 뷰의 50개 컬럼을 fp:DomesticBond 의 속성으로 문서화하고, 신용등급·중분류·
-#   금리구분·이자지급구분·모집구분·거래구분 열거형을 개체로 선언한다.
-#   loader.py 는 fp:sourceTable "v_bond_kr" + fp:sourceColumn 을 가진 속성만 스키마 카드에
-#   포함하므로 모든 컬럼이 이 파일에 1:1 로 대응한다.
+# Purpose
+#   Documents the 50 columns of the domestic bond view as properties of fp:DomesticBond and declares
+#   the credit-grade, mid-class, rate-type, interest-payment-type, offering-type and trade-type enumerations as individuals.
+#   loader.py only puts properties carrying fp:sourceTable "v_bond_kr" + fp:sourceColumn on the schema
+#   card, so every column maps 1:1 to this file.
 #
 # TBox / ABox
-#   채권 인스턴스는 런타임에 SQLite v_bond_kr 로부터 생성된다 (d:bond/<pd_no>).
-#   이 파일에는 클래스·속성·열거형 개체·SHACL 만 있다.
+#   Bond instances are generated at runtime from SQLite v_bond_kr (d:bond/<pd_no>).
+#   This file holds only classes, properties, enumeration individuals and SHACL.
 #
-# 데이터 특성 (2026-08-21 기준)
-#   - 총 21,882 종목 중 is_sellable = 1 (현재 매수 가능) 은 634 종목.
-#   - 매수가능 종목은 모두 장외(pd_exg_mkt='장외'), 매매채널 '온오프 겸용', buy_yield 존재.
-#   - 국공채는 신용등급(crd_grd) 이 NULL 이다 (무위험 취급). 등급 필터 시 NULL 처리에 유의.
-#   - 위험등급 코드 pd_risk_gcd 는 11~16 (= 1~6등급), 0 = 해당없음.
+# Data characteristics (as of 2026-08-21)
+#   - Of 21,882 issues in total, 634 have is_sellable = 1 (currently buyable).
+#   - Every buyable issue is OTC (pd_exg_mkt='장외'), trading channel '온오프 겸용', and has a buy_yield.
+#   - Government/public bonds have a NULL credit grade (crd_grd) (treated as risk-free). Mind NULLs when filtering by grade.
+#   - Risk-grade code pd_risk_gcd is 11~16 (= grades 1~6); 0 = not applicable.
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -26,7 +26,7 @@
 @prefix sh:   <http://www.w3.org/ns/shacl#> .
 
 # ----------------------------------------------------------------------------
-# 1. 테이블 클래스
+# 1. Table class
 # ----------------------------------------------------------------------------
 
 fp:DomesticBond a owl:Class ;
@@ -37,10 +37,10 @@ fp:DomesticBond a owl:Class ;
     fp:sourceId "PRBD01N001" .
 
 # ----------------------------------------------------------------------------
-# 2. 열거형 클래스 및 개체
+# 2. Enumeration classes and individuals
 # ----------------------------------------------------------------------------
 
-# 2.1 신용등급 (AAA=1 최우량 ... D=20). IRI 에 +/- 를 쓸 수 없어 plus/minus/0 으로 표기.
+# 2.1 Credit grade (AAA=1 highest quality ... D=20). IRIs cannot contain +/-, so they are written plus/minus/0.
 fp:CreditGrade a owl:Class ;
     rdfs:label "신용등급"@ko , "Credit Grade"@en ;
     rdfs:comment "국내 신용평가사 회사채 등급 체계. AAA~BBB- 는 투자등급, BB+ 이하는 투기등급. fp:gradeRank 가 작을수록 우량. 국공채는 등급이 부여되지 않는다(NULL)."@ko .
@@ -66,7 +66,7 @@ fp:CreditGrade_CC       a fp:CreditGrade ; fp:code "CC"   ; fp:gradeRank 18 ; rd
 fp:CreditGrade_C0       a fp:CreditGrade ; fp:code "C0"   ; fp:gradeRank 19 ; rdfs:label "C0"@ko .
 fp:CreditGrade_D        a fp:CreditGrade ; fp:code "D"    ; fp:gradeRank 20 ; rdfs:label "D"@ko ; rdfs:comment "채무불이행."@ko .
 
-# 2.2 채권 중분류
+# 2.2 Bond mid-class
 fp:BondMidClass a owl:Class ;
     rdfs:label "채권 중분류"@ko , "Bond Mid Class"@en ;
     rdfs:comment "표준상품 중분류 std_pd_mcls_nm. 회사채 / 특수채 / 국공채."@ko .
@@ -75,7 +75,7 @@ fp:BondMidClass_회사채 a fp:BondMidClass ; fp:code "회사채" ; fp:gradeRank
 fp:BondMidClass_특수채 a fp:BondMidClass ; fp:code "특수채" ; fp:gradeRank 2 ; rdfs:label "특수채"@ko ; rdfs:comment "공사·특수은행 등 특별법인 발행 (공사채, 특수은행채, 지역개발 등)."@ko .
 fp:BondMidClass_국공채 a fp:BondMidClass ; fp:code "국공채" ; fp:gradeRank 1 ; rdfs:label "국공채"@ko ; rdfs:comment "국고채·국민주택·지방채·통안채 등. 신용등급(crd_grd) NULL."@ko .
 
-# 2.3 채권 소분류
+# 2.3 Bond sub-class
 fp:BondSubClass a owl:Class ;
     rdfs:label "채권 소분류"@ko , "Bond Sub Class"@en ;
     rdfs:comment "표준상품 소분류 std_pd_scls_nm. 13개 값."@ko .
@@ -94,7 +94,7 @@ fp:BondSubClass_기타사채   a fp:BondSubClass ; fp:code "기타사채"   ; rd
 fp:BondSubClass_기타국채   a fp:BondSubClass ; fp:code "기타국채"   ; rdfs:label "기타국채"@ko .
 fp:BondSubClass_물가채     a fp:BondSubClass ; fp:code "물가채"     ; rdfs:label "물가채"@ko ; rdfs:comment "물가연동국고채."@ko .
 
-# 2.4 모집구분
+# 2.4 Offering type
 fp:BondOfferingType a owl:Class ;
     rdfs:label "모집구분"@ko , "Bond Offering Type"@en ;
     rdfs:comment "bd_ofr_tcd. 공모 / 사모."@ko .
@@ -102,7 +102,7 @@ fp:BondOfferingType a owl:Class ;
 fp:BondOfferingType_공모 a fp:BondOfferingType ; fp:code "공모" ; rdfs:label "공모"@ko .
 fp:BondOfferingType_사모 a fp:BondOfferingType ; fp:code "사모" ; rdfs:label "사모"@ko .
 
-# 2.5 금리구분
+# 2.5 Interest-rate type
 fp:BondRateType a owl:Class ;
     rdfs:label "금리구분"@ko , "Bond Rate Type"@en ;
     rdfs:comment "bd_inrt_tcd. 고정금리 / 변동금리 / 고정+변동금리."@ko .
@@ -111,7 +111,7 @@ fp:BondRateType_고정금리     a fp:BondRateType ; fp:code "고정금리"     
 fp:BondRateType_변동금리     a fp:BondRateType ; fp:code "변동금리"      ; rdfs:label "변동금리"@ko .
 fp:BondRateType_고정_변동금리 a fp:BondRateType ; fp:code "고정+변동금리" ; rdfs:label "고정+변동금리"@ko ; rdfs:comment "원천 표기는 '고정+변동금리' (플러스 기호 포함)."@ko .
 
-# 2.6 이자지급구분
+# 2.6 Interest-payment type
 fp:BondInterestPaymentType a owl:Class ;
     rdfs:label "이자지급구분"@ko , "Bond Interest Payment Type"@en ;
     rdfs:comment "bd_intp_tcd. 이표채 / 복리채 / 할인채 / 단리채."@ko .
@@ -121,7 +121,7 @@ fp:BondInterestPaymentType_복리채 a fp:BondInterestPaymentType ; fp:code "복
 fp:BondInterestPaymentType_할인채 a fp:BondInterestPaymentType ; fp:code "할인채" ; rdfs:label "할인채"@ko ; rdfs:comment "선이자 할인 발행."@ko .
 fp:BondInterestPaymentType_단리채 a fp:BondInterestPaymentType ; fp:code "단리채" ; rdfs:label "단리채"@ko .
 
-# 2.7 거래구분
+# 2.7 Trade type
 fp:BondTradingMarket a owl:Class ;
     rdfs:label "거래구분"@ko , "Bond Trading Market"@en ;
     rdfs:comment "pd_exg_mkt. 장내 / 장외. 매수가능 종목(is_sellable=1)은 모두 장외."@ko .
@@ -130,7 +130,7 @@ fp:BondTradingMarket_장내 a fp:BondTradingMarket ; fp:code "장내" ; rdfs:lab
 fp:BondTradingMarket_장외 a fp:BondTradingMarket ; fp:code "장외" ; rdfs:label "장외"@ko ; rdfs:comment "당사 창구·온라인 장외 매매. buy_yield / trade_price 기준."@ko .
 
 # ----------------------------------------------------------------------------
-# 3. 컬럼 속성 (v_bond_kr) — 식별/명칭
+# 3. Column properties (v_bond_kr) — identification/naming
 # ----------------------------------------------------------------------------
 
 fp:bondProductNo a owl:DatatypeProperty ;
@@ -175,7 +175,7 @@ fp:bondProductType a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "product_type" .
 
 # ----------------------------------------------------------------------------
-# 4. 거래 가능성
+# 4. Tradability
 # ----------------------------------------------------------------------------
 
 fp:hasBondTradingMarket a owl:ObjectProperty ;
@@ -197,7 +197,7 @@ fp:bondTradableChannel a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bdbns_abl_chnl_nm" .
 
 # ----------------------------------------------------------------------------
-# 5. 발행자 / 분류
+# 5. Issuer / classification
 # ----------------------------------------------------------------------------
 
 fp:bondIssuerName a owl:DatatypeProperty ;
@@ -244,7 +244,7 @@ fp:hasBondInterestPaymentType a owl:ObjectProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "bd_intp_tcd" .
 
 # ----------------------------------------------------------------------------
-# 6. 신용 / 위험
+# 6. Credit / risk
 # ----------------------------------------------------------------------------
 
 fp:hasCreditGrade a owl:ObjectProperty ;
@@ -272,7 +272,7 @@ fp:bondRiskGradeCode a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "pd_risk_gcd" .
 
 # ----------------------------------------------------------------------------
-# 7. 발행 조건
+# 7. Issue terms
 # ----------------------------------------------------------------------------
 
 fp:bondCurrency a owl:DatatypeProperty ;
@@ -326,7 +326,7 @@ fp:bondIssueBalance a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "isu_bal_amt" .
 
 # ----------------------------------------------------------------------------
-# 8. 수익률
+# 8. Yields
 # ----------------------------------------------------------------------------
 
 fp:bondAppliedYield a owl:DatatypeProperty ;
@@ -390,7 +390,7 @@ fp:bondDepositEquivYield495 a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "depo_equiv_yield_495" .
 
 # ----------------------------------------------------------------------------
-# 9. 가격 / 수량 / 리스크 지표
+# 9. Price / quantity / risk metrics
 # ----------------------------------------------------------------------------
 
 fp:bondTradePrice a owl:DatatypeProperty ;
@@ -467,7 +467,7 @@ fp:bondBaseDate a owl:DatatypeProperty ;
     fp:sourceTable "v_bond_kr" ; fp:sourceColumn "base_date" .
 
 # ----------------------------------------------------------------------------
-# 10. SHACL 제약
+# 10. SHACL constraints
 # ----------------------------------------------------------------------------
 
 fp:DomesticBondShape a sh:NodeShape ;

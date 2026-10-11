@@ -18,10 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def classify(answer: str) -> str:
+    # The agent is bilingual (Task 0.1): an English question gets an English decline/clarify wording,
+    # a Korean question the Korean one, and a run recorded before the translation is Korean regardless.
     a = answer or ""
-    if "확인할 수 없" in a or "확인되지 않" in a:
+    if "확인할 수 없" in a or "확인되지 않" in a or "cannot be confirmed" in a or "could not be found" in a:
         return "cannot_confirm"
-    if a.rstrip().endswith(("?", "？")) or "말씀하시" in a:
+    if a.rstrip().endswith(("?", "？")) or "말씀하시" in a or "could you" in a.lower():
         return "clarify"
     return "answered"
 

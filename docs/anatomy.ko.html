@@ -1,0 +1,1348 @@
+<title>금융상품 Agent 해부도</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=IBM+Plex+Sans+KR:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --paper:#FBFBFD; --surface:#F2F4F8; --surface-2:#E9EDF4;
+  --ink:#141A26; --muted:#5C6779; --rule:#DCE1EA;
+  --primary:#2F4E96; --primary-soft:#E4EAF7;
+  --copper:#A9642A; --copper-soft:#F6EADC;
+  --good:#2C6E52; --good-soft:#E1F0E8;
+  --reject:#9A4B41; --reject-soft:#F7E7E4;
+  --shadow:0 1px 2px rgba(20,26,38,.06), 0 8px 24px rgba(20,26,38,.05);
+  --spine:min(100%, 68ch);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0E121B; --surface:#161C28; --surface-2:#1E2634;
+    --ink:#E7ECF5; --muted:#98A3B7; --rule:#2A3242;
+    --primary:#89A7E8; --primary-soft:#1B2740;
+    --copper:#DFA167; --copper-soft:#33251A;
+    --good:#6DC49A; --good-soft:#152A22;
+    --reject:#DE8E82; --reject-soft:#2E1A18;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0E121B; --surface:#161C28; --surface-2:#1E2634;
+  --ink:#E7ECF5; --muted:#98A3B7; --rule:#2A3242;
+  --primary:#89A7E8; --primary-soft:#1B2740;
+  --copper:#DFA167; --copper-soft:#33251A;
+  --good:#6DC49A; --good-soft:#152A22;
+  --reject:#DE8E82; --reject-soft:#2E1A18;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.3);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:"IBM Plex Sans KR",-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  font-size:16px; line-height:1.75; -webkit-font-smoothing:antialiased;
+}
+code,kbd,pre,.mono{font-family:"IBM Plex Mono","D2Coding",ui-monospace,monospace}
+h1,h2,h3{font-family:"Gowun Batang","Nanum Myeongjo",serif; text-wrap:balance; margin:0; font-weight:700; letter-spacing:-.01em}
+a{color:var(--primary)}
+.wrap{max-width:1180px; margin:0 auto; padding:0 24px 96px}
+.layout{display:block}
+@media(min-width:1080px){
+  .layout{display:grid; grid-template-columns:190px minmax(0,1fr); gap:56px; align-items:start}
+  nav.toc{position:sticky; top:24px}
+}
+/* ---------- masthead ---------- */
+header.top{border-bottom:1px solid var(--rule); margin-bottom:44px; padding:56px 0 32px}
+.eyebrow{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--copper); font-weight:600; margin-bottom:14px}
+h1{font-size:clamp(34px,5.2vw,52px); line-height:1.15}
+header.top .lede{max-width:62ch; color:var(--muted); margin:16px 0 0; font-size:17px}
+.chips{display:flex; flex-wrap:wrap; gap:8px; margin-top:26px}
+.chip{display:flex; gap:7px; align-items:baseline; background:var(--surface); border:1px solid var(--rule); border-radius:999px; padding:5px 13px; font-size:13px}
+.chip b{font-family:"IBM Plex Mono",monospace; font-weight:500; font-variant-numeric:tabular-nums}
+.chip.warn{background:var(--copper-soft); border-color:transparent; color:var(--copper)}
+/* ---------- toc ---------- */
+nav.toc ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px; font-size:13.5px}
+nav.toc a{display:block; padding:5px 0 5px 12px; border-left:2px solid var(--rule); color:var(--muted); text-decoration:none}
+nav.toc a:hover,nav.toc a:focus-visible{border-left-color:var(--primary); color:var(--ink)}
+@media(max-width:1079px){nav.toc{display:none}}
+/* ---------- sections ---------- */
+section{padding-top:8px; margin-bottom:64px; scroll-margin-top:20px}
+section>h2{font-size:27px; margin-bottom:6px}
+.sec-note{color:var(--muted); font-size:14.5px; margin:0 0 22px; max-width:var(--spine)}
+p,ul,ol{max-width:var(--spine)}
+p{margin:0 0 14px}
+ul,ol{margin:0 0 14px; padding-left:20px}
+li{margin-bottom:6px}
+strong{font-weight:600}
+.divider{height:1px; background:var(--rule); border:0; margin:0 0 28px}
+/* ---------- tables ---------- */
+.tablewrap{overflow-x:auto; margin:0 0 18px; border:1px solid var(--rule); border-radius:10px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:14px}
+th,td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{background:var(--surface-2); font-weight:600; font-size:12.5px; letter-spacing:.03em; color:var(--muted); white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums; white-space:nowrap}
+td code{font-size:12.5px; background:var(--surface-2); padding:1px 5px; border-radius:4px}
+/* ---------- decision cards ---------- */
+.decision{border:1px solid var(--rule); border-radius:14px; background:var(--surface); padding:22px 24px 20px; margin-bottom:20px; box-shadow:var(--shadow)}
+.decision>header{display:flex; gap:14px; align-items:baseline; margin-bottom:4px}
+.dnum{font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--copper); font-weight:500; letter-spacing:.08em; padding-top:4px}
+.decision h3{font-size:19px}
+.dq{color:var(--muted); font-size:14.5px; margin:2px 0 16px}
+.opts{display:grid; gap:10px; margin-bottom:16px}
+@media(min-width:700px){.opts{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}}
+.opt{border:1px solid var(--rule); border-radius:9px; padding:11px 13px; background:var(--paper); display:flex; flex-direction:column; gap:5px}
+.opt .tag{font-size:11px; letter-spacing:.08em; text-transform:uppercase; font-weight:600}
+.opt.picked{border-color:var(--good); background:var(--good-soft)}
+.opt.picked .tag{color:var(--good)}
+.opt.dropped .tag{color:var(--reject)}
+.opt .name{font-weight:600; font-size:14.5px; line-height:1.4}
+.opt .why{font-size:13px; color:var(--muted); line-height:1.55}
+.because{border-left:3px solid var(--primary); background:var(--primary-soft); padding:12px 16px; border-radius:0 8px 8px 0; font-size:14.5px}
+.because b{color:var(--primary)}
+.because p{max-width:none; margin:0}
+.because p+p{margin-top:8px}
+/* ---------- figures ---------- */
+figure{margin:0 0 26px; border:1px solid var(--rule); border-radius:12px; background:var(--surface); padding:20px 20px 14px; overflow-x:auto}
+figure svg{display:block; max-width:100%; height:auto; margin:0 auto; color:var(--ink)}
+figcaption{font-size:13px; color:var(--muted); margin-top:14px; text-align:center; max-width:70ch; margin-left:auto; margin-right:auto}
+/* ---------- charts (손으로 그린 인라인 SVG. 라이브러리·CDN 없음) ---------- */
+.chart{font-family:"IBM Plex Sans KR",-apple-system,"Malgun Gothic",sans-serif}
+.chart text{fill:var(--ink); font-size:12.5px}
+.chart .sub{fill:var(--muted); font-size:11.5px}
+.chart .tiny{fill:var(--muted); font-size:10.5px}
+.chart .val{font-family:"IBM Plex Mono",monospace; font-size:12px; font-variant-numeric:tabular-nums}
+.chart .val-s{font-family:"IBM Plex Mono",monospace; font-size:11px; font-variant-numeric:tabular-nums; fill:var(--muted)}
+.chart .mono{font-family:"IBM Plex Mono",monospace; font-size:11.5px}
+.chart .mono-s{font-family:"IBM Plex Mono",monospace; font-size:10.5px}
+.chart .mono-h{font-family:"IBM Plex Mono",monospace; font-size:13px}
+.chart .note{fill:var(--muted); font-size:11.5px}
+.chart .f-neutral{fill:var(--ink); fill-opacity:.35}
+.chart .ttl{font-size:13px; font-weight:600}
+.chart .t-key{fill:var(--primary)}
+.chart .t-warn{fill:var(--copper)}
+.chart .t-good{fill:var(--good)}
+.chart .t-bad{fill:var(--reject)}
+.chart .f-key{fill:var(--primary)}
+.chart .f-warn{fill:var(--copper)}
+.chart .f-good{fill:var(--good)}
+.chart .f-bad{fill:var(--reject)}
+.chart .f-mute{fill:var(--rule)}
+.chart .f-prev{fill:var(--muted); fill-opacity:.32}
+.chart .axis{stroke:var(--rule); stroke-width:1; fill:none}
+.chart .grid{stroke:var(--rule); stroke-width:1; fill:none; stroke-dasharray:3 4}
+.chart .panel{fill:var(--paper); stroke:var(--rule); stroke-width:1}
+.chart .head{fill:var(--surface-2)}
+.chart .link{stroke:var(--primary); stroke-width:1.7; fill:none}
+.chart .loop{stroke:var(--copper); stroke-width:1.4; fill:none; stroke-dasharray:5 4}
+.chart .ref{stroke:var(--copper); stroke-width:1.2; fill:none; stroke-dasharray:6 4}
+/* ---------- code ---------- */
+pre{background:var(--surface-2); border:1px solid var(--rule); border-radius:10px; padding:14px 16px; overflow-x:auto; font-size:13.5px; line-height:1.65; margin:0 0 14px}
+pre .c{color:var(--muted)}
+pre .k{color:var(--copper)}
+p code,li code{background:var(--surface-2); padding:1px 5px; border-radius:4px; font-size:13.5px}
+/* ---------- steps ---------- */
+.steps{counter-reset:s; list-style:none; padding:0; max-width:var(--spine)}
+.steps>li{counter-increment:s; position:relative; padding-left:42px; margin-bottom:20px}
+.steps>li::before{
+  content:counter(s); position:absolute; left:0; top:1px; width:27px; height:27px; border-radius:50%;
+  background:var(--primary); color:#fff; font-family:"IBM Plex Mono",monospace; font-size:13px;
+  display:grid; place-items:center; font-weight:500;
+}
+:root[data-theme="dark"] .steps>li::before{color:#0E121B}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .steps>li::before{color:#0E121B}}
+.steps h3{font-size:16.5px; margin-bottom:4px; font-family:"IBM Plex Sans KR",sans-serif; font-weight:600}
+.steps p{margin-bottom:8px}
+/* ---------- review flags ---------- */
+.flag{display:grid; grid-template-columns:auto 1fr; gap:0 14px; border:1px solid var(--rule); border-left:4px solid var(--copper); border-radius:0 10px 10px 0; padding:15px 18px; margin-bottom:12px; background:var(--surface)}
+.flag.resolved{border-left-color:var(--good)}
+.flag.blocking{border-left-color:var(--reject)}
+.flag .state{grid-row:1/3; align-self:start; font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; padding:3px 9px; border-radius:5px; background:var(--copper-soft); color:var(--copper); white-space:nowrap; margin-top:3px}
+.flag.resolved .state{background:var(--good-soft); color:var(--good)}
+.flag.blocking .state{background:var(--reject-soft); color:var(--reject)}
+.flag h3{font-size:15.5px; font-family:"IBM Plex Sans KR",sans-serif; font-weight:600; margin-bottom:3px}
+.flag p{font-size:14px; color:var(--muted); margin:0; max-width:none}
+.flag p+p{margin-top:6px}
+.flag .ask{color:var(--ink); font-weight:500}
+/* ---------- misc ---------- */
+.callout{border:1px dashed var(--rule); border-radius:10px; padding:14px 18px; background:var(--surface); font-size:14.5px; margin-bottom:18px}
+.callout p{max-width:none}
+.callout p:last-child{margin-bottom:0}
+.kv{font-size:14px}
+footer.end{border-top:1px solid var(--rule); padding-top:24px; color:var(--muted); font-size:13.5px}
+:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:3px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+
+<a href="anatomy.html" hreflang="en" lang="en" style="position:absolute;top:18px;right:24px;font-size:13px">English</a>
+<div class="wrap">
+<header class="top">
+  <div class="eyebrow">제10회 2026 미래에셋증권 AI Festival · 금융상품 Agent</div>
+  <h1>금융상품 Agent 해부도</h1>
+  <p class="lede">
+    질문을 받아 4종 상품 마스터를 스스로 뒤지고, 근거를 붙여 한국어로 답하는 API를 만들었습니다.
+    이 문서는 <strong>무엇을 만들었는지, 각 갈림길에서 어떤 선택지가 있었고 왜 그걸 골랐는지</strong>,
+    그리고 <strong>직접 돌려보는 방법</strong>을 처음 보는 사람 기준으로 정리한 것입니다.
+  </p>
+  <div class="chips">
+    <span class="chip">LLM <b>HyperCLOVA X</b></span>
+    <span class="chip">상품 <b>53,375</b>건</span>
+    <span class="chip">편입종목 <b>22,599</b>행</span>
+    <span class="chip">색인 문서 <b>75,089</b></span>
+    <span class="chip">지식그래프 <b>약 107만</b> 트리플</span>
+    <span class="chip">벡터 <b>384</b>차원</span>
+    <span class="chip">평가 정답키 <b>54</b>문항</span>
+    <span class="chip warn">54문항 정확도 <b>미측정</b></span>
+  </div>
+</header>
+
+<div class="callout" style="border-style:solid;border-color:var(--copper);background:var(--copper-soft);margin-bottom:34px">
+  <p style="margin-bottom:6px"><strong style="color:var(--copper)">2026-08-24 주최측 공지 반영 완료</strong></p>
+  <p style="max-width:none;font-size:14.5px">
+    ① 답변 생성은 <strong>NCP HyperCLOVA X 필수</strong> → 기본 제공자 교체 ·
+    ② <code>BUYABLE_QUANTITY</code> 무효 → <strong>구매가능 채권 634건 → 21,866건</strong>으로 정의 변경 ·
+    ③ 0·결측은 의도된 값 → 0으로 계산 금지 ·
+    ④ <strong>총 35문항</strong>(상10/중10/하10 + 답변불가 5) ·
+    ⑤ <strong>교차질의</strong> 출제 예고 ·
+    ⑥ 응답 <strong>300초</strong> 초과 시 미응답 처리.
+    아래 내용은 모두 이 공지를 반영한 상태입니다.
+  </p>
+</div>
+
+<div class="layout">
+<nav class="toc" aria-label="목차">
+  <ol>
+    <li><a href="#today">1. 오늘의 진행 상황</a></li>
+    <li><a href="#what">2. 무엇을 만들었나</a></li>
+    <li><a href="#score">3. 채점표와 대응</a></li>
+    <li><a href="#flow">4. 질문 처리 과정</a></li>
+    <li><a href="#routing">5. 저장소와 ERD</a></li>
+    <li><a href="#decisions">6. 갈림길과 선택</a></li>
+    <li><a href="#evidence">7. 측정 기록</a></li>
+    <li><a href="#review">8. 같이 볼 것</a></li>
+    <li><a href="#test">9. 직접 해보기</a></li>
+    <li><a href="#contribute">10. 어디를 고치나</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="today">
+  <h2>1. 오늘의 진행 상황</h2>
+  <p class="sec-note">2026-09-06 기준. 지금 어떤 상태인지, 오늘 무엇이 바뀌었는지, 무엇이 측정됐고 무엇이 아직 열려 있는지.</p>
+  <hr class="divider">
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:0 0 10px">지금 어떤 상태인가</h3>
+  <p>
+    데이터 적재·색인·그래프·API 계약은 <strong>동작하고 있고</strong>, HyperCLOVA X로 실제 문항을 돌려본 기록도 생겼습니다.
+    오늘 한 일은 새 기능을 붙인 것이 아니라 <strong>이미 있던 것들이 조용히 틀려 있던 자리를 찾아 고친 것</strong>입니다.
+    배점 20%(소스·README·온톨로지)와 40%(평가 API)는 형태가 갖춰졌고, 나머지 <strong>40%인 기술제안서는 아직 목차 뼈대</strong>입니다.
+  </p>
+  <p>
+    한 가지를 먼저 분명히 해둡니다. <strong>이 문서에는 정답률 숫자가 없습니다.</strong>
+    오늘 평가 세트를 20문항에서 54문항으로 늘리면서 <em>정답 키 자체의 오류</em>도 함께 고쳤기 때문에,
+    이전에 나온 채점 결과는 더 이상 유효하지 않고 새 세트로는 아직 돌리지 않았습니다. 없는 숫자를 적는 대신 없다고 적습니다.
+  </p>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">오늘 넓어진 것 — 커버리지 네 가지</h3>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 340" role="img" aria-label="오늘의 커버리지 변화 네 가지: 운용사 채움률 74.6%에서 91.2%, 어휘 색인 문서 53375에서 75089, 모델에게 보이는 컬럼 111에서 215, 그래프 술어 종류 5082에서 73">
+      <!-- panel a: 운용사 채움률 -->
+      <rect class="panel" x="10" y="10" width="420" height="155" rx="10"/>
+      <text class="ttl" x="26" y="34">운용사 채움률 <tspan class="sub">· 공모펀드 23,676행</tspan></text>
+      <text class="val t-good" x="414" y="34" text-anchor="end">+16.6%p</text>
+      <text class="sub" x="26" y="63">이전</text>
+      <rect class="f-prev" x="66" y="48" width="186.5" height="22" rx="3"/>
+      <text class="val" x="260.5" y="63">74.6%</text>
+      <text class="sub" x="26" y="99">오늘</text>
+      <rect class="f-key" x="66" y="84" width="228" height="22" rx="3"/>
+      <text class="val" x="302" y="99">91.2%</text>
+      <text class="tiny" x="26" y="133">이름 접두어 추측 17,660행 → 기관코드 유래 3,932행 추가 · 남은 NULL 2,084행</text>
+
+      <!-- panel b: 어휘 색인 문서 -->
+      <rect class="panel" x="450" y="10" width="420" height="155" rx="10"/>
+      <text class="ttl" x="466" y="34">어휘 색인 문서 <tspan class="sub">· BM25 대상</tspan></text>
+      <text class="val t-good" x="854" y="34" text-anchor="end">+21,714</text>
+      <text class="sub" x="466" y="63">이전</text>
+      <rect class="f-prev" x="506" y="48" width="177.7" height="22" rx="3"/>
+      <text class="val" x="691.7" y="63">53,375</text>
+      <text class="sub" x="466" y="99">오늘</text>
+      <rect class="f-key" x="506" y="84" width="250" height="22" rx="3"/>
+      <text class="val" x="764" y="99">75,089</text>
+      <text class="tiny" x="466" y="133">편입종목이 색인 대상에 들어오면서 "무엇을 담고 있는 ETF"로도 찾힙니다</text>
+
+      <!-- panel c: 보이는 컬럼 -->
+      <rect class="panel" x="10" y="180" width="420" height="155" rx="10"/>
+      <text class="ttl" x="26" y="204">모델에게 보이는 컬럼 <tspan class="sub">· 스키마 카드</tspan></text>
+      <text class="val t-good" x="414" y="204" text-anchor="end">+104</text>
+      <text class="sub" x="26" y="233">이전</text>
+      <rect class="f-prev" x="66" y="218" width="129.1" height="22" rx="3"/>
+      <text class="val" x="203.1" y="233">111</text>
+      <text class="sub" x="26" y="269">오늘</text>
+      <rect class="f-key" x="66" y="254" width="250" height="22" rx="3"/>
+      <text class="val" x="324" y="269">215</text>
+      <text class="tiny" x="26" y="303">5개 뷰가 제공하는 컬럼 215개 전부. 104개는 그동안 존재 자체가 안 보였습니다</text>
+
+      <!-- panel d: 그래프 술어 -->
+      <rect class="panel" x="450" y="180" width="420" height="155" rx="10"/>
+      <text class="ttl" x="466" y="204">그래프 술어 종류 <tspan class="sub">· distinct predicate</tspan></text>
+      <text class="val t-good" x="854" y="204" text-anchor="end">&#8722;5,009</text>
+      <text class="sub" x="466" y="233">이전</text>
+      <rect class="f-prev" x="506" y="218" width="250" height="22" rx="3"/>
+      <text class="val" x="764" y="233">5,082</text>
+      <text class="sub" x="466" y="269">오늘</text>
+      <rect class="f-key" x="506" y="254" width="4" height="22" rx="1.5"/>
+      <text class="val" x="518" y="269">73</text>
+      <text class="tiny" x="466" y="303">여기서는 줄어든 쪽이 개선입니다 — 편입비중이 술어에서 컬럼으로 바뀌었습니다</text>
+    </svg>
+    <figcaption>네 칸 모두 오늘 하루의 변화입니다. 왼쪽 위 두 칸은 "데이터가 더 채워졌다", 아래 두 칸은 "모델이 볼 수 있는 형태가 됐다"에 해당합니다. 마지막 칸만 방향이 반대인데, 편입비중을 <code>weight_&lt;기업명&gt;</code>이라는 술어 5천 개로 흩어 놓았던 것을 컬럼 하나로 접었기 때문입니다.</figcaption>
+  </figure>
+
+  <p>
+    한 줄로 요약하면 <strong>편입종목이 지식그래프 안에만 있던 상태에서 SQLite 테이블로 내려왔습니다</strong>
+    (<code>etf_constituent</code> 22,599행 · 국내 ETF 1,162종). 그래프는 이제 그 테이블<em>에서</em> 만들어집니다.
+    같은 원천을 쓰니 SQL과 그래프가 어긋날 수 없고, 실제로 어긋나지 않는지 다섯 기업으로 대조했습니다:
+    삼성전자 229/229 · 삼성전자우 19/19 · 에코프로비엠 42/42 · LG 26/26 · KT 48/48.
+  </p>
+  <p>
+    함께, 원천(네이버금융)이 편입종목마다 주는 <code>itemCode</code>를 수집기가 버리고 있었습니다. 이름만 남으니 신원이 이름 하나에 걸려 있었죠.
+    되살려서 지금 <strong>79%</strong>의 행이 종목코드를 가지고 있습니다.
+    운용사도 마찬가지입니다. 펀드 이름 접두어에서 추측하던 것을, 주최측이 <strong>100% 채워서 주는</strong>
+    <code>or_co_xtn_itt_cd</code>(운용사 기관코드)에서 유도하도록 바꿨습니다. 어느 쪽으로 채웠는지는
+    새 컬럼 <code>manager_source</code>에 남겨 두었습니다(name 17,660 / code 3,932 / NULL 2,084).
+  </p>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">오늘 고친 버그 11개</h3>
+  <ol>
+    <li>스토어를 다시 빌드해도 <strong>벡터 캐시가 옛 행렬을 그대로 받아들였습니다.</strong> 그 결과 <code>search_products</code> 호출이 전부 행렬 차원 불일치로 죽었습니다.</li>
+    <li><code>KG.find</code>가 <strong>별칭 개수만큼 같은 노드를 중복 반환</strong>해 모든 관계 수가 정확히 두 배가 됐습니다(삼성전자 편입 ETF 238→476, 에코프로비엠 42→84). 평가 정답 키도 <em>같은 코드로</em> 계산했기 때문에, 두 배인 숫자가 정답으로 채점되고 있었습니다.</li>
+    <li><code>graph_neighbors</code>가 이웃을 60개에서 자른 뒤, <strong>그 상한값을 전체 개수라고 보고</strong>했습니다.</li>
+    <li>편입종목 <strong>677행이 엉뚱한 기업에 붙어</strong> 있었습니다(LG→신한금융지주, KT→SK텔레콤, 하나마이크론→Micron). 원인은 사용자가 입력한 말을 해석하려고 만든 <em>관대한</em> 별칭 매처를 15,911행 적재에 그대로 쓴 것입니다. <code>"lg"</code>는 <code>"shinhanfinancialgroup"</code>의 부분 문자열입니다.</li>
+    <li>속성의 <code>domain</code>이 <strong>테이블의 일부만 덮는 클래스</strong>를 가리키고 있었습니다. 아직 증상이 없는 잠복형이지만, 그 속성을 물질화하는 순간 국내ETN 545건이 ETF로 분류됐을 것입니다.</li>
+    <li><code>sql_query</code>가 <strong>200행 상한을 전체 건수로 보고</strong>했습니다. 15,837건이 맞는 필터에 "총 200건"이라고 답했습니다.</li>
+    <li>모델이 <strong>도구가 돌려준 숫자를 옮겨 적다 틀렸습니다.</strong> 240을 "24개"로, 25,474,813,891,225를 한 번은 "254조 4,818십억", 다음 실행에서는 "25조 4,748십억"으로 적었습니다.</li>
+    <li><code>_unit_warning</code>이 <code>COUNT(*)</code> + <code>GROUP BY</code> 조합에서 예외를 냈습니다. 하필 <strong>프롬프트가 예시로 가르치는 "펀드 패밀리 요약" 패턴</strong>이 정확히 그 모양입니다.</li>
+    <li><code>has_buy_yield</code>가 프롬프트의 컬럼 목록에는 적혀 있는데 <strong>온톨로지 정의가 없어</strong> 스키마 카드에 한 번도 등장하지 않았습니다. 모델은 그런 컬럼이 있다는 사실을 몰랐습니다.</li>
+    <li>평가 세트 자체에도 오류가 있었습니다. G-006의 정답 키가 <em>ETF</em>를 묻는 문항에서 ETN을 세고 있었고, 채점기가 <em>"…상품은 없습니다"</em>를 거절로 인식하지 못했고, G-007은 총보수 0.01%에서 <strong>4개가 동률</strong>인데 한 답만 정답으로 고정돼 있었고, <code>check:"number"</code>가 반올림 정수를 허용해 <strong>정답이 0.65인 문항이 "1"만 들어 있으면 통과</strong>했습니다.</li>
+    <li>pandas <code>Series.map</code>이 <code>None</code>을 돌려주면 <code>NaN</code>이 되는데 <code>NaN</code>은 참입니다. 그래서 채움 단계가 <strong>아무 일도 하지 않고 성공을 보고</strong>했습니다. 예외 없음, 로그 없음, 테스트 통과.</li>
+  </ol>
+
+  <div class="callout" style="border-style:solid;border-color:var(--copper);background:var(--copper-soft)">
+    <p style="margin-bottom:6px"><strong style="color:var(--copper)">여기서 하나만 가져간다면 이것입니다</strong></p>
+    <p style="max-width:none">
+      위 열한 개는 <strong>전부 실패처럼 보이지 않게 실패했습니다.</strong> 예외도, 빨간 테스트도, 로그에 남은 에러도 없었습니다.
+      두 배로 부풀려진 관계 수는 <em>같은 코드로 만든 정답 키</em>가 정답이라고 확인해 줬고, 아무 일도 하지 않은 채움 단계는 성공을 보고했고,
+      상한에 잘린 개수는 총계라는 이름을 달고 나왔습니다.
+    </p>
+    <p style="max-width:none">
+      그래서 이것들은 <strong>코드를 돌려서 찾은 것이 아니라, 바꾼 뒤에 결과를 다시 세어 보다가 찾았습니다.</strong>
+      "테스트가 통과한다"와 "숫자가 맞다"는 이 프로젝트에서 서로 다른 이야기입니다. 무언가를 고친 뒤에는
+      <strong>같은 답을 다른 경로로 한 번 더 세어 보세요</strong> — SQL로 나온 값을 그래프로, 그래프로 나온 값을 SQL로.
+    </p>
+  </div>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">측정된 것과 아직 가정인 것</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>항목</th><th>상태</th><th>값 / 근거</th></tr></thead>
+      <tbody>
+        <tr><td>저장소 규모 · 뷰 5개 · 컬럼 215개</td><td style="color:var(--good)">측정됨</td><td>오늘 DB에서 재확인</td></tr>
+        <tr><td>SQL 결과와 그래프 결과의 일치</td><td style="color:var(--good)">측정됨</td><td>삼성전자 229/229 · 삼성전자우 19/19 · 에코프로비엠 42/42 · LG 26/26 · KT 48/48</td></tr>
+        <tr><td>운용사 채움률</td><td style="color:var(--good)">측정됨</td><td class="num">21,592 / 23,676 = 91.2%</td></tr>
+        <tr><td>프롬프트 크기와 지연시간의 관계</td><td style="color:var(--good)">측정됨</td><td>무관 — 7절 그래프</td></tr>
+        <tr><td>도구 사용 분포</td><td style="color:var(--good)">측정됨</td><td>22문항 · 46회 호출 · 미호출 도구 5개 — 7절</td></tr>
+        <tr><td>라운드 1회 추가 비용</td><td style="color:var(--good)">측정됨</td><td>1→2 +11.2초 · 2→3 +1.8초 · 3→4 +3.7초</td></tr>
+        <tr><td><strong>54문항 정확도</strong></td><td style="color:var(--reject)"><strong>미측정</strong></td><td>정답 키를 오늘 고쳤고 새 세트로 아직 돌리지 않았습니다</td></tr>
+        <tr><td>컨테이너 기동 시간</td><td style="color:var(--copper)">재측정 필요</td><td>편입종목 테이블 추가·그래프 재구축 이후의 값이 없습니다</td></tr>
+        <tr><td>답변 문장의 품질·근거 표기</td><td style="color:var(--copper)">사람이 읽어야 함</td><td>자동 채점으로는 7번 같은 오기(240→"24개")를 못 잡습니다</td></tr>
+        <tr><td>HyperCLOVA X의 도구 호출 안정성</td><td style="color:var(--copper)">부분 측정</td><td>22문항 실행 기록 있음 · 54문항 미실행</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">결정되어 닫힌 것</h3>
+  <ul>
+    <li><strong>HyperCLOVA X는 필수입니다.</strong> 그리고 CLOVA Studio는 <em>튜닝과 function calling을 동시에 쓸 수 없습니다.</em> 이 에이전트는 통째로 function calling 루프이므로 <strong>에이전트 자체는 튜닝할 수 없습니다.</strong> 도구 없이 text→text로 끝나는 구간용 학습 데이터 4,779행을 만들어 두긴 했지만 적용하지 않았습니다.</li>
+    <li><strong>편입종목의 신원은 원천이 준 종목코드에서만</strong> 옵니다. 이름 유사도로 잇지 않습니다 — 위 4번이 그렇게 해서 생긴 일입니다.</li>
+    <li><strong><code>subsidiaryOf</code>는 넓히지 않습니다.</strong> 주최측 4종 마스터에는 소유 관계가 <em>아예 없고</em>, 이 프로젝트의 규칙은 제공된 데이터에서 계산하는 것입니다. 그래서 <strong>엣지 4개</strong>에 머물러 있고, 문서도 그 이상을 암시하지 않도록 고쳤습니다.</li>
+    <li><strong>운용사 개명 대응표를 외부에서 만들지 않습니다.</strong> 펀드 설정일이 없으면 두 이름 중 어느 쪽이 현재 이름인지 판정할 방법이 없습니다. 그래서 기관코드에 딸린 <em>다수 표기</em>를 씁니다 — 그것이 옛 브랜드명이더라도.</li>
+    <li><strong>"펀드 몇 개"는 <code>fund_family</code> 기준 고유 펀드 수</strong>입니다. 클래스 행 수가 아닙니다(23,676행 = 17,795 펀드).</li>
+    <li><strong>제공 컬럼은 고르지 않고 전부 노출합니다.</strong> 이유는 단순합니다 — 모델이 <code>table_info</code>를 한 번도 부르지 않기 때문입니다(7절 도구 사용 그래프).</li>
+  </ul>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">아직 열려 있는 것</h3>
+  <div class="flag blocking">
+    <span class="state">40% 배점</span>
+    <h3>기술제안서가 아직 목차 뼈대입니다</h3>
+    <p>배점의 40%가 기술제안서인데 <code>docs/proposal_outline.md</code>는 아직 각 절의 뼈대와 다이어그램뿐입니다. 오늘 결측치 처리(운용사 복구)를 예시로 채워 넣었지만, 제출용 PDF 본문은 없습니다.</p>
+  </div>
+  <div class="flag blocking">
+    <span class="state">미측정</span>
+    <h3>54문항 정답 키로 아직 채점하지 않았습니다</h3>
+    <p>정답 키를 20문항 → 54문항으로 늘리면서 키 자체의 오류(위 10번)도 고쳤습니다. 이전 채점 결과는 그래서 폐기했고, 새 세트로는 아직 돌리지 않았습니다.</p>
+    <p class="ask">→ 서버를 띄운 뒤 <code>scripts/eval_truth.py --base http://127.0.0.1:8000</code>. 9절 마지막 단계입니다.</p>
+  </div>
+  <div class="flag">
+    <span class="state">제출 준비</span>
+    <h3>저장소에 원격(remote)이 아직 없습니다</h3>
+    <p><code>git remote -v</code>가 비어 있습니다. 제출은 저장소 URL로 이뤄지므로, 코드 동결 전에 원격을 붙이고 푸시해야 합니다. 올릴 때는 <code>fin-agent/</code> 폴더가 아니라 <strong>그 안의 내용물</strong>이 루트가 되어야 합니다(8절 마지막 항목).</p>
+  </div>
+</section>
+
+<section id="what">
+  <h2>2. 무엇을 만들었나</h2>
+  <p class="sec-note">한 문장: 주소창에 질문을 넣으면 JSON으로 답이 나오는 서버.</p>
+  <hr class="divider">
+  <p>
+    평가자는 우리 서버에 이렇게 물어봅니다. 인증도 없고 POST도 없습니다. 주소만 있으면 됩니다.
+  </p>
+  <pre><span class="c"># 평가자가 보내는 것</span>
+GET /answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘</pre>
+  <p>우리 서버는 <strong>항상 200 OK</strong>와 함께 정확히 5개 필드를 돌려줍니다. 오류가 나도 500을 내지 않습니다.</p>
+  <pre>{
+  <span class="k">"question_id"</span>: "Q-001",
+  <span class="k">"question"</span>:    "…요청 그대로…",
+  <span class="k">"retrieved_context"</span>: "[근거 1] 국내채권마스터(v_bond_kr) · 기준일 2026-08-21 · 15,837건 …",
+  <span class="k">"think_trace"</span>:      "1. 사전분석 … 2. 라운드 1: sql_query … 3. final_answer",
+  <span class="k">"answer"</span>:           "구매 가능한 AA- 이상 원화채권은 15,837건입니다 …"
+}</pre>
+  <p>
+    핵심은 <strong>answer 옆에 반드시 근거가 붙는다</strong>는 것입니다. 어느 테이블의 며칠자 데이터를 몇 건 봤고,
+    어떤 SQL을 실행했고, 어떤 상품코드를 참조했는지가 <code>retrieved_context</code>에 그대로 남습니다.
+    데이터로 확인이 안 되면 지어내지 않고 <strong>"제공된 데이터로는 확인할 수 없습니다"</strong>라고 답합니다.
+  </p>
+  <div class="callout">
+    <p><strong>왜 그게 중요한가</strong> — 대회 평가 35문항 중 5문항은 <em>답할 수 없는 질문</em>입니다.
+    거기에 그럴듯한 답을 만들어내면 <strong>감점</strong>이고, "확인할 수 없음"이라고 해야 정답 처리됩니다.
+    즉 이 시스템에서 "모른다고 말하는 능력"은 부가 기능이 아니라 채점 항목입니다.</p>
+  </div>
+</section>
+
+<section id="score">
+  <h2>3. 대회 채점표와 우리 대응</h2>
+  <p class="sec-note">배점이 설계를 결정했습니다. 제안서와 API 답변이 각각 40%입니다.</p>
+  <hr class="divider">
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th class="num">배점</th><th>항목</th><th>지금 상태</th></tr></thead>
+      <tbody>
+        <tr><td class="num">20%</td><td>소스코드 + 개발환경 + README + 도메인별 <code>Ontology.ttl</code></td><td>완료 — <code>src/</code>, <code>requirements.txt</code>, README, TTL 6종</td></tr>
+        <tr><td class="num">40%</td><td>기술제안서 (문제정의·제안방법·구성도·기대효과)</td><td><strong>미작성</strong> — 뼈대만 있음 (<code>docs/proposal_outline.md</code>)</td></tr>
+        <tr><td class="num">40%</td><td>평가용 API 답변 정확성 · 근거 표시 · 응답 시간<br><span class="kv" style="color:var(--muted)">총 35문항 = 상10 / 중10 / 하10 + 답변불가 5</span></td><td>구현 완료, <strong>HyperCLOVA X로는 미검증</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>과제설명서가 요구한 <strong>Agent 필수 구성요소 4가지</strong>에 대한 대응입니다.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>과제가 요구한 것</th><th>우리가 만든 것</th></tr></thead>
+      <tbody>
+        <tr><td>① 정형·비정형 분석/정제 + 상품 도메인 온톨로지<br><span class="kv" style="color:var(--muted)">[Parsing] pdf·ppt → Markdown</span></td><td>엑셀 4종 → SQLite 파이프라인(뷰 5개), <code>scripts/parse_docs.py</code>(PDF→Markdown), TTL 6종</td></tr>
+        <tr><td>② 금융상품 KnowledgeBase<br><strong>RDB + Vector + Graph</strong></td><td>SQLite(5뷰 · 215컬럼) + 벡터·어휘 색인(75,089문서) + 지식그래프(약 107만 트리플)<br><span class="kv" style="color:var(--copper)">※ Vector는 처음에 빠져 있었고, 과제설명서를 다시 읽고 추가했습니다</span></td></tr>
+        <tr><td>③ Intent Analysis &amp; Retrieval Engine<br><span class="kv" style="color:var(--muted)">[NL2SQL] [Retrieval]</span></td><td>LLM 호출 전 사전분석 → LLM이 SQL·그래프·검색을 필요한 만큼 호출</td></tr>
+        <tr><td>④ Answer Generator (근거기반·환각방지)</td><td>답변 상태 3종 강제 + 근거 블록 + 확인불가/역질문 규칙</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="flow">
+  <h2>4. 질문 하나가 처리되는 과정</h2>
+  <p class="sec-note">LLM은 답을 "아는" 게 아니라, 도구를 써서 "찾아옵니다".</p>
+  <hr class="divider">
+  <figure>
+    <svg viewBox="0 0 900 250" role="img" aria-label="질문이 사전분석을 거쳐 LLM 도구 호출 루프를 돌고 final_answer로 종료되어 5필드 JSON이 되는 흐름">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="arc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--copper)"/>
+        </marker>
+      </defs>
+      <g font-family="IBM Plex Sans KR, sans-serif" font-size="12.5">
+        <rect x="8" y="62" width="120" height="62" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="68" y="88" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">질문 도착</text>
+        <text x="68" y="107" text-anchor="middle" fill="currentColor" opacity=".65">GET /answer</text>
+
+        <rect x="172" y="52" width="152" height="82" rx="8" fill="none" stroke="var(--copper)" stroke-width="1.6"/>
+        <text x="248" y="78" text-anchor="middle" font-size="13" font-weight="600" fill="var(--copper)">사전 분석</text>
+        <text x="248" y="97" text-anchor="middle" fill="currentColor" opacity=".75">상품명·기업·테마 해석</text>
+        <text x="248" y="114" text-anchor="middle" fill="currentColor" opacity=".75">허용값 검증 (LLM 없음)</text>
+
+        <rect x="368" y="52" width="140" height="82" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="438" y="82" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">LLM</text>
+        <text x="438" y="102" text-anchor="middle" fill="currentColor" opacity=".7">무엇을 찾을지</text>
+        <text x="438" y="118" text-anchor="middle" fill="currentColor" opacity=".7">계획하고 호출</text>
+
+        <rect x="552" y="52" width="140" height="82" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="622" y="82" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">도구 실행</text>
+        <text x="622" y="102" text-anchor="middle" fill="currentColor" opacity=".7">SQL · 그래프 · 검색</text>
+        <text x="622" y="118" text-anchor="middle" fill="currentColor" opacity=".7">(동시에 여러 개)</text>
+
+        <rect x="736" y="62" width="150" height="62" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="811" y="88" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">final_answer</text>
+        <text x="811" y="107" text-anchor="middle" fill="currentColor" opacity=".65">JSON 5필드</text>
+
+        <line x1="128" y1="93" x2="166" y2="93" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+        <line x1="324" y1="93" x2="362" y2="93" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+        <line x1="508" y1="93" x2="546" y2="93" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+        <line x1="692" y1="93" x2="730" y2="93" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar)"/>
+
+        <path d="M 622 134 L 622 176 L 438 176 L 438 138" fill="none" stroke="var(--copper)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arc)"/>
+        <text x="530" y="196" text-anchor="middle" font-size="12" fill="var(--copper)">결과를 보고 다시 계획 — 최대 8라운드 · 120초 예산</text>
+
+        <text x="248" y="36" text-anchor="middle" font-size="11.5" fill="var(--copper)" opacity=".9">여기서 "확인 불가"가 먼저 걸러집니다</text>
+        <text x="800" y="145" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".6">answered / cannot_confirm / clarify</text>
+      </g>
+    </svg>
+    <figcaption>사전 분석은 LLM을 부르기 전에 실행됩니다. 존재하지 않는 값("신용등급 AAAA")이나 존재하지 않는 상품은 여기서 잡히므로, LLM이 헛돌지 않고 응답 시간도 줄어듭니다.</figcaption>
+  </figure>
+
+  <ol class="steps">
+    <li>
+      <h3>사전 분석 — LLM을 부르기 전에</h3>
+      <p>질문에서 상품명처럼 보이는 부분을 뽑아 실제 상품과 대조하고, 기업·테마·운용사 사전을 매칭하고,
+      "AA-", "위험등급 2등급" 같은 값이 <em>실제로 존재하는 값인지</em> 온톨로지에 물어봅니다.</p>
+      <pre><span class="c"># "신용등급 AAAA인 채권 찾아줘" → LLM 호출 전에 이미 결론이 나옵니다</span>
+⚠ 온톨로지 위반: 신용등급 'AAAA'는 존재하지 않는 값입니다.
+   유효한 신용등급: AAA, AA+, AA0, AA-, A+, … D</pre>
+    </li>
+    <li>
+      <h3>LLM이 계획을 세웁니다</h3>
+      <p>질문과 사전분석 결과를 받은 LLM이 "이건 SQL로 풀 문제", "이건 그래프를 타야 함"을 판단하고 도구를 호출합니다.
+      우리가 SQL을 미리 짜두는 게 아니라 <strong>LLM이 그 자리에서 작성</strong>합니다.</p>
+    </li>
+    <li>
+      <h3>도구가 실행되고 근거가 기록됩니다</h3>
+      <p>여러 도구를 동시에 실행합니다. 각 결과에는 <strong>어느 테이블·며칠자·몇 건·무슨 쿼리</strong>였는지가 자동으로 붙어
+      최종 <code>retrieved_context</code>가 됩니다. 사람이 답을 검증할 수 있게 하는 부분입니다.</p>
+    </li>
+    <li>
+      <h3>2~3을 반복합니다 (최대 8라운드, 120초)</h3>
+      <p>결과가 부족하면 조건을 바꿔 다시 찾습니다. 120초 예산이 임박하면 서버가 "지금까지 확보한 근거로 즉시 답하라"고 지시합니다.
+      주최측 기준이 300초 초과 시 미응답 처리라서, 그보다 넉넉히 앞서 끝나게 잡았습니다. 다만 22문항 중 17문항은
+      <strong>제출 전에 도구 없이 산문만 쓰는 라운드를 한 번 낭비합니다</strong>(7절).</p>
+    </li>
+    <li>
+      <h3>답변을 3가지 상태 중 하나로 제출합니다</h3>
+      <p><code>answered</code>(근거 있음) · <code>cannot_confirm</code>(데이터로 확인 불가) · <code>clarify</code>(조건이 모호해 되물음).
+      LLM이 규칙을 어기면 서버가 마지막에 교정합니다.</p>
+    </li>
+  </ol>
+</section>
+
+<section id="routing">
+  <h2>5. 저장소 구성과 ERD</h2>
+  <p class="sec-note">같은 데이터를 다섯 가지 방식으로 색인해 둔 이유, 그리고 관계형 스토어가 실제로 어떤 모양인지.</p>
+  <hr class="divider">
+  <figure>
+    <svg viewBox="0 0 880 330" role="img" aria-label="질문 유형에 따라 RDB, 지식그래프, 어휘색인, 벡터색인, 외부문서로 각각 라우팅되는 구조">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+      </defs>
+      <g font-family="IBM Plex Sans KR, sans-serif" font-size="12.5">
+        <rect x="8" y="128" width="132" height="70" rx="8" fill="none" stroke="var(--copper)" stroke-width="1.6"/>
+        <text x="74" y="157" text-anchor="middle" font-size="13" font-weight="600" fill="var(--copper)">질문</text>
+        <text x="74" y="176" text-anchor="middle" fill="currentColor" opacity=".7">+ 사전분석</text>
+
+        <rect x="470" y="14" width="400" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="488" y="35" font-size="13" font-weight="600" fill="currentColor">RDB · SQLite</text>
+        <text x="488" y="52" fill="currentColor" opacity=".65">5개 뷰 · 상품 53,375행 + 편입 22,599행 — 필터·정렬·집계</text>
+
+        <rect x="470" y="76" width="400" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="488" y="97" font-size="13" font-weight="600" fill="currentColor">지식그래프 · RDF</text>
+        <text x="488" y="114" fill="currentColor" opacity=".65">약 107만 트리플 · 술어 73종 — 편입종목·테마·운용사</text>
+
+        <rect x="470" y="138" width="400" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="488" y="159" font-size="13" font-weight="600" fill="currentColor">어휘 색인 · BM25</text>
+        <text x="488" y="176" fill="currentColor" opacity=".65">이름·표기 그대로 매칭</text>
+
+        <rect x="470" y="200" width="400" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="488" y="221" font-size="13" font-weight="600" fill="currentColor">벡터 색인 · 384차원</text>
+        <text x="488" y="238" fill="currentColor" opacity=".65">표현이 달라도 의미가 가까운 상품</text>
+
+        <rect x="470" y="262" width="400" height="46" rx="7" fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <text x="488" y="283" font-size="13" font-weight="600" fill="currentColor">외부 문서 · Markdown</text>
+        <text x="488" y="300" fill="currentColor" opacity=".65">용어·위험요인 등 배경 설명</text>
+
+        <path d="M 140 155 C 300 155, 320 37, 464 37" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+        <path d="M 140 158 C 300 158, 320 99, 464 99" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+        <path d="M 140 163 L 464 161" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+        <path d="M 140 168 C 300 168, 320 223, 464 223" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+        <path d="M 140 171 C 300 171, 320 285, 464 285" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ar2)"/>
+
+        <text x="300" y="72" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".8">"AA- 이상", "순자산 상위 5개"</text>
+        <text x="300" y="120" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".8">"에코프로 자회사를 편입한 ETF"</text>
+        <text x="300" y="152" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".8">"KODEX 로봇액티브"</text>
+        <text x="300" y="205" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".8">"커버드콜 분배금 높은 상품"</text>
+        <text x="300" y="268" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".8">"커버드콜이 뭔가요"</text>
+      </g>
+    </svg>
+    <figcaption>화살표 위 문구는 각 경로로 가는 실제 질문 유형입니다. 하나의 질문이 여러 경로를 동시에 타는 경우가 대부분이고, 난이도 '상' 문항은 거의 항상 그렇습니다.</figcaption>
+  </figure>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">관계형 스토어의 모양 — 뷰 5개</h3>
+  <p>
+    편입종목이 오늘 SQLite로 내려오면서 이 스토어에 <strong>처음으로 진짜 외래키가 하나 생겼습니다.</strong>
+    나머지 네 뷰는 서로 조인되지 않습니다 — 상품군이 다르면 공통 키가 없기 때문이고, 그래서 교차질의는
+    조인이 아니라 <code>UNION ALL</code>로 풉니다.
+  </p>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 660" role="img" aria-label="다섯 개 뷰의 ERD. v_etf_kr의 pd_itm_no와 v_etf_constituent의 etf_itm_no가 1대다로 연결되고, v_fund_pub는 fund_family로, v_bond_kr은 pd_no와 info_seq로 같은 뷰 안에서 여러 행을 갖는다">
+      <!-- legend -->
+      <line class="link" x1="16" y1="22" x2="46" y2="22"/>
+      <text class="tiny" x="54" y="26">실제 외래키 (조인 가능)</text>
+      <line class="loop" x1="210" y1="22" x2="240" y2="22"/>
+      <text class="tiny" x="248" y="26">같은 뷰 안에서 한 대상이 여러 행</text>
+
+      <!-- A. v_etf_kr -->
+      <rect class="panel" x="16" y="44" width="340" height="176" rx="9"/>
+      <path class="head" d="M 25 44 H 347 A 9 9 0 0 1 356 53 V 74 H 16 V 53 A 9 9 0 0 1 25 44 Z"/>
+      <line class="axis" x1="16" y1="74" x2="356" y2="74"/>
+      <text class="mono-h t-key" x="30" y="64">v_etf_kr</text>
+      <text class="val-s" x="342" y="64" text-anchor="end">1,780행</text>
+      <text class="mono" x="30" y="94">pd_itm_no</text><text class="tiny" x="156" y="94">PK · 종목번호</text>
+      <text class="mono" x="30" y="113">pd_ticker</text><text class="tiny" x="156" y="113">티커</text>
+      <text class="mono" x="30" y="132">pd_nm</text><text class="tiny" x="156" y="132">상품명</text>
+      <text class="mono" x="30" y="151">product_type</text><text class="tiny" x="156" y="151">국내ETF 1,235 / ETN 545</text>
+      <text class="mono" x="30" y="170">manager_name</text><text class="tiny" x="156" y="170">운용사</text>
+      <text class="mono" x="30" y="189">pd_net_tamt</text><text class="tiny" x="156" y="189">순자산 총액</text>
+      <text class="mono" x="30" y="208">risk_grade</text><text class="tiny" x="156" y="208">위험등급</text>
+
+      <!-- B. v_etf_constituent -->
+      <rect class="panel" x="524" y="44" width="340" height="176" rx="9"/>
+      <path class="head" d="M 533 44 H 855 A 9 9 0 0 1 864 53 V 74 H 524 V 53 A 9 9 0 0 1 533 44 Z"/>
+      <line class="axis" x1="524" y1="74" x2="864" y2="74"/>
+      <text class="mono-h t-key" x="538" y="64">v_etf_constituent</text>
+      <text class="val-s t-warn" x="850" y="64" text-anchor="end">22,599행 · 신규</text>
+      <text class="mono" x="538" y="94">etf_itm_no</text><text class="tiny t-key" x="664" y="94">FK &#8594; v_etf_kr.pd_itm_no</text>
+      <text class="mono" x="538" y="113">etf_ticker</text><text class="tiny" x="664" y="113">티커</text>
+      <text class="mono" x="538" y="132">company_code</text><text class="tiny" x="664" y="132">종목코드 · 79% 채움</text>
+      <text class="mono" x="538" y="151">company_name</text><text class="tiny" x="664" y="151">편입 종목명</text>
+      <text class="mono" x="538" y="170">weight_pct</text><text class="tiny" x="664" y="170">편입 비중 %</text>
+      <text class="mono" x="538" y="189">is_cash</text><text class="tiny" x="664" y="189">현금성 여부</text>
+      <text class="mono" x="538" y="208">as_of</text><text class="tiny" x="664" y="208">2026-09-05 기준</text>
+
+      <!-- A—B relationship -->
+      <line class="link" x1="366" y1="89" x2="508" y2="89"/>
+      <line class="link" x1="366" y1="81" x2="366" y2="97"/>
+      <line class="link" x1="508" y1="89" x2="524" y2="79"/>
+      <line class="link" x1="508" y1="89" x2="524" y2="89"/>
+      <line class="link" x1="508" y1="89" x2="524" y2="99"/>
+      <text class="tiny t-key" x="440" y="72" text-anchor="middle">1 : N</text>
+      <text class="mono-s" x="440" y="116" text-anchor="middle">pd_itm_no = etf_itm_no</text>
+      <text class="tiny" x="440" y="132" text-anchor="middle">1,162 ETF · 22,599행</text>
+
+      <!-- C. v_etf_gl -->
+      <rect class="panel" x="16" y="262" width="340" height="157" rx="9"/>
+      <path class="head" d="M 25 262 H 347 A 9 9 0 0 1 356 271 V 292 H 16 V 271 A 9 9 0 0 1 25 262 Z"/>
+      <line class="axis" x1="16" y1="292" x2="356" y2="292"/>
+      <text class="mono-h t-key" x="30" y="282">v_etf_gl</text>
+      <text class="val-s" x="342" y="282" text-anchor="end">6,037행</text>
+      <text class="mono" x="30" y="312">pd_itm_no</text><text class="tiny" x="156" y="312">PK · 종목번호</text>
+      <text class="mono" x="30" y="331">ticker</text><text class="tiny" x="156" y="331">티커</text>
+      <text class="mono" x="30" y="350">product_type</text><text class="tiny" x="156" y="350">해외ETF 5,972 / ETN 65</text>
+      <text class="mono" x="30" y="369">manager_name</text><text class="tiny" x="156" y="369">운용사</text>
+      <text class="mono" x="30" y="388">expense_ratio_pct</text><text class="tiny" x="156" y="388">총보수 %</text>
+      <text class="mono" x="30" y="407">du_last_aum</text><text class="tiny" x="156" y="407">순자산(AUM)</text>
+
+      <!-- D. v_fund_pub -->
+      <rect class="panel" x="524" y="262" width="340" height="176" rx="9"/>
+      <path class="head" d="M 533 262 H 855 A 9 9 0 0 1 864 271 V 292 H 524 V 271 A 9 9 0 0 1 533 262 Z"/>
+      <line class="axis" x1="524" y1="292" x2="864" y2="292"/>
+      <text class="mono-h t-key" x="538" y="282">v_fund_pub</text>
+      <text class="val-s" x="850" y="282" text-anchor="end">23,676행</text>
+      <text class="mono" x="538" y="312">itm_no</text><text class="tiny" x="664" y="312">PK · 클래스 종목번호</text>
+      <text class="mono" x="538" y="331">fund_family</text><text class="tiny t-warn" x="664" y="331">패밀리 키 · 17,795개</text>
+      <text class="mono" x="538" y="350">manager_name</text><text class="tiny" x="664" y="350">운용사 · 91.2% 채움</text>
+      <text class="mono" x="538" y="369">manager_source</text><text class="tiny" x="664" y="369">채움 출처 3값</text>
+      <text class="mono" x="538" y="388">or_co_xtn_itt_cd</text><text class="tiny" x="664" y="388">기관코드 · 100% 제공</text>
+      <text class="mono" x="538" y="407">product_type</text><text class="tiny" x="664" y="407">공모 14,716 / 사모 8,960</text>
+      <text class="mono" x="538" y="426">fd_yr1_ern_r</text><text class="tiny" x="664" y="426">1년 수익률</text>
+
+      <!-- D self grouping -->
+      <text class="mono-s" x="440" y="294" text-anchor="middle">fund_family</text>
+      <text class="tiny" x="440" y="309" text-anchor="middle">23,676행 &#8594; 17,795 펀드</text>
+      <path class="loop" d="M 524 324 C 474 324, 474 372, 524 372"/>
+
+      <!-- E. v_bond_kr -->
+      <rect class="panel" x="16" y="460" width="340" height="176" rx="9"/>
+      <path class="head" d="M 25 460 H 347 A 9 9 0 0 1 356 469 V 490 H 16 V 469 A 9 9 0 0 1 25 460 Z"/>
+      <line class="axis" x1="16" y1="490" x2="356" y2="490"/>
+      <text class="mono-h t-key" x="30" y="480">v_bond_kr</text>
+      <text class="val-s" x="342" y="480" text-anchor="end">21,882행</text>
+      <text class="mono" x="30" y="510">pd_no</text><text class="tiny" x="156" y="510">종목번호 (단독 PK 아님)</text>
+      <text class="mono" x="30" y="529">info_seq</text><text class="tiny" x="156" y="529">장외 LOT 일련번호</text>
+      <text class="mono" x="30" y="548">pd_nm</text><text class="tiny" x="156" y="548">상품명</text>
+      <text class="mono" x="30" y="567">pd_exg_mkt</text><text class="tiny" x="156" y="567">장내 17,746 / 장외 4,136</text>
+      <text class="mono" x="30" y="586">crd_grd</text><text class="tiny" x="156" y="586">신용등급 AAA~D</text>
+      <text class="mono" x="30" y="605">is_sellable</text><text class="tiny" x="156" y="605">구매가능 21,866행</text>
+      <text class="mono" x="30" y="624">has_buy_yield</text><text class="tiny" x="156" y="624">매수수익률 수록 634행</text>
+
+      <!-- E self grouping -->
+      <text class="mono-s" x="440" y="492" text-anchor="middle">pd_no + info_seq</text>
+      <text class="tiny" x="440" y="507" text-anchor="middle">21,882행 &#8594; 20,497 종목</text>
+      <path class="loop" d="M 356 522 C 406 522, 406 570, 356 570"/>
+
+      <!-- N. notes -->
+      <rect class="panel" x="524" y="460" width="340" height="176" rx="9"/>
+      <path class="head" d="M 533 460 H 855 A 9 9 0 0 1 864 469 V 490 H 524 V 469 A 9 9 0 0 1 533 460 Z"/>
+      <line class="axis" x1="524" y1="490" x2="864" y2="490"/>
+      <text class="ttl" x="538" y="480">읽는 법</text>
+      <text class="note" x="538" y="512">· 실선 화살표가 유일한 외래키입니다.</text>
+      <text class="note" x="538" y="536">· 해외ETF·펀드의 편입종목 데이터는 없습니다.</text>
+      <text class="note" x="538" y="560">· v_fund_pub 1행 = 펀드 클래스 1개.</text>
+      <text class="note" x="538" y="584">· v_bond_kr 1행 = 장내/장외·LOT 단위.</text>
+      <text class="note" x="538" y="608">· 컬럼 215개 중 핵심만 표시했습니다.</text>
+    </svg>
+    <figcaption>같은 ERD를 <code>README.md</code>와 <code>docs/proposal_outline.md</code>에는 mermaid 소스로 넣어 두었습니다(GitHub에서 렌더링됨). 이 페이지는 파일로 직접 열리기 때문에 스크립트 없이 보이도록 인라인 SVG로 그렸습니다.</figcaption>
+  </figure>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">지식그래프는 무엇으로 만들어졌나</h3>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 230" role="img" aria-label="지식그래프 트리플의 출처 비율: 주최측 마스터 58.9퍼센트, 온톨로지와 추론 27.0퍼센트, 우리 사전 8.1퍼센트, 외부 수집 6.0퍼센트">
+      <text class="ttl" x="20" y="30">지식그래프 약 1,074,824 트리플 · 술어 73종 — 어디서 왔는가</text>
+      <text class="val" x="267.4" y="52" text-anchor="middle">58.9%</text>
+      <text class="val" x="628.2" y="52" text-anchor="middle">27.0%</text>
+      <text class="val" x="775.6" y="52" text-anchor="middle">8.1%</text>
+      <text class="val" x="834.8" y="52" text-anchor="middle">6.0%</text>
+      <rect class="f-key" x="20" y="64" width="494.8" height="48"/>
+      <rect class="f-good" x="514.8" y="64" width="226.8" height="48"/>
+      <rect class="f-warn" x="741.6" y="64" width="68" height="48"/>
+      <rect class="f-neutral" x="809.6" y="64" width="50.4" height="48"/>
+
+      <rect class="f-key" x="20" y="140" width="12" height="12" rx="2"/>
+      <text x="40" y="151">주최측 마스터</text>
+      <text class="val-s" x="40" y="169">4종 마스터에서 직접</text>
+
+      <rect class="f-good" x="230" y="140" width="12" height="12" rx="2"/>
+      <text x="250" y="151">온톨로지 · 추론</text>
+      <text class="val-s" x="250" y="169">TBox 병합 + 규칙 물질화</text>
+
+      <rect class="f-warn" x="440" y="140" width="12" height="12" rx="2"/>
+      <text x="460" y="151">우리 사전</text>
+      <text class="val-s" x="460" y="169">운용사 77 · 테마 48 · 기업 97</text>
+
+      <rect class="f-neutral" x="650" y="140" width="12" height="12" rx="2"/>
+      <text x="670" y="151">외부 수집</text>
+      <text class="val-s" x="670" y="169">국내 ETF 편입종목</text>
+
+      <text class="tiny" x="20" y="205">주최측이 준 데이터에서 나온 트리플이 58.9%, 거기에 온톨로지 규칙을 적용해 늘린 것이 27.0%. 합치면 85.9%가 제공 데이터에 뿌리를 둡니다.</text>
+    </svg>
+    <figcaption>규칙은 "제공 데이터 우선"입니다. 이 비율은 그 규칙이 실제로 지켜졌는지를 보여주는 숫자입니다 — 외부에서 가져온 부분은 <strong>6.0%</strong>이고, 그것도 제공 데이터에 아예 없는 컬럼(ETF 편입종목) 하나뿐입니다.</figcaption>
+  </figure>
+
+  <p>
+    난이도 <strong>상</strong> 예시인 <em>"에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인"</em>은 세 경로를 모두 씁니다:
+    그래프로 자회사를 찾고 → 그걸 편입한 국내 ETF <strong>43개</strong>를 찾고 → SQL로 순자산 정렬 → 문서에서 위험요인 설명.
+    <strong>SQL만으로는 첫 단계부터 불가능합니다.</strong> 주최측 제공 데이터에 "편입종목" 컬럼 자체가 없기 때문입니다.
+  </p>
+  <div class="callout">
+    <p><strong>다만 자회사 관계는 4개 엣지뿐입니다.</strong> 주최측 4종 마스터에는 소유 관계가 전혀 없고, 이 프로젝트의 규칙은
+    <em>제공된 데이터에서 계산한다</em>이기 때문에 <code>subsidiaryOf</code>는 에코프로 계열 3개와 SK이노베이션 1개, 합쳐서 <strong>4개</strong>에 머물러 있습니다.
+    "다단계 자회사 순회"를 이 시스템의 강점으로 소개하면 과장입니다. 되는 것은 <em>에코프로 계열</em>이고, 되는 이유는 그 관계를 우리가 손으로 적어 넣었기 때문입니다.</p>
+  </div>
+</section>
+
+<section id="decisions">
+  <h2>6. 갈림길과 선택</h2>
+  <p class="sec-note">각 단계에서 무엇을 고를 수 있었고, 무엇을 골랐고, 왜 그랬는지.</p>
+  <hr class="divider">
+
+  <div class="decision">
+    <header><span class="dnum">결정 01</span><h3>전체 구조를 무엇으로 할까</h3></header>
+    <p class="dq">LLM에게 얼마나 자유를 줄 것인가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">NL2SQL 한 방</span><span class="why">LLM이 SQL 한 줄 쓰고 끝. 가장 빠르고 단순하지만 테마·편입종목·관계 질문을 못 풀고, 답할 수 없는 질문에도 답을 만들어냄.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">도구를 쓰는 Agent</span><span class="why">LLM이 상황을 보며 SQL·그래프·검색을 골라 반복 호출. 유연하지만 응답 시간과 비용이 늘어남 → 시간 예산으로 통제.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">고정 파이프라인</span><span class="why">질문을 분류해 정해진 템플릿 실행. 시간은 가장 예측 가능하지만 난이도 '상' 문항에서 무너지고 확장이 어려움.</span></div>
+    </div>
+    <div class="because"><p><b>왜 —</b> 평가 문항이 상·중·하 10문항씩 섞여 있고 답변불가 5문항이 포함됩니다. '하' 문항만 보면 NL2SQL이 이기지만, 배점의 3분의 1인 '상' 문항은 여러 저장소를 오가야 풀립니다. 대신 고정 파이프라인의 장점(시간 통제·검증기·강제 종료)은 Agent 안에 규칙으로 넣었습니다.</p></div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 02</span><h3>데이터를 어디에 담을까</h3></header>
+    <p class="dq">엑셀 8개 파일을 어떤 형태로 다룰 것인가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">엑셀을 매번 읽기</span><span class="why">준비가 필요 없지만 질문마다 수십 초가 걸리고 필터·정렬을 직접 코딩해야 함.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">SQLite 파일 1개</span><span class="why">5.3만 행은 SQLite에 아주 작은 크기. 서버 설치가 필요 없고 파일 하나라 Docker 이미지에 그대로 구워 넣을 수 있음.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">PostgreSQL</span><span class="why">기능은 충분하지만 이 데이터 규모에 DB 서버를 따로 띄우는 건 배포·운영 부담만 늘어남.</span></div>
+    </div>
+    <div class="because">
+      <p><b>왜 —</b> 평가 기간(9/7~9/20) 동안 서버가 계속 떠 있어야 합니다. 움직이는 부품이 적을수록 안 죽습니다. SQLite면 컨테이너 하나로 끝납니다.</p>
+      <p><b>덤으로 한 일 —</b> 원본 컬럼명(<code>pd_no</code>, <code>crd_grd</code>)은 그대로 두되, 뜻이 분명한 컬럼을 계산해 <strong>뷰</strong>로 얹었습니다. 예: <code>is_sellable</code>(구매 가능한 채권 21,866행), <code>fund_family</code>(같은 펀드의 클래스들을 하나로 묶는 키 — 23,676행이 17,795개 펀드로 정리됨), <code>manager_name</code>(운용사 표기 통일).</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 03</span><h3>온톨로지를 어떻게 쓸까</h3></header>
+    <p class="dq">제출 필수 항목인데, 제출용으로만 쓸 것인가 실제로 돌릴 것인가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">제출용 문서로만</span><span class="why">TTL 파일을 만들어 내되 코드는 안 씀. 20% 항목은 채우지만 답변 품질에 기여가 0.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">프롬프트에 붙여넣기</span><span class="why">온톨로지 내용을 설명으로 LLM에게 전달. 기술세션 자료 기준 개선 폭 +2.4%p에 그침.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">런타임이 읽어서 실행</span><span class="why">서버가 켜질 때 TTL을 파싱해 컬럼 설명표와 값 검증기를 자동 생성. 같은 자료 기준 +20%p.</span></div>
+    </div>
+    <div class="because">
+      <p><b>왜 —</b> 주최측 기술세션이 직접 실험 수치를 공개했습니다: <em>"온톨로지는 '설명'이 아니라 '실행'에 — 프롬프트 주입 +2.4%p, 런타임 식별 +20%p"</em>. 채점자가 보고 싶어 하는 게 무엇인지 명시된 셈입니다.</p>
+      <p><b>실제 효과 —</b> TTL에 신용등급 20단계가 순서대로 정의돼 있어서, "AA- 이상"이라는 말을 <code>('AAA','AA+','AA0','AA-')</code>로 자동 변환하고, "AAAA"는 존재하지 않는 값이라고 LLM 호출 전에 판정합니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 04</span><h3>그래프에 추론을 넣을까</h3></header>
+    <p class="dq">"KODEX 로봇액티브는 국내ETF다"만 저장했을 때, "그건 ETF인가? 금융상품인가?"에 답할 수 있어야 하는가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">저장한 것만 답하기</span><span class="why">구현이 단순하고 빠름. 하지만 <code>?p a fp:ETF</code> 질의가 0건을 반환 — LLM이 자연스럽게 쓸 법한 질의가 조용히 실패함.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">규칙으로 사실 늘리기</span><span class="why">기동 시 상위 클래스 상속·역관계·domain/range를 계산해 저장. 기동 시 물질화. 현재 그래프는 약 <strong>107만</strong> 트리플 · 술어 73종.</span></div>
+    </div>
+    <div class="because"><p><b>왜 —</b> 기술세션 01-4가 통째로 이 주제입니다("공리 + 논리 규칙 = 새로운 사실, 2개를 넣으면 5개가 된다"). 처음엔 이게 빠져 있어서 상위 클래스 질의가 전부 0건이었고, 과제설명서를 다시 읽으며 발견해 채웠습니다. 실제로 쓰이는 술어만 처리하도록 최적화해 그래프 구축 시간을 한 차례 크게 줄였습니다(당시 150초 → 83초). 오늘 편입종목이 테이블로 내려오고 술어가 5,082종 → 73종으로 줄면서 그래프 구성이 다시 바뀌었으므로, <strong>구축 시간은 재측정이 필요합니다.</strong></p></div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 05</span><h3>검색을 어떻게 결합할까</h3></header>
+    <p class="dq">이름으로 찾는 검색과 의미로 찾는 검색을 어떻게 섞을 것인가? — 가장 오래 붙든 문제</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">어휘 검색만</span><span class="why">표기가 정확하면 최고. 하지만 과제설명서가 Vector를 명시적으로 요구했고, 표현이 다른 질문에 약함.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">벡터 검색만</span><span class="why">정확한 상품명을 물었을 때 엉뚱한 유사 상품을 1위로 올림. 위험함.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">RRF 대등 결합</span><span class="why">교과서적 방법. 실제로 붙여보니 <strong>두 검색기가 각각 어중간하게 올린 무관 상품이 1위를 차지</strong>하는 사고 발생.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">어휘 머리 + 벡터 꼬리</span><span class="why">상위 자리는 어휘 검색이 갖고, 하위 30% 자리를 "벡터만 찾아낸" 상품에 배정. 어휘보다 나빠질 수 없는 구조.</span></div>
+    </div>
+    <div class="because">
+      <p><b>왜 —</b> RRF(Reciprocal Rank Fusion)는 두 검색기가 <em>동의하는</em> 문서를 위로 올립니다. 그런데 "배터리 양극재 관련 상품"을 물었을 때 무관한 재간접 펀드가 양쪽에서 중간 순위에 걸리는 바람에, 어휘 검색이 정확히 찾아낸 <em>BNK 2차전지양극재</em>를 제치고 1위가 됐습니다.</p>
+      <p><b>이게 왜 위험한가 —</b> 1위 후보가 틀리면 LLM이 그걸 근거로 답을 씁니다. 검색 순위 오류가 답변 오류로 바로 번집니다. 그래서 "하이브리드가 어휘 검색보다 나빠질 수 없음"을 <strong>구조로 보장</strong>하는 쪽을 택했습니다.</p>
+      <p><b>그래도 벡터가 버는 것 —</b> 영어로 "China semiconductor ETF"를 물으면 어휘 검색은 영문 해외 ETF만 찾지만, 벡터가 꼬리 자리에 <em>KODEX 미국반도체</em> 같은 국내 ETF를 추가로 올려줍니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 06</span><h3>벡터를 무엇으로 만들까</h3></header>
+    <p class="dq">임베딩 API를 쓸 것인가, 로컬에서 만들 것인가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">상용 임베딩 API</span><span class="why">품질이 가장 좋지만 평가 기간에 <strong>API 키가 하나 더</strong> 살아 있어야 하고, 5.3만 건 임베딩 비용·시간이 듦.</span></div>
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">로컬 임베딩 모델</span><span class="why">키는 필요 없지만 2GB 모델 다운로드 + CPU 추론으로 기동이 크게 느려지고 이미지가 무거워짐.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">TF-IDF + LSA (384차원)</span><span class="why">키 없이 결정적으로 동작하고 기동 시 13초에 만들어짐. 환경변수 한 줄로 상용 임베딩 전환 가능.</span></div>
+    </div>
+    <div class="because">
+      <p><b>왜 —</b> 평가용 API가 2주간 떠 있어야 하는데, 외부 의존성이 하나 늘면 죽을 확률도 늘어납니다. 품질이 부족하면 <code>VECTOR_BACKEND=openai</code>로 코드 수정 없이 바꿀 수 있게 문을 열어뒀습니다.</p>
+      <p><b>측정해서 고친 것 —</b> 처음 만든 벡터는 <strong>쓸모없었습니다</strong>. "배터리 양극재"를 물으면 무관한 ELS 사모펀드가 유사도 0.89로 1위였습니다. 원인은 한글 상품명에 <em>증권투자신탁·사모·파생형</em> 같은 껍데기 단어가 너무 많아 벡터 공간이 그쪽으로 쏠린 것. 자주 나오는 단어를 잘라내자(<code>max_df=0.005</code>) 프로브 7개 중 1개 정답이 6개로 올라갔습니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 07</span><h3>외부 데이터를 쓸까</h3></header>
+    <p class="dq">제공 데이터에 없는 "ETF 편입종목"을 직접 수집할 것인가?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">제공 데이터만 사용</span><span class="why">가장 안전하고 규칙 위반 위험 0. 하지만 예시 문항 5개 중 2개를 아예 못 풂.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">편입종목 수집 + 사전 구축</span><span class="why">국내 ETF 1,162종목의 상위 편입종목을 수집(22,599행). 기업 사전으로 모회사·자회사 관계를 연결.</span></div>
+    </div>
+    <div class="because">
+      <p><b>왜 —</b> 규칙이 외부 수집을 <strong>명시적으로 허용</strong>하고("금융상품 관련 데이터는 참가팀이 수집해 활용 가능"), 심지어 <em>"기준데이터만 물어보지 않음"</em>이라고 예고했습니다. 예시 문항 "캠브리콘이 편입된 중국반도체 ETF", "에코프로 자회사를 편입한 ETF"는 편입종목 없이는 원천적으로 불가능합니다.</p>
+      <p><b>발견 —</b> 네이버금융은 캠브리콘을 <strong>"한무기"</strong>(寒武纪의 한국식 표기)로 적습니다. 종목코드 688256으로 연결해야 찾아집니다. 기업 사전에 이런 별칭을 넣어둔 이유입니다.</p>
+      <p><b>지킨 규칙 —</b> 외부 데이터가 주최측 데이터와 충돌하면 <strong>주최측 우선</strong>. 프롬프트에 명시했습니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 08</span><h3>"모른다"를 어떻게 강제할까</h3></header>
+    <p class="dq">답변불가 5문항에서 감점당하지 않으려면?</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">기각</span><span class="name">프롬프트로 부탁하기</span><span class="why">"모르면 모른다고 하세요"라고 지시. LLM이 자주 어깁니다.</span></div>
+      <div class="opt picked"><span class="tag">선택</span><span class="name">상태 3종 + 서버 교정</span><span class="why">LLM이 답을 낼 때 반드시 상태를 고르게 하고, 사전분석이 "존재하지 않는 값"을 잡았는데 LLM이 답을 지어내면 서버가 확인불가로 되돌림.</span></div>
+    </div>
+    <div class="because"><p><b>왜 —</b> 프롬프트는 부탁이고 코드는 보장입니다. 답변불가 문항은 배점이 걸린 항목이라 부탁에 맡길 수 없습니다.</p></div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 09</span><h3>어떤 LLM을 쓸까 — 규정으로 확정됨</h3></header>
+    <p class="dq">주최측 공지: 답변 생성 파이프라인은 <strong>NCP HyperCLOVA X 필수</strong>.</p>
+    <div class="opts">
+      <div class="opt picked"><span class="tag">확정</span><span class="name">HyperCLOVA X (HCX-005)</span><span class="why">CLOVA Studio의 <strong>OpenAI 호환 엔드포인트</strong>로 연결. 규정이 요구하는 구간(의도분석·답변생성)을 전부 담당.</span></div>
+      <div class="opt dropped"><span class="tag">개발용</span><span class="name">Anthropic / OpenAI</span><span class="why">코드에는 남겨두되 <strong>제출·평가에는 사용 불가</strong>. 답변 품질을 비교해볼 때만 씁니다.</span></div>
+      <div class="opt dropped"><span class="tag">해당없음</span><span class="name">유료 LLM 추가 사용</span><span class="why">주최측이 유료 LLM 사용 지양 권고. 우리는 답변 경로 외에 다른 LLM을 쓰지 않습니다(벡터도 로컬 계산).</span></div>
+    </div>
+    <div class="because">
+      <p><b>결과적으로 어댑터 구조가 값을 했습니다 —</b> 이전 결정에서 제공자를 갈아끼울 수 있게 분리해뒀기 때문에, 이번 공지 반영은 <strong>클래스 하나 추가 + 기본값 변경</strong>으로 끝났습니다. 도구 호출 규격이 OpenAI와 동일해서 대화 로직은 그대로 재사용했습니다.</p>
+      <p><b>CLOVA에서 주의할 점 두 가지 —</b> ① function calling은 <code>max_tokens</code>가 <strong>1024 이상</strong>일 때만 동작합니다(미만이면 도구를 아예 호출하지 않아 "모델이 도구를 안 쓴다"처럼 보입니다 — 코드에서 자동으로 올려줍니다). ② function calling은 사고(reasoning)·구조화출력 모드와 <strong>동시에 켤 수 없습니다</strong>.</p>
+      <p><b>설정 —</b> <code>LLM_PROVIDER=clova</code>, <code>LLM_MODEL=HCX-005</code>, <code>CLOVA_API_KEY</code>에 CLOVA Studio 키. 엔드포인트는 <code>https://clovastudio.stream.ntruss.com/v1/openai</code>입니다.</p>
+    </div>
+  </div>
+
+  <div class="decision">
+    <header><span class="dnum">결정 10</span><h3>"구매 가능"을 무엇으로 판정할까 — 공지로 뒤집힌 정의</h3></header>
+    <p class="dq">주최측 공지: <code>BUYABLE_QUANTITY</code> 값은 무효, 상장폐지·리스팅 종료 제외 종목은 모두 구매가능으로 가정.</p>
+    <div class="opts">
+      <div class="opt dropped"><span class="tag">폐기</span><span class="name">매수수익률 존재 여부</span><span class="why">처음엔 매수수익률·매수가능수량이 있는 채권만 "판매가능"으로 봤습니다 → <strong>634건</strong>.</span></div>
+      <div class="opt picked"><span class="tag">현재</span><span class="name">상환 미도래 = 구매가능</span><span class="why">공지에 맞춰 재정의 → <strong>21,866건</strong>. 매수수익률 수록 여부는 <code>has_buy_yield</code>로 분리 보존.</span></div>
+    </div>
+    <div class="because">
+      <p><b>영향이 큽니다 —</b> "구매 가능한 원화채권 중 AA- 이상"의 정답이 <strong>78건 → 15,837건</strong>으로 바뀝니다. 이 공지를 놓쳤다면 채권 문항을 전부 틀렸을 것입니다.</p>
+      <p><b>대신 잃은 정보를 살렸습니다 —</b> 매수수익률·세후수익률은 여전히 634건에만 수록돼 있습니다. 그래서 "수익률"을 묻는 질의는 <code>has_buy_yield=1</code>을 함께 걸도록 프롬프트에 명시했습니다. 그러지 않으면 수익률 칸이 전부 비어 있는 표가 나옵니다.</p>
+    </div>
+  </div>
+</section>
+
+<section id="evidence">
+  <h2>7. 측정 기록</h2>
+  <p class="sec-note">위 결정들의 근거가 된 실제 숫자입니다. 재현 가능한 것만 적었습니다.</p>
+  <hr class="divider">
+
+  <div class="callout" style="border-color:var(--copper)">
+    <p style="margin-bottom:6px"><strong>먼저 짚을 것 — 주최측은 평가 질의도 정답도 공개하지 않았습니다.</strong></p>
+    <p style="max-width:none">과제설명서에 예시 질문 8개(난이도 표시된 5개 + 답변불가 3개)가 있지만 <strong>정답은 없고</strong>, 자료에도
+    <em>"예시질문(참고용 질의set)은 본 자료에 포함되지 않습니다"</em>라고 명시돼 있습니다. 공개 채널에서도 찾을 수 없었습니다.</p>
+    <p style="max-width:none">그래서 아래 <strong>벡터 프로브 7개는 공식 정답이 아니라 제가 만든 검색 품질 점검용 질의</strong>였습니다.
+    이것만으로는 "우리 시스템이 얼마나 맞히는가"를 말할 수 없어서, <strong>데이터에서 정답이 계산되는 질문 54개</strong>로
+    정답 기준을 새로 만들었습니다. 바로 아래 표입니다.</p>
+  </div>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin-bottom:6px">정답 키 — 데이터에서 계산되는 54문항</h3>
+  <p class="kv" style="color:var(--muted);margin-bottom:12px">
+    각 문항의 정답을 SQL(또는 그래프 조회)로 정의했습니다. 채점할 때마다 데이터에서 다시 계산하므로,
+    데이터가 갱신되면 정답도 자동으로 따라갑니다. 구성은 <strong>하 10 · 중 16 · 상 9 · 답변불가 19</strong>.
+    <code>data/eval/groundtruth.jsonl</code> · <code>scripts/eval_truth.py</code>
+  </p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>문항 (54개 중 발췌)</th><th>난이도</th><th>오늘 다시 계산한 정답</th></tr></thead>
+      <tbody>
+        <tr><td>구매 가능한 원화채권 중 AA- 이상 종목 수</td><td>하</td><td class="num">15,837</td></tr>
+        <tr><td>구매 가능 AAA · 만기 2027년 종목 수</td><td>하</td><td class="num">2,451</td></tr>
+        <tr><td>삼성자산운용 국내 상장 ETF 수</td><td>하</td><td class="num">240</td></tr>
+        <tr><td>위험등급 1등급 &amp; 순자산 1조 이상 ETF 수 <span class="kv" style="color:var(--copper)">(키 수정: ETN을 세고 있었음)</span></td><td>중</td><td class="num">22</td></tr>
+        <tr><td>국내 ETF 순자산 상위 3</td><td>하</td><td>KODEX 200 · TIGER 미국S&amp;P500 · TIGER 미국나스닥100</td></tr>
+        <tr><td>VanEck China Semiconductor ETF 총보수</td><td>하</td><td class="num">0.65%</td></tr>
+        <tr><td>국민성장펀드 클래스 수</td><td>중</td><td class="num">4</td></tr>
+        <tr><td>환헤지 해외 채권형 공모펀드 판매중 수 <span class="kv" style="color:var(--copper)">(키 수정)</span></td><td>중</td><td class="num">63</td></tr>
+        <tr><td>미국 상장 주식형 ETF 최저 총보수 상품 <span class="kv" style="color:var(--copper)">(0.01%에 4개 동률 — 키 수정)</span></td><td>중</td><td>DFA US Large Company · Touchstone Dynamic Intl · Vanguard EM Ex-China · VictoryShares Intl FCF</td></tr>
+        <tr><td>에코프로비엠을 편입한 국내 ETF 수 <span class="kv" style="color:var(--copper)">(별칭 중복 버그로 84였음)</span></td><td>상</td><td class="num">42</td></tr>
+        <tr><td>삼성전자 보유 국내 ETF 중 순자산 상위 3 <span class="kv" style="color:var(--muted)">(편입종목+SQL)</span></td><td>상</td><td>KODEX 200 · TIGER 200 · TIGER 반도체TOP10</td></tr>
+        <tr><td>국내ETF+공모펀드 1년 수익률 상위 3 <span class="kv" style="color:var(--muted)">(교차질의)</span></td><td>상</td><td>마이다스아시아리더스성장주 · TIGER 200IT레버리지 · KODEX 반도체레버리지</td></tr>
+        <tr><td>답변불가 19문항 <span class="kv" style="color:var(--muted)">(AAAA등급 · 8등급 · Kimi · 수익률 전망 · 펀드 편입종목 · 미존재 상품명 …)</span></td><td>불가</td><td>"확인할 수 없음"(또는 역질문)으로 답해야 정답</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="callout" style="border-color:var(--reject)">
+    <p style="margin-bottom:6px"><strong style="color:var(--reject)">정답률은 아직 없습니다 — 정답 키를 오늘 고쳤기 때문입니다.</strong></p>
+    <p style="max-width:none">
+      HyperCLOVA X로 22문항을 돌려본 기록은 있지만, 그 채점에 쓰인 정답 키에 오류가 있었습니다(1절 10번).
+      특히 <strong>그래프 정답이 두 배로 부풀려진 채로 "정답"이었고</strong>, 채점기가 반올림 정수를 허용해
+      정답이 <code>0.65</code>인 문항이 "1"만 들어 있어도 통과했습니다. 그래서 이전 결과는 폐기했습니다.
+    </p>
+    <p style="max-width:none">
+      서버를 띄우고 <code>python scripts/eval_truth.py --base http://127.0.0.1:8000</code>를 돌리면
+      <strong>54문항 중 몇 개를 맞혔는지</strong>가 나옵니다. 그 숫자가 나오기 전까지 이 문서에 정답률은 적지 않습니다.
+    </p>
+  </div>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">모델이 실제로 부른 도구 — 22문항</h3>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 340" role="img" aria-label="22문항 동안의 도구 호출 횟수: sql_query 24회, final_answer 20회, graph_neighbors 2회, table_info와 search_products와 resolve_entity와 graph_query와 search_documents는 각각 0회">
+      <text class="ttl" x="20" y="26">22문항 · 총 46회 호출</text>
+      <line class="axis" x1="180" y1="40" x2="180" y2="299"/>
+
+      <text class="mono" x="168" y="61" text-anchor="end">sql_query</text>
+      <rect class="f-key" x="180" y="46" width="600" height="22" rx="3"/>
+      <text class="val" x="788" y="61">24회</text>
+
+      <text class="mono" x="168" y="94" text-anchor="end">final_answer</text>
+      <rect class="f-key" x="180" y="79" width="500" height="22" rx="3"/>
+      <text class="val" x="688" y="94">20회</text>
+
+      <text class="mono" x="168" y="127" text-anchor="end">graph_neighbors</text>
+      <rect class="f-key" x="180" y="112" width="50" height="22" rx="3"/>
+      <text class="val" x="238" y="127">2회</text>
+
+      <text class="mono" x="168" y="160" text-anchor="end">table_info</text>
+      <rect class="f-bad" x="180" y="145" width="3" height="22"/>
+      <text class="val t-bad" x="191" y="160">0회</text>
+
+      <text class="mono" x="168" y="193" text-anchor="end">search_products</text>
+      <rect class="f-bad" x="180" y="178" width="3" height="22"/>
+      <text class="val t-bad" x="191" y="193">0회</text>
+
+      <text class="mono" x="168" y="226" text-anchor="end">resolve_entity</text>
+      <rect class="f-bad" x="180" y="211" width="3" height="22"/>
+      <text class="val t-bad" x="191" y="226">0회</text>
+
+      <text class="mono" x="168" y="259" text-anchor="end">graph_query</text>
+      <rect class="f-bad" x="180" y="244" width="3" height="22"/>
+      <text class="val t-bad" x="191" y="259">0회</text>
+
+      <text class="mono" x="168" y="292" text-anchor="end">search_documents</text>
+      <rect class="f-bad" x="180" y="277" width="3" height="22"/>
+      <text class="val t-bad" x="191" y="292">0회</text>
+
+      <path d="M 330 145 H 342 V 299 H 330" fill="none" stroke="var(--reject)" stroke-width="1.3"/>
+      <text class="t-bad" x="354" y="212">이 다섯 개는 22문항을 도는 동안</text>
+      <text class="t-bad" x="354" y="232">한 번도 호출되지 않았습니다</text>
+
+      <text class="tiny" x="20" y="326">그래서 컬럼을 골라서 보여주는 대신 215개를 전부 스키마 카드에 넣었습니다 — 모델은 모르는 컬럼이 있어도 물어보지 않습니다.</text>
+    </svg>
+    <figcaption>이 그래프가 "제공 컬럼을 선별하지 않고 전부 노출한다"는 결정의 근거입니다. <code>table_info</code>가 0회라는 것은,
+    프롬프트에 처음부터 실려 있지 않은 컬럼은 모델에게 <strong>존재하지 않는 것과 같다</strong>는 뜻입니다. <code>has_buy_yield</code>가 정확히 그 사례였습니다.</figcaption>
+  </figure>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">프롬프트가 커지면 느려지는가 — 아니오</h3>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 300" role="img" aria-label="프롬프트 크기 대비 첫 호출 지연시간. 599토큰 2.90초, 5591토큰 3.65초, 8789토큰 2.94초, 13495토큰 3.82초로 크기와 무관하게 평평하다">
+      <text class="ttl" x="20" y="22">프롬프트가 22배 커지는 동안 지연시간은 사실상 그대로입니다</text>
+      <line class="grid" x1="90" y1="40" x2="840" y2="40"/>
+      <line class="grid" x1="90" y1="80" x2="840" y2="80"/>
+      <line class="grid" x1="90" y1="120" x2="840" y2="120"/>
+      <line class="grid" x1="90" y1="160" x2="840" y2="160"/>
+      <line class="grid" x1="90" y1="200" x2="840" y2="200"/>
+      <line class="axis" x1="90" y1="240" x2="840" y2="240"/>
+      <line class="axis" x1="90" y1="40" x2="90" y2="240"/>
+      <text class="tiny" x="80" y="244" text-anchor="end">0초</text>
+      <text class="tiny" x="80" y="204" text-anchor="end">1</text>
+      <text class="tiny" x="80" y="164" text-anchor="end">2</text>
+      <text class="tiny" x="80" y="124" text-anchor="end">3</text>
+      <text class="tiny" x="80" y="84" text-anchor="end">4</text>
+      <text class="tiny" x="80" y="44" text-anchor="end">5초</text>
+
+      <line class="ref" x1="90" y1="106.8" x2="840" y2="106.8"/>
+      <text class="tiny t-warn" x="96" y="101">네 지점의 평균 3.33초</text>
+
+      <polyline points="122.1,124 389.5,94 560.8,122.4 812.9,87.2" fill="none" stroke="var(--primary)" stroke-width="1.6" opacity=".55"/>
+      <circle class="f-key" cx="122.1" cy="124" r="5.5"/>
+      <circle class="f-key" cx="389.5" cy="94" r="5.5"/>
+      <circle class="f-key" cx="560.8" cy="122.4" r="5.5"/>
+      <circle class="f-key" cx="812.9" cy="87.2" r="5.5"/>
+      <text class="val" x="122.1" y="142" text-anchor="middle">2.90초</text>
+      <text class="val" x="389.5" y="112" text-anchor="middle">3.65초</text>
+      <text class="val" x="560.8" y="140.4" text-anchor="middle">2.94초</text>
+      <text class="val" x="812.9" y="105.2" text-anchor="middle">3.82초</text>
+
+      <line class="axis" x1="122.1" y1="240" x2="122.1" y2="245"/>
+      <line class="axis" x1="389.5" y1="240" x2="389.5" y2="245"/>
+      <line class="axis" x1="560.8" y1="240" x2="560.8" y2="245"/>
+      <line class="axis" x1="812.9" y1="240" x2="812.9" y2="245"/>
+      <text class="tiny" x="122.1" y="260" text-anchor="middle">599</text>
+      <text class="tiny" x="389.5" y="260" text-anchor="middle">5,591</text>
+      <text class="tiny" x="560.8" y="260" text-anchor="middle">8,789</text>
+      <text class="tiny" x="812.9" y="260" text-anchor="middle">13,495</text>
+      <text class="sub" x="90" y="282">가로축 = 프롬프트 크기(토큰) · 세로축 = 첫 호출 지연 중앙값(초)</text>
+    </svg>
+    <figcaption>네 크기를 직접 재서 얻은 값입니다. 이전에 관측한 <strong>35초짜리 호출은 프롬프트가 커서가 아니라 테스트앱 등급의 rate limit 대기</strong>였습니다.
+    즉 스키마 카드를 215컬럼으로 늘려도 응답 시간이 손해를 보지 않습니다 — 위의 "컬럼을 전부 노출한다"는 결정이 성립하는 이유가 여기 있습니다.</figcaption>
+  </figure>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">시간을 쓰는 곳은 크기가 아니라 라운드입니다</h3>
+  <figure>
+    <svg class="chart" viewBox="0 0 880 200" role="img" aria-label="라운드를 한 번 더 도는 비용은 1에서 2로 갈 때 11.2초, 2에서 3은 1.8초, 3에서 4는 3.7초. 그리고 22문항 중 17문항이 도구 없이 텍스트만 내보내는 라운드를 한 번 소비한다">
+      <text class="ttl" x="10" y="24">라운드를 한 번 더 도는 비용</text>
+      <text class="tiny" x="150" y="62" text-anchor="end">1 &#8594; 2 라운드</text>
+      <rect class="f-warn" x="160" y="44" width="336" height="26" rx="3"/>
+      <text class="val" x="504" y="62">+11.2초</text>
+      <text class="tiny" x="150" y="104" text-anchor="end">2 &#8594; 3 라운드</text>
+      <rect class="f-warn" x="160" y="86" width="54" height="26" rx="3"/>
+      <text class="val" x="222" y="104">+1.8초</text>
+      <text class="tiny" x="150" y="146" text-anchor="end">3 &#8594; 4 라운드</text>
+      <rect class="f-warn" x="160" y="128" width="111" height="26" rx="3"/>
+      <text class="val" x="279" y="146">+3.7초</text>
+      <text class="tiny" x="10" y="182">첫 왕복이 가장 비쌉니다.</text>
+
+      <line class="axis" x1="575" y1="16" x2="575" y2="184"/>
+
+      <text class="ttl" x="590" y="24">제출 전에 산문을 쓰는 라운드</text>
+      <rect class="f-warn" x="590" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="614" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="638" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="662" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="686" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="710" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="734" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="758" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="782" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="806" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="830" y="44" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="590" y="68" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="614" y="68" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="638" y="68" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="662" y="68" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="686" y="68" width="18" height="18" rx="3"/>
+      <rect class="f-warn" x="710" y="68" width="18" height="18" rx="3"/>
+      <rect x="734" y="68" width="18" height="18" rx="3" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+      <rect x="758" y="68" width="18" height="18" rx="3" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+      <rect x="782" y="68" width="18" height="18" rx="3" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+      <rect x="806" y="68" width="18" height="18" rx="3" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+      <rect x="830" y="68" width="18" height="18" rx="3" fill="none" stroke="var(--rule)" stroke-width="1.4"/>
+      <text class="val t-warn" x="590" y="108">17 / 22 문항</text>
+      <text class="tiny" x="590" y="128">도구를 부르지 않고 텍스트만</text>
+      <text class="tiny" x="590" y="144">내보내는 라운드를 한 번 소비합니다.</text>
+      <text class="tiny" x="590" y="160">이 라운드는 답에 아무것도 더하지 않습니다.</text>
+    </svg>
+    <figcaption>왼쪽과 오른쪽을 곱하면 개선 여지가 보입니다. 산문 라운드 하나를 없애면 그 문항은 왕복이 하나 줄고,
+    그 왕복의 값은 첫 왕복 다음으로 비쌉니다. 참고로 <strong>답변 길이와 소요 시간의 상관계수는 0.00</strong>이었습니다 — 길게 쓰는 게 느린 것이 아니라, 왕복이 많은 게 느립니다.</figcaption>
+  </figure>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">벡터 검색 튜닝 — 자체 프로브 7개 <span class="kv" style="color:var(--muted);font-weight:400">(공식 정답 아님, 검색 품질 점검용)</span></h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>질의</th><th>튜닝 전 1위 (max_df 없음)</th><th>튜닝 후 1위 (max_df=0.005)</th></tr></thead>
+      <tbody>
+        <tr><td>국민성장</td><td style="color:var(--reject)">대형성장주식 ✗</td><td style="color:var(--good)">미래에셋국민참여형국민성장… ✓</td></tr>
+        <tr><td>China semiconductor ETF</td><td style="color:var(--reject)">제주반도체4BW <span class="kv">(회사채)</span> ✗</td><td style="color:var(--good)">KODEX SEMICONDUCT ✓</td></tr>
+        <tr><td>space exploration satellite</td><td style="color:var(--reject)">MicroSectors 3x Long High Yield ✗</td><td style="color:var(--good)">Procure Space ETF ✓</td></tr>
+        <tr><td>커버드콜 분배금 높은 상품</td><td style="color:var(--good)">SOL 200타겟위클리커버드콜 ✓</td><td style="color:var(--good)">신한커버드콜인덱스 ✓</td></tr>
+        <tr><td>autonomous driving technology</td><td style="color:var(--reject)">Baron Technology ETF △</td><td style="color:var(--good)">ROBO Global Robotics ✓</td></tr>
+        <tr><td>에코프로 자회사 편입</td><td style="color:var(--reject)">C프로젝트3 ✗</td><td style="color:var(--good)">에코프로26-2 ✓</td></tr>
+        <tr><td>배터리 양극재 관련 상품</td><td style="color:var(--reject)">푸르덴셜 ELS 사모파생 ✗</td><td style="color:var(--reject)">미래에셋아시아섹터리더 ✗</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="kv" style="color:var(--muted)">7개 중 정답 <strong>1개 → 6개</strong>. 마지막 줄은 여전히 실패하지만, 이 질의는 어휘 검색이 정확히 처리하므로 하이브리드 결과는 정상입니다.</p>
+
+  <h3 style="font-size:16px;font-family:'IBM Plex Sans KR',sans-serif;margin:28px 0 10px">시스템 규모와 시간</h3>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>항목</th><th class="num">값</th><th>비고</th></tr></thead>
+      <tbody>
+        <tr><td>상품 데이터</td><td class="num">53,375행</td><td>채권 21,882 · 국내ETF/ETN 1,780 · 해외ETF/ETN 6,037 · 펀드 23,676</td></tr>
+        <tr><td>편입종목 <span class="kv" style="color:var(--copper)">(오늘 SQLite로)</span></td><td class="num">22,599행</td><td>국내 ETF 1,235개 중 1,162개 수집 성공 · 종목코드 79% 보유</td></tr>
+        <tr><td>뷰 / 컬럼</td><td class="num">5 / 215</td><td>제공 컬럼 215개 전부가 스키마 카드에 노출 (이전 111개)</td></tr>
+        <tr><td>지식그래프</td><td class="num">약 1,074,824</td><td>술어 73종 (이전 5,082종 — 편입비중이 술어에서 컬럼으로)</td></tr>
+        <tr><td>어휘 색인</td><td class="num">75,089</td><td>문서 수 (이전 53,375 — 편입종목 추가)</td></tr>
+        <tr><td>온톨로지</td><td class="num">2,955</td><td>TTL 6개 파일의 트리플 수 · 속성 정의 261개(그중 215개가 컬럼에 연결)</td></tr>
+        <tr><td><code>subsidiaryOf</code></td><td class="num">4</td><td>주최측 마스터에 소유 관계가 없어 사전에 적어 넣은 것만</td></tr>
+        <tr><td>구매가능 채권</td><td class="num">21,866</td><td>공지 반영 후(이전 정의로는 634). 매수수익률 수록은 634건</td></tr>
+        <tr><td>운용사 채움</td><td class="num">21,592</td><td>펀드 23,676행 중 91.2% (이전 17,660행 / 74.6%)</td></tr>
+        <tr><td>평가 질의 세트</td><td class="num">33 + 54</td><td>상태 점검용 33문항 + 정답 키 54문항 (정답 키는 20 → 54로 확장)</td></tr>
+        <tr><td>테스트</td><td class="num">52개</td><td>파일 기준 테스트 함수 수. <span style="color:var(--copper)">오늘 소스 변경 중이라 재실행 결과는 반영 전</span></td></tr>
+        <tr><td>컨테이너 기동</td><td class="num" style="color:var(--copper)">재측정 필요</td><td>이전 87초. 편입종목 테이블 추가·그래프 재구축 이후 값 없음</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="review">
+  <h2>8. 같이 볼 것</h2>
+  <p class="sec-note">판단이 필요하거나, 아직 안 끝났거나, 알고 있어야 할 것들.</p>
+  <hr class="divider">
+
+  <div class="flag resolved">
+    <span class="state">확인됨</span>
+    <h3>제공 데이터 건수가 과제설명서와 다름 — 우리 파일이 맞는 것으로 확인</h3>
+    <p>과제설명서 PDF는 4종 합계 <strong>약 14.5만 건, 기준일 2026-07-11</strong>이라고 적었지만, 실제 배포 파일은
+    <strong>53,375건, 기준일 2026-08-21</strong>(해외ETF만 08-22)입니다. 채권은 42,394 → 21,882건, 펀드는 95,619 → 23,676건으로 크게 다릅니다.</p>
+    <p class="ask">→ <strong>주최측 공지로 확정됐습니다:</strong> <em>"현재 26.07.11 전달드린 데이터는 정합성 및 코드관련 이슈가 있어,
+    지금 배포드린 데이터 기준으로 활용하시면 됩니다(26.08.24 기준, 영업일 08.22까지 / 해외는 한국시간 23일)."</em>
+    우리가 쓰는 파일이 정확히 그 버전입니다. 더 이상 확인할 것이 없습니다.</p>
+  </div>
+
+  <div class="flag blocking">
+    <span class="state">부분 검증</span>
+    <h3>HyperCLOVA X는 돌려봤지만, 54문항으로는 아직입니다</h3>
+    <p>HCX-005가 우리 도구를 실제로 호출한다는 것은 확인됐습니다 — 22문항 실행 기록이 있고, 도구 사용 분포·라운드 비용·지연시간도 그 실행에서 나왔습니다(7절).
+    <strong>남은 것은 정확도입니다.</strong> 오늘 정답 키를 20 → 54문항으로 늘리면서 키 자체의 오류도 고쳤기 때문에, 이전 채점 결과는 폐기했습니다.</p>
+    <p class="ask">→ 9번 절차대로 서버를 띄우고 <code>scripts/eval_truth.py</code>를 <strong>54문항으로 한 번 돌리는 것</strong>이 지금 가장 중요한 다음 작업입니다.
+    그때 함께 볼 것: ① 답변불가 19문항이 전부 "확인할 수 없음"으로 나오는가 ② 도구가 돌려준 숫자를 <strong>모델이 그대로 옮겨 적는가</strong>(1절 7번 — 240을 "24개"로 적은 적이 있습니다)
+    ③ 300초에 걸리는 문항이 있는가.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">데이터 확장</span>
+    <h3>교차질의를 위해 편입종목 범위를 넓혀야 할 수 있습니다</h3>
+    <p>주최측이 든 교차질의 예시가 <em>"삼성전자를 보유한 국내/해외ETF와 공모펀드를 1년 수익률 기준 TOP10"</em>입니다.
+    우리는 <strong>국내 ETF 편입종목만</strong> 갖고 있어서, 해외ETF·펀드 부분은 "확인 불가"로 답하게 됩니다.
+    공지에도 <em>"구성종목-상품 등에 대해서는 어떤 데이터를 활용할지는 여러분의 자율"</em>이라고 적혀 있습니다.</p>
+    <p class="ask">→ 남은 시간과 상의해서 결정할 사항입니다. 해외ETF 편입종목(예: 각 운용사 공시 PDF/CSV)이나 펀드 자산구성을 추가하면
+    교차질의 대응 폭이 넓어지지만, 9월 6일 동결까지 시간이 빠듯합니다. 우선순위는 <strong>HyperCLOVA X 검증 다음</strong>입니다.</p>
+  </div>
+
+  <div class="flag blocking">
+    <span class="state">일정 함정</span>
+    <h3>오늘이 코드 동결일입니다 (9/6) — API 운영은 9/7~9/20</h3>
+    <p>규정: <em>"마감 이후 코드 및 결과물을 변경하는 행위 발견 시 실격"</em>. 그런데 API는 9월 7일부터 20일까지 계속 떠 있어야 합니다.
+    즉 <strong>평가 중에 답변이 이상해도 고칠 수 없습니다.</strong></p>
+    <p class="ask">→ 남은 항목은 세 가지입니다: <strong>54문항 채점</strong> · <strong>기술제안서 본문</strong> · <strong>원격 저장소 연결과 배포</strong>.
+    전부 <strong>9월 6일 23:59 이전</strong>에 끝나야 합니다.</p>
+  </div>
+
+  <div class="flag resolved">
+    <span class="state">확정됨</span>
+    <h3>LLM은 NCP HyperCLOVA X 필수로 확정됐습니다</h3>
+    <p>공지: <em>"질의에 대한 답변 제작 API 제작 시 NCP Hyper ClovaX 필수. 질의 Intent분석 - (데이터 조회 및 증거 제작) - 답변 생성
+    이외에는 제약사항 없음."</em> 그리고 <em>"유료버전의 LLM 사용은 지양"</em> 권고도 함께 나왔습니다.</p>
+    <p class="ask">→ 기본 제공자를 <code>clova</code>/<code>HCX-005</code>로 바꿨습니다. 데이터 조회·검색·그래프·벡터는 전부 LLM이 아닌 코드라 규정과 무관하며,
+    유료 LLM은 어디에도 쓰지 않습니다. <strong>한 가지 확인이 필요합니다</strong>: "Intent분석"까지 HyperCLOVA X여야 하는지 여부인데,
+    우리 구조는 의도분석·답변생성 모두 HyperCLOVA X가 하므로 어느 해석이든 규정을 만족합니다.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">튜닝 여지</span>
+    <h3>응답 시간 기준이 바뀌어 예산을 늘렸습니다</h3>
+    <p>공지: <em>"응답시간의 기준은 공개하지 않으며, 타임아웃 300초는 물리적 '미응답' 처리이므로, 늦게라도 응답(300초 미만)과는 점수 차등 예정."</em>
+    즉 <strong>느려도 맞히는 편이 빠르게 틀리는 것보다 낫습니다.</strong></p>
+    <p class="ask">→ 내부 예산을 50초 → <strong>120초</strong>, 도구 라운드를 6 → 8로 올렸습니다. HyperCLOVA X의 실제 응답 속도를 측정한 뒤
+    다시 조정해야 합니다. 300초에 걸리는 문항이 하나라도 나오면 그건 미응답 처리라 반드시 피해야 합니다.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">데이터 한계</span>
+    <h3>없는 데이터가 무엇인지 알고 있어야 합니다</h3>
+    <p>국내ETF <strong>총보수는 18%만</strong> 수록돼 있고, 펀드 <strong>보수 컬럼은 단위가 공개되지 않았으며</strong>(절대값 해석 금지, 클래스 간 상대 비교만),
+    해외ETF·펀드는 <strong>편입종목이 없습니다</strong>. 펀드 마스터에는 공모 14,716건 외에 <strong>사모 8,960건</strong>도 섞여 있습니다.</p>
+    <p class="ask">→ 전부 프롬프트와 온톨로지 주석에 적어뒀고, 값이 없으면 "데이터 없음"이라고 답하게 했습니다. 답변을 검토할 때 이 부분이 제대로 지켜지는지 봐주세요.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">기준일</span>
+    <h3>편입종목의 시점이 상품 데이터와 다릅니다</h3>
+    <p>상품 마스터는 2026-08-21(해외ETF 08-22) 기준인데, 편입종목 테이블(<code>etf_constituent</code>)의 <code>as_of</code>는 <strong>2026-09-05</strong>입니다.</p>
+    <p class="ask">→ 섞어서 답할 때 시점이 다르다는 걸 알고 있어야 합니다. 제출 직전에 한 번 다시 수집하면 시점 차이를 줄일 수 있습니다.</p>
+  </div>
+
+  <div class="flag">
+    <span class="state">제출 형식</span>
+    <h3>저장소 최상위 구조를 맞춰야 합니다</h3>
+    <p>과제설명서가 요구하는 구조는 저장소 루트에 <code>src/</code>, <code>ontology/</code>, <code>requirements.txt</code>, <code>README.md</code>입니다.
+    지금은 이것들이 <code>fin-agent/</code> 폴더 <em>안에</em> 있습니다.</p>
+    <p class="ask">→ 주최측 저장소에 올릴 때는 <code>fin-agent/</code> <strong>폴더가 아니라 그 안의 내용물</strong>을 루트에 올려야 합니다. 제출물에는 API 주소와 명세서도 포함해야 합니다.</p>
+  </div>
+</section>
+
+<section id="test">
+  <h2>9. 직접 해보기</h2>
+  <p class="sec-note">순서대로 따라가면 됩니다. 1~3단계는 API 키 없이도 됩니다.</p>
+  <hr class="divider">
+
+  <ol class="steps">
+    <li>
+      <h3>환경 준비 (한 번만)</h3>
+      <p>Windows 터미널에서 <code>fin-agent</code> 폴더로 이동한 뒤:</p>
+      <pre><span class="c"># 가상환경이 이미 .venv에 있습니다</span>
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+<span class="c"># 데이터베이스 만들기 (1~2분) — 이미 있으면 건너뛰어도 됩니다</span>
+.venv\Scripts\python.exe scripts\build_store.py</pre>
+      <p><strong>성공 신호:</strong> <code>done: {'bond_kr': 21882, ... 'fund_pub': 23676}</code>이 찍히고 <code>data/store/products.db</code>가 생깁니다.</p>
+    </li>
+
+    <li>
+      <h3>테스트 돌려보기 — 키 없이 전체 검증</h3>
+      <pre>.venv\Scripts\python.exe -m pytest -q</pre>
+      <p><strong>성공 신호:</strong> <code>52 passed</code>. 실패가 나오면 그 파일 이름이 어느 부분이 깨졌는지 알려줍니다
+      (<code>test_build_store</code>=데이터 적재, <code>test_graph</code>=그래프·추론, <code>test_vector</code>=벡터 검색, <code>test_agent</code>=API 계약).</p>
+    </li>
+
+    <li>
+      <h3>내부를 직접 들여다보기 — 여기서 감이 잡힙니다</h3>
+      <p>LLM 없이 각 저장소에 직접 질문을 던지는 도구를 만들어뒀습니다. <strong>이걸 여러 번 돌려보는 게 시스템을 이해하는 가장 빠른 길입니다.</strong></p>
+      <pre><span class="c"># 지금 뭐가 실려 있는지 한눈에</span>
+.venv\Scripts\python.exe scripts\explore.py health
+
+<span class="c"># SQL 직접 실행 — LLM이 쓰는 것과 같은 뷰</span>
+.venv\Scripts\python.exe scripts\explore.py sql "SELECT pd_nm, crd_grd, buy_yield FROM v_bond_kr WHERE is_sellable=1 ORDER BY buy_yield DESC LIMIT 5"
+
+<span class="c"># 검색 3가지 방식 비교 — 결정 05를 눈으로 확인</span>
+.venv\Scripts\python.exe scripts\explore.py search "차이나 반도체" --mode lexical
+.venv\Scripts\python.exe scripts\explore.py search "차이나 반도체" --mode vector
+.venv\Scripts\python.exe scripts\explore.py search "차이나 반도체" --mode hybrid
+
+<span class="c"># 그래프 관계 — 에코프로의 자회사는?</span>
+.venv\Scripts\python.exe scripts\explore.py graph "에코프로" --relation hasSubsidiary
+
+<span class="c"># 존재하지 않는 상품을 물으면 뭐라고 하는지</span>
+.venv\Scripts\python.exe scripts\explore.py entity "KODEX AI로봇"
+
+<span class="c"># LLM에게 넘어가기 직전의 사전분석 내용 그대로 보기</span>
+.venv\Scripts\python.exe scripts\explore.py pre "신용등급 AAAA인 채권 찾아줘"</pre>
+      <p><strong>추천:</strong> 마지막 두 개를 꼭 돌려보세요. "존재하지 않는 것을 어떻게 판정하는가"가 이 시스템의 핵심이고, 답변불가 문항 배점이 걸린 부분입니다.</p>
+    </li>
+
+    <li>
+      <h3>API 키 넣기</h3>
+      <p><code>.env.example</code>을 <code>.env</code>로 복사하고 키를 채웁니다. 둘 중 하나만 있으면 됩니다.</p>
+      <pre><span class="c"># 대회 규정: 반드시 HyperCLOVA X</span>
+LLM_PROVIDER=clova
+LLM_MODEL=HCX-005
+CLOVA_API_KEY=nv-...        <span class="c"># CLOVA Studio 테스트앱/서비스앱 API 키</span>
+CLOVA_BASE_URL=https://clovastudio.stream.ntruss.com/v1/openai
+LLM_MAX_TOKENS=4096         <span class="c"># function calling 은 1024 이상 필수</span></pre>
+      <p>키는 네이버클라우드 콘솔 → CLOVA Studio → 테스트앱/서비스앱에서 발급합니다.
+      <strong>주의:</strong> HCX-005는 function calling과 사고(reasoning) 모드를 동시에 켤 수 없습니다. 우리 코드는 function calling만 씁니다.</p>
+    </li>
+
+    <li>
+      <h3>서버 켜기</h3>
+      <pre>.venv\Scripts\python.exe scripts\warmup.py          <span class="c"># 선택: 다음 기동이 80초 빨라짐</span>
+.venv\Scripts\python.exe -m uvicorn finagent.api:app --port 8000 --app-dir src</pre>
+      <p>기동에 <strong>1분 30초~3분</strong> 걸립니다(색인·벡터·그래프를 메모리에 올리는 시간). 브라우저에서
+      <code>http://127.0.0.1:8000/health</code>를 열어 <code>"status":"ok"</code>가 보이면 준비 완료입니다.</p>
+    </li>
+
+    <li>
+      <h3>질문 하나 던져보기</h3>
+      <p>브라우저 주소창에 그대로 붙여넣어도 됩니다.</p>
+      <pre>http://127.0.0.1:8000/answer?question_id=Q-001&amp;question=현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘</pre>
+      <p><strong>답을 읽는 법 —</strong> <code>answer</code>만 보지 말고 나머지 두 필드를 꼭 같이 보세요.</p>
+      <ul>
+        <li><code>think_trace</code> — LLM이 <em>무엇을 했는지</em>. 몇 라운드를 돌았고 어떤 SQL을 실행했고 몇 초 걸렸는지가 순서대로 나옵니다. 답이 이상하면 여기서 원인을 찾습니다.</li>
+        <li><code>retrieved_context</code> — <em>근거</em>. 이 숫자가 어느 테이블 며칠자 데이터에서 나왔는지. 여기 없는 숫자가 answer에 있다면 그게 환각입니다.</li>
+      </ul>
+    </li>
+
+    <li>
+      <h3>정답 키로 채점하기 — 진짜 성능 확인</h3>
+      <p>서버를 켜둔 채 <strong>다른 터미널</strong>에서:</p>
+      <pre><span class="c"># 정답 키만 먼저 확인 (서버·키 없이도 됨)</span>
+.venv\Scripts\python.exe scripts\eval_truth.py --compute
+
+<span class="c"># 서버 답변을 정답과 대조해 채점</span>
+.venv\Scripts\python.exe scripts\eval_truth.py --base http://127.0.0.1:8000
+
+<span class="c"># 상태·지연시간 점검용 33문항 (정답 대조 없음)</span>
+.venv\Scripts\python.exe scripts\eval_run.py --base http://127.0.0.1:8000</pre>
+      <p><code>eval_truth</code>는 <strong>54문항 중 몇 개를 맞혔는지</strong>를 백분율로 출력합니다.
+      정답은 채점 시점에 데이터에서 다시 계산되므로 사람이 채점표를 관리할 필요가 없습니다.</p>
+      <p><strong>여기서 봐야 할 것:</strong> ① 정답률이 몇 %인가 ② <strong>300초에 걸리는 문항이 있는가</strong>(있으면 미응답 처리)
+      ③ 답변불가 5문항이 전부 "확인할 수 없음"으로 나오는가 ④ <code>X</code> 문항의 <code>think_trace</code>를 열어
+      HyperCLOVA X가 어디서 헤맸는가 — 도구를 아예 안 불렀다면 <code>max_tokens</code>를 먼저 의심하세요.</p>
+    </li>
+  </ol>
+</section>
+
+<section id="contribute">
+  <h2>10. 어디를 고치면 무엇이 바뀌나</h2>
+  <p class="sec-note">직접 손댈 수 있는 곳부터, 쉬운 순서로.</p>
+  <hr class="divider">
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>고치고 싶은 것</th><th>파일</th><th>난이도</th></tr></thead>
+      <tbody>
+        <tr><td>기업 별칭·자회사 관계 추가<br><span class="kv" style="color:var(--muted)">예: 새 종목이 편입종목에 <code>auto_</code>로 뜰 때</span></td><td><code>data/enrichment/companies.yaml</code></td><td>쉬움 — YAML만 추가</td></tr>
+        <tr><td>테마 동의어 추가<br><span class="kv" style="color:var(--muted)">예: "양자컴퓨팅" 테마를 인식시키기</span></td><td><code>data/enrichment/themes.yaml</code></td><td>쉬움</td></tr>
+        <tr><td>운용사 표기 통일</td><td><code>data/enrichment/managers.yaml</code></td><td>쉬움</td></tr>
+        <tr><td>평가 질문 추가</td><td><code>data/eval/questions.jsonl</code></td><td>쉬움 — 한 줄이 한 문항</td></tr>
+        <tr><td>정답 키 문항 추가<br><span class="kv" style="color:var(--muted)">현재 54문항. SQL로 정답이 계산되는 질문</span></td><td><code>data/eval/groundtruth.jsonl</code></td><td>보통 — <code>truth_sql</code>과 <code>check</code> 작성 필요<br><span class="kv" style="color:var(--copper)">동률·소수점 답은 채점 방식을 함께 확인할 것</span></td></tr>
+        <tr><td>배경 지식 문서 추가</td><td><code>data/external/docs/*.md</code></td><td>쉬움 — 앞머리에 출처·기준일 필수</td></tr>
+        <tr><td>편입종목 다시 수집<br><span class="kv" style="color:var(--muted)">기준일을 상품 마스터에 가깝게 당기기</span></td><td><code>scripts/fetch_constituents_naver.py</code> → <code>build_store.py</code></td><td>보통 — DB·그래프·색인 모두 재생성</td></tr>
+        <tr><td>LLM에게 주는 지시·SQL 예시 수정<br><span class="kv" style="color:var(--muted)">답변 품질에 가장 직접적인 영향</span></td><td><code>src/finagent/agent/prompts.py</code></td><td>보통</td></tr>
+        <tr><td>도구 추가·설명 수정</td><td><code>src/finagent/agent/tools.py</code></td><td>보통</td></tr>
+        <tr><td>컬럼 의미·허용값 정의</td><td><code>ontology/*.ttl</code></td><td>보통 — 수정 후 <code>pytest tests/test_ontology.py</code></td></tr>
+        <tr><td>파생 컬럼 추가·뷰 수정</td><td><code>src/finagent/etl/build_store.py</code></td><td>어려움 — DB 재생성 필요</td></tr>
+        <tr><td>검색 결합 방식 변경</td><td><code>src/finagent/kb/vector.py</code></td><td>어려움 — 결정 05 참고</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="callout">
+    <p><strong>고친 뒤에는 항상</strong> <code>.venv\Scripts\python.exe -m pytest -q</code>를 돌리세요.
+    사전 데이터(YAML)만 고쳤다면 서버만 다시 켜면 되고, ETL을 고쳤다면 <code>build_store.py</code>부터 다시 돌려야 합니다.</p>
+    <p style="max-width:none;margin-bottom:0"><strong>그리고 테스트가 통과했다고 끝난 게 아닙니다.</strong> 1절에 적어 둔 열한 개는 전부 테스트가 초록인 상태에서 틀려 있었습니다.
+    무언가를 바꿨으면 <strong>결과를 한 번 더 세어 보세요</strong> — SQL로 나온 개수를 그래프로, 그래프로 나온 개수를 SQL로.</p>
+  </div>
+</section>
+
+<footer class="end">
+  <p style="max-width:none">
+    코드: <code>fin-agent/</code> · 상세 문서: <code>README.md</code>, <code>docs/api_spec.md</code>, <code>docs/proposal_outline.md</code> ·
+    설계 배경: <code>docs/superpowers/specs/</code>
+  </p>
+  <p style="max-width:none">이 문서의 숫자는 <strong>2026년 9월 6일</strong>에 저장소·온톨로지에서 다시 확인한 값이며, 2026-08-24 주최측 공지를 반영한 상태입니다.
+    아직 측정하지 않은 값(54문항 정확도, 컨테이너 기동 시간)은 숫자를 적지 않고 "미측정"으로 표시했습니다.</p>
+</footer>
+
+</main>
+</div>
+</div>

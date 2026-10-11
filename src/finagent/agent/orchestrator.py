@@ -1,5 +1,12 @@
 """Per-question orchestration: deterministic pre-analysis, tool-calling loop under a time budget,
-evidence + trace assembly into the competition response schema."""
+evidence + trace assembly into the competition response schema.
+
+Questions come in Korean or English.  The answer language is ``detect_lang(question)``; it is stated to
+the model next to the question and picks the language of every answer sentence this module writes
+itself.  The Korean question-parsing patterns are the competition build's and are unchanged; each
+English pattern runs only on questions ``detect_lang`` calls English, so a Korean question takes
+exactly the path it took before.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -10,10 +17,12 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from ..i18n import detect_lang, language_name, pick
 from ..models import AnswerResponse
 from ..ontology.loader import normalize_text as _nrm
-from .answer import CANNOT_PREFIX, Evidence, fallback_answer, format_evidence, format_trace, normalize_answer
+from .answer import Evidence, cannot_prefix, fallback_answer, format_evidence, format_trace, normalize_answer
 from .llm import LLMClient, ToolCall
+from .routing import fold_sentence_starts, is_english
 from .routing import prefetch as route_prefetch
 from .tools import ToolRegistry, ToolResult
 
@@ -21,6 +30,24 @@ log = logging.getLogger("finagent.orchestrator")
 
 _GRADE_MENTION = re.compile(r"(?:신용등급|등급)\s*(?:이|가|은|는)?\s*([A-Za-z]{1,5}[+\-0]?)|\b([A-Da-d]{1,5}[+\-0]?)\s*(?:이상|이하|등급)")
 _RISK_MENTION = re.compile(r"(?:위험등급|위험\s*)?(\d{1,2})\s*등급")
+# English: "credit rating AAAA", "rated AAAA", "AAAA or higher".  The rating itself must be written in
+# capitals — a lower-case 'a' is an article, and 'BondBloxx BB Rated USD …' is a product name (the
+# keywords are matched in lower case on sentence-folded text, see routing.fold_sentence_starts).
+_GRADE_MENTION_EN = re.compile(
+    r"\bcredit\s+(?:rating|grade)s?(?:\s+(?:of|is|are|at|least|above|below|over|under|higher|lower|than|equal|to))*"
+    r"\s*[=:]?\s*([A-Z]{1,5}[+\-0]?)(?![\w+\-])"
+    r"|\brated\s+(?:at\s+)?([A-Z]{1,5}[+\-0]?)(?![\w+\-])"
+    r"|\b([A-D]{1,5}[+\-0]?)(?=\s+(?:or|and)\s+(?:higher|above|better|up|lower|below|worse)\b)"
+)
+# English: "risk grade 7", "risk level of 7", "grade 7", "7th grade".  '… Investment Grade 12% …' is a
+# product name, hence lower-case keywords and no percentage right after the number.
+_RISK_MENTION_EN = re.compile(
+    r"\brisk\s+(?:grade|level|rating|class)\s*(?:of\s+)?(\d{1,2})\b(?!\s*%)"
+    r"|\bgrade[\s-]*(\d{1,2})\b(?!\s*%)"
+    r"|\b(\d{1,2})(?:st|nd|rd|th)?[\s-]*grade\b"
+)
+_RECENT_MONTHS = re.compile(r"최근\s*(\d+)\s*개월")
+_RECENT_MONTHS_EN = re.compile(r"\b(?:last|past|recent|previous)\s+(\d+)\s+months?\b", re.I)
 
 
 @dataclass
@@ -29,74 +56,90 @@ class PreAnalysis:
     invalid: list[str] = field(default_factory=list)
     mentions: list[str] = field(default_factory=list)
     steps: list[str] = field(default_factory=list)
-    # 질문이 특정 상품명을 지목했는데 그런 상품이 없는 경우: (언급, 유사 후보 이름들)
+    # The question named a specific product that does not exist: (mention, names of similar candidates)
     unresolved: list[tuple[str, list[str]]] = field(default_factory=list)
+    # The ontology violations in ``invalid``, worded for a Korean answer (``invalid`` is English)
+    invalid_ko: list[str] = field(default_factory=list)
 
 
-# 답변이 "그 상품은 없다"는 사실을 인지했는지 판정할 때 쓰는 표현들
+# Count questions ("how many").
 _COUNT_QUESTION = re.compile(r"몇\s*(개|건|종목|가지|곳)|개수|건수|수는\??$|수를\s*알려")
+_COUNT_QUESTION_EN = re.compile(r"\bhow\s+many\b|\bnumber\s+of\b|\bcount\s+of\b|\btotal\s+count\b", re.I)
 
-# ---------------------------------------------------------------- 미래 예측 요구 감지
-# 온톨로지의 속성을 전수 확인한 결과, **미래에 실현될 값을 담은 컬럼은 하나도 없다.** 앞을 보는
-# 이름을 가진 유일한 속성은 v_bond_kr.exrt_grte_ern_r(만기보장수익률)인데 이조차 계약으로 확정된
-# 값이지 예측이 아니고, mat_date·delisting_date 는 예정된 사실이다. 마스터 테이블은 모두 기준일
-# 시점의 스냅샷이다. 따라서 "미래 값"을 묻는 질문은 표현을 바꾼다고 답할 수 있는 것이 아니라
-# 스키마상 답이 존재하지 않는 질문이다 — 이것이 이 가드의 근거다.
-# (사고 사례 G-019: "내년 예상 수익률" 에 과거 1년 수익률 du_er_1y=260.41 을 예측치로 제시)
+
+def is_count_question(question: str) -> bool:
+    q = question or ""
+    return bool(_COUNT_QUESTION.search(q)) or (is_english(q) and bool(_COUNT_QUESTION_EN.search(q)))
+
+
+# ---------------------------------------------------------------- detecting requests for future values
+# A full check of the ontology's properties found that **not one column holds a value realised in the
+# future.**  The only property with a forward-looking name is v_bond_kr.exrt_grte_ern_r (guaranteed
+# yield to maturity), and even that is a contractually fixed value, not a forecast; mat_date and
+# delisting_date are scheduled facts.  Every master table is a snapshot as of the base date.  So a
+# question asking for a "future value" is not one that rewording can make answerable — the schema holds
+# no answer to it.  That is the basis of this guard.
+# (Incident G-019: for "내년 예상 수익률" (next year's expected return) the past 1-year return
+# du_er_1y=260.41 was presented as the forecast.)
 _FORECAST_WORD = r"예상|전망|예측|추정"
-# '순자산'을 값 표현에 넣은 근거: 이것도 기준일 스냅샷 값이라 미래 시점 값은 존재하지 않는다.
-# 목록에 없어서 G-045("2027년 말 예상 순자산 규모")가 가드를 그대로 통과했다.
-# '규모'는 값이 아니라 크기를 가리키는 말이라 단독으로 넣으면 안 된다 — 그렇게 넣었더니
-# "미래 성장 규모가 큰 테마"라는 정상 질문이 '미래 … 규모'로 걸려 답변이 막혔다. 실측 결과
-# G-045 는 '예상 순자산' / '향후 … 순자산' 두 경로 모두로 걸리므로 '규모' 없이도 잡힌다.
-# 값 명사에 붙은 '자산 규모'만 남긴다.
+# Why '순자산' (net assets) is among the value words: it too is a base-date snapshot value, so no future
+# value exists.  Missing from the list, G-045 ("2027년 말 예상 순자산 규모", expected net assets at the end
+# of 2027) went straight through the guard.
+# '규모' (size) points to a magnitude, not a value, so it must not be added alone — added that way, the
+# ordinary question "미래 성장 규모가 큰 테마" (themes with large future growth) was caught as
+# '미래 … 규모' and its answer blocked.  Measured, G-045 is caught by both '예상 순자산' and
+# '향후 … 순자산', so it is caught without '규모'.  Only '자산 규모' attached to a value noun stays.
 _VALUE_WORD = r"수익률|수익|가격|주가|시세|배당|성과|순자산|자산\s*규모"
-# '미래' 뒤에 한글이 붙으면 미래 시점이 아니라 이름이다 — 상품명 9,816건이 '미래'로 시작하고
-# (미래에셋…, BNK 미래전략기술액티브 …) 운용사 이름 자체가 미래에셋이다. 접미 한글을 배제한다.
-# '연말'은 과거일 수도 있어("작년 연말 수익률") 넣지 않는다. 미래를 뜻하는 '올해 말'만 받는다.
+# '미래' (future) followed by Hangul is a name, not a point in the future — 9,816 product names start
+# with '미래' (미래에셋…, BNK 미래전략기술액티브 …) and the manager itself is 미래에셋.  A following Hangul
+# syllable is excluded.  '연말' (year-end) can be in the past ("작년 연말 수익률", last year-end's return),
+# so it is left out; only '올해 말' (the end of this year), which means the future, is accepted.
 _FUTURE_WORD = r"내년|내후년|향후|앞으로|미래(?![가-힣])|장래|다음\s*해|올해\s*말"
 
 _FORWARD_LOOKING = re.compile(
     "|".join(
         (
-            # "예상 수익률", "수익률 전망" — 예측어와 값 표현이 붙어 있는 경우
+            # "예상 수익률", "수익률 전망" — a forecast word right next to a value word
             rf"(?:{_FORECAST_WORD})[^\n]{{0,10}}(?:{_VALUE_WORD})",
             rf"(?:{_VALUE_WORD})[^\n]{{0,10}}(?:{_FORECAST_WORD})",
-            # "내년 수익률", "앞으로 주가" — 미래 시점 표현이 값 표현 근처에 있는 경우
+            # "내년 수익률", "앞으로 주가" — a future-time word near a value word
             rf"(?:{_FUTURE_WORD})[^\n]{{0,15}}(?:{_VALUE_WORD})",
             rf"(?:{_VALUE_WORD})[^\n]{{0,15}}(?:{_FUTURE_WORD})",
-            # 값 표현 없이 등락만 묻는 경우: "오를까요?", "떨어질까"
+            # rise or fall asked without a value word: "오를까요?" (will it rise?), "떨어질까" (will it fall)
             r"(?:오를|올라갈|상승할|하락할|떨어질|내려갈|빠질)\s*(?:까|지|것|수|듯|가능성|여지|전망)",
             r"(?:얼마나|얼마|몇\s*%|몇\s*퍼센트)\s*(?:오를|오르|상승|하락|떨어질|내릴)",
         )
     )
 )
 
-# 만기보장수익률(v_bond_kr.exrt_grte_ern_r)과 분배/배당 주기는 실제로 데이터에 있는 값이므로
-# 미래 예측 질문으로 오인하면 안 된다. 운용사명 '미래 에셋'(띄어 쓴 표기)도 마찬가지다.
-# 판정 전에 지워서 값 표현·미래 표현으로 세지 않게 한다.
+# The guaranteed yield to maturity (v_bond_kr.exrt_grte_ern_r) and the distribution/dividend frequency
+# are values the data really holds, so they must not be mistaken for forecast questions.  Nor must the
+# manager name '미래 에셋' written with a space.  They are erased before the check so they count neither
+# as value words nor as future words.
 _FORWARD_EXEMPT = re.compile(r"(?:만기\s*)?보장\s*수익률|배당\s*주기|분배\s*주기|미래\s*에셋")
 
-# ---- 네 자리 연도로 적은 미래 시점
-# 미래를 '내년·향후'가 아니라 연도로만 적으면 _FUTURE_WORD 목록에 걸리지 않는다. 실제로 G-045
-# ("KODEX 200의 2027년 말 예상 순자산 규모")가 그렇게 빠져나가 현재 순자산을 예측치로 냈다.
-# 데이터 기준일의 연도보다 큰 연도는 미래 시점으로 보고 _FUTURE_WORD 자리에 치환한다.
+# ---- a future point written as a four-digit year
+# A future written only as a year, not '내년·향후' (next year, from now on), is not caught by _FUTURE_WORD.
+# G-045 ("KODEX 200의 2027년 말 예상 순자산 규모") slipped out exactly that way and gave the current net
+# assets as the forecast.  A year later than the data's base year is taken as a future point and
+# replaced with a _FUTURE_WORD.
 #
-# 함정: "만기가 2027년인 채권"(G-002)도 미래 연도를 말하지만 예측이 아니라 **기록된 날짜 필드**를
-# 묻는다 — mat_date 는 데이터에 실제로 들어 있으므로 답할 수 있어야 한다. 그래서 연도가 만기·상환·
-# 발행·상장 같은 날짜 필드 어휘에 붙어 있으면 미래 시점으로 세지 않는다. 치환한 뒤의 판정은 기존
-# 규칙 그대로라, 미래 연도가 값 표현(수익률·순자산 …)과 가까이 있을 때만 예측 질문이 된다.
+# The trap: "만기가 2027년인 채권" (bonds maturing in 2027, G-002) also names a future year, but it asks
+# about a **recorded date field**, not a forecast — mat_date is in the data, so it must be answerable.
+# So a year attached to date-field vocabulary such as maturity, redemption, issue or listing is not
+# counted as a future point.  After the replacement the existing rules apply unchanged: only a future
+# year close to a value word (return, net assets …) makes a forecast question.
 _DATE_FIELD_WORD = r"만기|상환|만료|발행|상장|설정|기준일|마감|청산|해지|폐지|출시|가입"
 _YEAR_MENTION = re.compile(
     rf"(?:(?P<pre>{_DATE_FIELD_WORD})[^\n]{{0,6}})?(?P<year>\d{{4}})\s*년(?:\s*(?P<post>{_DATE_FIELD_WORD}))?"
 )
-# 스토어 meta 를 못 읽는 경로(모듈 단독 호출·테스트)용 기본값. 실제 판정에서는 Orchestrator 가
-# base_date(= v_etf_kr 의 meta 기준일)의 연도를 넘긴다.
+# Default for paths that cannot read the store meta (the module on its own, tests).  In real use the
+# Orchestrator passes the year of base_date (= v_etf_kr's meta base date).
 _BASE_YEAR_FALLBACK = 2026
 
 
 def _mark_future_years(text: str, base_year: int) -> str:
-    """기준연도보다 뒤인 연도 표기를 미래 시점 표현으로 바꾼다(날짜 필드에 붙은 연도는 제외)."""
+    """Replace a year after the base year with a future-time word (years attached to date fields excepted)."""
 
     def repl(m: re.Match) -> str:
         if int(m.group("year")) <= base_year or m.group("pre") or m.group("post"):
@@ -106,47 +149,159 @@ def _mark_future_years(text: str, base_year: int) -> str:
     return _YEAR_MENTION.sub(repl, text)
 
 
+# ---- English.  The same four families: forecast word + value word, future-time word + value word, a
+# future year, and rise/fall asked without a value word.  Matched in lower case on sentence-folded text:
+# product names are capitalised ('Goldman Sachs Future Tech Leaders', 'RH Tactical Outlook ETF', 'RISE 200').
+_FORECAST_WORD_EN = r"expect(?:ed|s)?|forecast(?:s|ed)?|outlook|predict(?:ed|ion|ions|s)?|projected|projections?|estimated|anticipated"
+_VALUE_WORD_EN = (
+    r"returns?|yields?|prices?|share\s+prices?|valuations?|dividends?|distributions?|performance|gains?|profits?"
+    r"|net\s+assets?|NAV|AUM|assets\s+under\s+management|(?:fund|asset)\s+size"
+)
+_NUM_EN = r"\d+|two|three|four|five|six|seven|eight|nine|ten"
+_FUTURE_WORD_EN = (
+    r"next\s+(?:year|month|quarter|week|decade|few\s+years)|the\s+(?:coming|next)\s+(?:years?|months?|quarters?)"
+    rf"|in\s+(?:{_NUM_EN})\s+years(?:'|’)?(?:\s+time)?|in\s+(?:a|one)\s+year(?:'s|’s)\s+time"
+    rf"|(?:{_NUM_EN}|a|an|one)\s+years?\s+(?:from\s+now|later|ahead)"
+    r"|going\s+forward|from\s+now\s+on|future(?!s)|(?:the\s+)?end\s+of\s+this\s+year|later\s+this\s+year"
+)
+_DIRECTION_EN = (
+    r"rise|fall|go\s+(?:up|down)|increase|decrease|drop|climb|gain|decline|rebound|recover|crash|surge|plunge"
+    r"|soar|appreciate|depreciate|grow"
+)
+_FORWARD_LOOKING_EN = re.compile(
+    "|".join(
+        (
+            rf"\b(?:{_FORECAST_WORD_EN})\b[^\n]{{0,30}}?\b(?:{_VALUE_WORD_EN})\b",
+            rf"\b(?:{_VALUE_WORD_EN})\b[^\n]{{0,30}}?\b(?:{_FORECAST_WORD_EN})\b",
+            rf"\b(?:{_FUTURE_WORD_EN})\b[^\n]{{0,40}}?\b(?:{_VALUE_WORD_EN})\b",
+            rf"\b(?:{_VALUE_WORD_EN})\b[^\n]{{0,40}}?\b(?:{_FUTURE_WORD_EN})\b",
+            # "will it rise?", "is 삼성전자 likely to fall" — but never "could you …" / "would you …"
+            rf"\b(?:will|would|could|might|may|going\s+to|likely\s+to|expected\s+to|set\s+to)\b(?!\s+(?:you|u|I|we)\b)"
+            rf"[^\n.?!]{{0,40}}?\b(?:{_DIRECTION_EN})\b",
+            rf"\bhow\s+(?:much|far|high|low)\b[^\n.?!]{{0,30}}?\b(?:will|would|could|might|can)\b[^\n.?!]{{0,30}}?"
+            rf"\b(?:{_DIRECTION_EN}|return|earn|make)\b",
+        )
+    )
+)
+_FORWARD_EXEMPT_EN = re.compile(
+    r"\bguaranteed\s+(?:maturity\s+)?(?:yield|return|rate)s?\b|\byield\s+to\s+maturity\b"
+    r"|\b(?:dividend|distribution|payout)\s+(?:frequency|cycle|schedule)\b",
+    re.I,
+)
+# A bare year counts as a future point only after a time preposition ('in 2027', 'by the end of 2027'):
+# foreign ETF names carry years too ('iShares iBonds Dec 2030 Term Corporate ETF', 'TDF 2045').  Date
+# fields nearby ('bonds maturing in 2027', '2027 maturity') are recorded dates, as in Korean.
+_YEAR_EN = re.compile(
+    r"\b(?:in|by|until|till|through|for|around|during|before|after|of|at)\s+"
+    r"(?:the\s+(?:end|start|beginning|middle|close)\s+of\s+)?(?:(?:early|mid|late)[\s-]+)?"
+    r"(?P<year>(?:19|20)\d{2})\b(?![\-/.]\d)"
+)
+_DATE_FIELD_EN = re.compile(
+    r"\b(?:matur\w*|redeem\w*|redemption|expir\w*|issu\w*|list(?:ed|ing|s)?|launch\w*|incept\w*|establish\w*"
+    r"|settle\w*|base\s+date|deadline|liquidat\w*|terminat\w*|delist\w*|subscri\w*|call(?:ed|able)?)\b",
+    re.I,
+)
+
+
+def _mark_future_years_en(text: str, base_year: int) -> str:
+    def repl(m: re.Match) -> str:
+        if int(m.group("year")) <= base_year:
+            return m.group(0)
+        if _DATE_FIELD_EN.search(text[max(0, m.start() - 25):m.start()]) or _DATE_FIELD_EN.search(text[m.end():m.end() + 15]):
+            return m.group(0)
+        return " in the future "
+
+    return _YEAR_EN.sub(repl, text)
+
+
 def asks_forward_looking(question: str, base_year: int = _BASE_YEAR_FALLBACK) -> bool:
-    """질문이 데이터에 존재하지 않는 '미래 값'을 요구하는가."""
-    text = _mark_future_years(_FORWARD_EXEMPT.sub(" ", question or ""), base_year)
-    return bool(_FORWARD_LOOKING.search(text))
+    """Does the question ask for a 'future value' that the data does not hold?"""
+    q = question or ""
+    text = _mark_future_years(_FORWARD_EXEMPT.sub(" ", q), base_year)
+    if _FORWARD_LOOKING.search(text):
+        return True
+    if not is_english(q):
+        return False
+    en = _mark_future_years_en(_FORWARD_EXEMPT_EN.sub(" ", fold_sentence_starts(q)), base_year)
+    return bool(_FORWARD_LOOKING_EN.search(en))
 
 
-# ---------------------------------------------------------------- 편입 종목 조회 범위 감지
-# 편입(구성) 종목 데이터는 v_etf_constituent 하나뿐이고, 이 뷰는 국내 ETF 1,162 종목 / 22,599행
-# (네이버금융 수집)만 담는다. 해외ETF 마스터(v_etf_gl)와 공모펀드(v_fund_pub)에는 보유 종목
-# 컬럼 자체가 없다. 그러므로 "X 를 편입한 해외 ETF / 공모펀드"는 질의를 잘 짜면 답이 나오는
-# 질문이 아니라 데이터에 그 관계가 없는 질문이다 — 판단이 아니라 스키마의 사실이다.
-#   G-040: v_etf_constituent 에서 0건을 받고도 앞 라운드에 남아 있던 국내 ETF 10개를
-#          '해외 ETF'라고 나열했다.
-#   G-041: search_products 의 이름 유사도 결과를 '그 종목을 보유한 펀드'로 바꿔 읽었다.
-#          search_products 는 어휘·의미 유사도만 주고 보유 관계는 전혀 establish 하지 않는다.
+# ---------------------------------------------------------------- detecting the scope of a holdings lookup
+# Holdings (constituent) data exists only in v_etf_constituent, and that view covers only domestic
+# ETFs, 1,162 products / 22,599 rows (collected from Naver Finance).  The foreign ETF master (v_etf_gl)
+# and public funds (v_fund_pub) have no holdings column at all.  So "foreign ETFs / public funds that
+# hold X" is not a question that a well-written query answers; the data simply has no such relation —
+# a fact of the schema, not a judgement.
+#   G-040: after getting 0 rows from v_etf_constituent, the model listed 10 domestic ETFs left over
+#          from an earlier round as 'foreign ETFs'.
+#   G-041: it read search_products' name-similarity results as 'funds holding that stock'.
+#          search_products gives only lexical/semantic similarity and establishes no holding relation.
 _HOLDING_WORD = re.compile(r"보유|편입|담고\s*있|담은|담긴|포함한|포함하고\s*있|포함된|구성\s*종목|들고\s*있")
-# 보유 종목 데이터가 없는 상품군. '펀드'는 그 자체로 범위 한정어이므로 공모·사모를 포괄한다.
+# Product groups without holdings data.  '펀드' (fund) is a scope word by itself and covers public and private funds.
 _NO_HOLDING_SCOPE = re.compile(r"해외\s*상장\s*ETF|해외\s*ETF|미국\s*ETF|공모\s*펀드|사모\s*펀드|ETN|펀드")
-# 국내 ETF 를 함께 지목했다면 답할 수 있는 부분이 있으므로 가드를 걸지 않는다. 범위어가 아예 없는
-# "에코프로비엠을 편입한 ETF" 도 _NO_HOLDING_SCOPE 에 걸리지 않아 그대로 답변된다.
+# If domestic ETFs are named as well, part of the question is answerable, so the guard does not fire.
+# "에코프로비엠을 편입한 ETF" (ETFs holding 에코프로비엠), with no scope word at all, does not hit
+# _NO_HOLDING_SCOPE either and is answered normally.
 _HOLDING_SCOPE_OK = re.compile(r"국내\s*(?:상장\s*)?ETF")
+# English.  Lower-case keywords on sentence-folded text ('ASML Holding NV' is a name); 'including' is a
+# preposition far more often than a holding.  'US' must be written in capitals — 'tell us' is not a market.
+_HOLDING_WORD_EN = re.compile(
+    r"\b(?:hold|holds|holding|holdings|held|contain|contains|containing|include|includes|constituents?"
+    r"|portfolio\s+of|in\s+(?:its|their)\s+portfolios?)\b"
+)
+_NO_HOLDING_SCOPE_EN = re.compile(
+    r"\b(?i:overseas|foreign|global|international)(?:[\s-]+(?i:listed))?\s+(?i:etfs?)\b"
+    r"|\b(?:U\.?S\.?|(?i:american))(?:[\s-]+(?i:listed))?\s+(?i:etfs?)\b"
+    r"|\b(?i:public(?:ly[\s-]+offered)?|mutual|private(?:ly[\s-]+placed)?)\s+(?i:funds?)\b"
+    r"|\b(?i:etns?)\b"
+    r"|\b(?i:funds?)\b(?!\s+(?i:size|managers?|family|families|flows?))"
+)
+_HOLDING_SCOPE_OK_EN = re.compile(r"\b(?i:domestic|korean|korea|krx)(?:[\s-]+(?i:listed))?\s+(?i:etfs?)\b")
+
+
+def mentions_holdings(question: str) -> bool:
+    """Does the question use a holding word (보유/편입…, hold/contain/include…)?"""
+    q = question or ""
+    return bool(_HOLDING_WORD.search(q)) or (is_english(q) and bool(_HOLDING_WORD_EN.search(fold_sentence_starts(q))))
 
 
 def asks_holdings_without_data(question: str) -> bool:
-    """'그 기업을 담고 있는 상품'을 묻는데, 지목한 상품군에 편입 데이터가 없는가."""
+    """Asks for 'products holding that company', but the named product group has no holdings data?"""
     q = question or ""
-    if not _HOLDING_WORD.search(q) or not _NO_HOLDING_SCOPE.search(q):
-        return False
-    return not _HOLDING_SCOPE_OK.search(q)
+    holding, blind, ok = _HOLDING_WORD.search(q), _NO_HOLDING_SCOPE.search(q), _HOLDING_SCOPE_OK.search(q)
+    if is_english(q):
+        en = fold_sentence_starts(q)
+        holding = holding or _HOLDING_WORD_EN.search(en)
+        blind = blind or _NO_HOLDING_SCOPE_EN.search(en)
+        ok = ok or _HOLDING_SCOPE_OK_EN.search(en)
+    return bool(holding and blind) and not ok
 
 
-# ---------------------------------------------------------------- 상품군 범위 감지 (온톨로지 주도)
-# 어느 상품군이 무엇을 갖는가 하는 '사실'은 온톨로지가 갖는다(클래스 계층, fp:hasConstituent 의
-# 정의역, 컬럼 속성의 fp:sourceTable). 여기 있는 것은 그 사실이 아니라 **한국어 표기 변형**뿐이다:
-# rdfs:label 이 '해외ETF' 라고만 적혀 있어서 '해외 상장 ETF'·'미국 ETF' 라는 말버릇을 못 잡는다.
-# 표기가 늘면 이 표에 줄이 늘고, 상품군의 성질이 바뀌면 TTL 이 바뀐다 — 섞이면 안 된다.
+# ---------------------------------------------------------------- detecting the product-group scope (ontology-driven)
+# The *facts* of which product group has what belong to the ontology (the class hierarchy, the domain of
+# fp:hasConstituent, the columns' fp:sourceTable).  What lives here is not those facts but **Korean
+# spelling variants** only: rdfs:label says just '해외ETF', so habits of speech like '해외 상장 ETF' and
+# '미국 ETF' are not caught.  More spellings add rows to this table; a change in a group's nature
+# changes the TTL — the two must not mix.
 _GROUP_ALIASES = {
     "해외상장etf": "ForeignETF", "미국etf": "ForeignETF", "미국상장etf": "ForeignETF",
     "해외상장etn": "ForeignETN", "국내상장etf": "DomesticETF", "국내상장etn": "DomesticETN",
     "공모형펀드": "PublicFund", "사모형펀드": "PrivateFund", "원화채권": "DomesticBond",
 }
+# English questions also match the classes' English labels (label_en: 'Foreign ETF', 'Public Offering
+# Fund' …) and these English spelling variants.  'US ETF' is folded to 'US-listed ETF' first, because the
+# normalised 'usetf' would also hit 'PLUS ETF' and 'FOCUS ETF'.
+_GROUP_ALIASES_EN = {
+    "overseasetf": "ForeignETF", "overseaslistedetf": "ForeignETF", "foreignlistedetf": "ForeignETF",
+    "globaletf": "ForeignETF", "internationaletf": "ForeignETF", "uslistedetf": "ForeignETF",
+    "americanetf": "ForeignETF", "overseasetn": "ForeignETN", "foreignlistedetn": "ForeignETN",
+    "koreanetf": "DomesticETF", "koreaetf": "DomesticETF", "korealistedetf": "DomesticETF",
+    "domesticlistedetf": "DomesticETF", "krxlistedetf": "DomesticETF", "koreanetn": "DomesticETN",
+    "publicfund": "PublicFund", "publiclyofferedfund": "PublicFund", "mutualfund": "PublicFund",
+    "privatefund": "PrivateFund", "privatelyplacedfund": "PrivateFund",
+    "koreanbond": "DomesticBond", "krwbond": "DomesticBond",
+}
+_US_ETF = re.compile(r"\bU\.?S\.?(?:[\s-]+(?i:listed))?\s+(?=(?i:etfs?)\b)")
 
 
 def product_groups(question: str, ontology) -> list:
@@ -157,17 +312,20 @@ def product_groups(question: str, ontology) -> list:
     """
     if ontology is None or getattr(ontology, "graph", None) is None:
         return []
+    english = is_english(question)
     forms: list[tuple[str, object]] = []
     for ci in ontology.descendants("Product"):
         if ci.label_ko:
             forms.append((_nrm(ci.label_ko), ci))
-        if re.fullmatch(r"[A-Z]{2,4}", ci.name):  # fp:ETF / fp:ETN — 로컬명이 곧 한국어 표기다
+        if english and getattr(ci, "label_en", ""):
+            forms.append((_nrm(ci.label_en), ci))
+        if re.fullmatch(r"[A-Z]{2,4}", ci.name):  # fp:ETF / fp:ETN — the local name is the Korean spelling too
             forms.append((ci.name.lower(), ci))
-    for surf, cname in _GROUP_ALIASES.items():
+    for surf, cname in list(_GROUP_ALIASES.items()) + (list(_GROUP_ALIASES_EN.items()) if english else []):
         ci = ontology.class_info(cname)
         if ci is not None:
             forms.append((surf, ci))
-    q = _nrm(question)
+    q = _nrm(_US_ETF.sub("US-listed ", question) if english else question)
     spans: list[tuple[int, int, object]] = []
     for surf, ci in forms:
         if len(surf) < 2:
@@ -179,7 +337,7 @@ def product_groups(question: str, ontology) -> list:
     out, seen = [], set()
     for a, b, ci in sorted(spans):
         if any(x <= a and b <= y and (y - x) > (b - a) for x, y, _ in spans):
-            continue  # 더 긴 표기에 포함된 조각('해외ETF' 안의 'ETF')은 버린다
+            continue  # drop a fragment inside a longer spelling (the 'ETF' inside '해외ETF')
         if ci.iri not in seen:
             seen.add(ci.iri)
             out.append(ci)
@@ -201,9 +359,10 @@ def group_views(groups, ontology) -> dict:
     return out
 
 
-# ---------------------------------------------------------------- 정렬 기준 감지
-# "…기준", "…이 가장 높은/낮은/큰/작은", "TOP N", "상위/하위 N" 처럼 순위를 요구하는 표현에서
-# 기준이 되는 값 표현을 뽑는다. 뽑기만 하고 판단은 온톨로지(resolve_measure)가 한다.
+# ---------------------------------------------------------------- detecting the ranking criterion
+# From expressions that ask for a ranking — "…기준" (by …), "…이 가장 높은/낮은/큰/작은" (the highest/
+# lowest/largest/smallest …), "TOP N", "상위/하위 N" (top/bottom N) — extract the value expression the
+# ranking is based on.  This only extracts; the ontology (resolve_measure) judges.
 _CRITERION = [
     re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*기준(?![일가])"),
     re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:이|가)\s*가장\s*(?:높은|낮은|큰|작은|많은|적은|빠른|긴|짧은)"),
@@ -211,17 +370,84 @@ _CRITERION = [
     re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:상위|하위)\s*\d+"),
     re.compile(r"([가-힣A-Za-z0-9()%\s]{2,26})\s*(?:순으로|순위)"),
 ]
-# 값이 아니라 대상을 가리키는 말. 이것들이 기준으로 잡히면 pd_nm·product_type 같은 문자열 컬럼에
-# 걸려 "정렬 기준은 상품명" 같은 헛소리를 주입한다.
+# Words that name the target, not the value.  Caught as a criterion they hit string columns such as
+# pd_nm or product_type and inject nonsense like "the sort criterion is the product name".
 _CRIT_STOP = {"상품", "종목", "가지", "개수", "건수", "곳", "것", "기업", "회사", "펀드", "etf", "etn",
               "채권", "상품군", "항목", "기준", "이름", "정보", "데이터", "조건", "구분", "현재", "지금"}
-# 기준 표현 앞에 붙는 기간 수식어 — '1년' '5년' '최근 3개월' '연초대비' 는 뒤 명사와 한 덩어리다.
+# Period modifiers in front of a criterion — '1년' (1 year), '5년', '최근 3개월' (last 3 months), '연초대비'
+# (year to date) form one unit with the noun after them.
 _PERIOD_TOKEN = re.compile(r"^(?:최근)?\s*(?:\d+\s*(?:일|주|주일|개월|달|년)|연초\s*대비|ytd)$", re.I)
-# 관형형·용언 어미로 끝나는 말은 값의 이름이 아니라 앞 명사를 꾸미는 말이다. '판매중인 상품 기준으로'
-# 의 '판매중인' 이 is_on_sale 을 정렬 기준으로 끌고 왔고, '서로 다른 종목' 의 '다른' 도 그랬다.
-# 실제 값 이름(총보수·순자산·수익률·표면금리·분배금·비중·만기·변동성·추적오차)은 이 어미로 끝나지 않는다.
+# A word ending in an adnominal or verbal ending is not the name of a value but a modifier of the noun
+# before it.  The '판매중인' (on sale) of '판매중인 상품 기준으로' dragged in is_on_sale as the sort
+# criterion, and the '다른' (other) of '서로 다른 종목' did the same.  Real value names (총보수·순자산·
+# 수익률·표면금리·분배금·비중·만기·변동성·추적오차) do not end in these endings.
 _ADNOMINAL = re.compile(r"(?:인|한|는|된|던|른|은|을|를)$")
 _COUNT_ASKED = re.compile(r"(?:top|상위|하위)\s*(\d+)|(\d+)\s*개(?!월)|(\d+)\s*(?:종목|건|가지)", re.I)
+
+# English: "top 5 … by net assets", "sorted/ranked/ordered by 1-year return", "the highest total fee".
+# The phrase runs up to a clause word, so 'by net assets among domestic ETFs' yields 'net assets'.
+_CRIT_END_EN = (
+    r"(?=\s*(?:[,.?!;:]|$|\b(?:among|in|for|of|with|that|which|from|and|or|as|on|to|at|is|are|was|were"
+    r"|has|have|across|between|within|over|than|per|versus|vs|compared|desc|descending|asc|ascending"
+    r"|order|first|limit|please)\b))"
+)
+_CRIT_PHRASE_EN = r"(?:the\s+|their\s+|its\s+)?(?P<m>[A-Za-z0-9()%\-][A-Za-z0-9()%\- ]{1,39}?)"
+_CRITERION_EN = [
+    re.compile(rf"\b(?:sort(?:ed)?|rank(?:ed)?|order(?:ed)?)\s+by\s+{_CRIT_PHRASE_EN}{_CRIT_END_EN}", re.I),
+    re.compile(
+        rf"\b(?:top|bottom|highest|lowest|largest|smallest|biggest|best|worst|most|least)\b[^.?!\n]{{0,80}}?"
+        rf"\bby\s+{_CRIT_PHRASE_EN}{_CRIT_END_EN}",
+        re.I,
+    ),
+    re.compile(
+        rf"\b(?:highest|lowest|largest|smallest|biggest|greatest|longest|shortest|cheapest)\s+{_CRIT_PHRASE_EN}{_CRIT_END_EN}",
+        re.I,
+    ),
+]
+_CRIT_STOP_EN = {"product", "products", "fund", "funds", "etf", "etfs", "etn", "etns", "bond", "bonds", "stock",
+                 "stocks", "item", "items", "one", "ones", "company", "companies", "name", "names", "number",
+                 "count", "data", "value", "values", "share", "shares", "class", "classes"}
+# The ontology's measure labels are Korean ('순자산총액', '1년 수익률'), so an English measure phrase is
+# looked up through its Korean label words.  A phrase with no known measure word is dropped: a weak
+# match on English text is noise ('net assets' half-matches has_buy_yield), not a hint.
+_MEASURE_EN = (
+    (re.compile(r"\bnet\s+assets?(?:\s+value)?\b|\b(?:fund|asset)\s+size\b", re.I), "순자산"),
+    (re.compile(r"\bAUM\b|\bassets\s+under\s+management\b", re.I), "AUM"),
+    (re.compile(r"\btotal\s+(?:expense|fee)s?(?:\s+ratio)?\b|\bexpense\s+ratio\b|\bfees?\b", re.I), "총보수"),
+    (re.compile(r"\btracking\s+error\b", re.I), "추적오차율"),
+    (re.compile(r"\bvolatility\b", re.I), "변동성"),
+    (re.compile(r"\b(?:distribution|dividend)\s+(?:yield|rate)\b", re.I), "분배수익률"),
+    (re.compile(r"\bcoupon(?:\s+rate)?\b", re.I), "표면이자율"),
+    (re.compile(r"\b(?:purchase|buy)\s+yield\b|\byield\s+to\s+maturity\b", re.I), "매수수익률"),
+    (re.compile(r"\bafter[\s-]+tax\s+yield\b", re.I), "세후수익률"),
+    (re.compile(r"\breturns?\b|\bperformance\b|\byield\b", re.I), "수익률"),
+)
+_PERIOD_EN = (
+    (re.compile(r"\b(\d+)[\s-]*(?:years?|yrs?)\b", re.I), "{}년"),
+    (re.compile(r"\b(\d+)[\s-]*months?\b", re.I), "{}개월"),
+    (re.compile(r"\b(\d+)[\s-]*weeks?\b", re.I), "{}주"),
+    (re.compile(r"\b(\d+)[\s-]*days?\b", re.I), "{}일"),
+    (re.compile(r"\bone[\s-]*year\b|\bannual\b", re.I), "1년"),
+    (re.compile(r"\bytd\b|\byear[\s-]*to[\s-]*date\b", re.I), "ytd"),
+)
+_NUMBER_WORDS = {"two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+                 "eight": "8", "nine": "9", "ten": "10", "twenty": "20"}
+_N_EN = r"\d+|" + "|".join(_NUMBER_WORDS)
+_COUNT_ASKED_EN = re.compile(
+    rf"\b(?:top|bottom|first)\s+({_N_EN})\b"
+    rf"|\b({_N_EN})\s+(?:largest|smallest|biggest|highest|lowest|best|worst|cheapest|most|least)\b"
+    rf"|\b(\d+)\s+(?:[A-Za-z][A-Za-z-]*\s+){{0,2}}(?:products?|funds?|ETFs?|ETNs?|bonds?|stocks?|items?|names?)\b",
+    re.I,
+)
+
+
+def measure_phrase_ko(phrase: str) -> str | None:
+    """The Korean label words for an English measure phrase ('1-year return' -> '1년 수익률'), or None."""
+    measure = next((ko for pat, ko in _MEASURE_EN if pat.search(phrase)), None)
+    if measure is None:
+        return None
+    period = next((fmt.format(*m.groups()) for pat, fmt in _PERIOD_EN if (m := pat.search(phrase))), None)
+    return f"{period} {measure}" if period else measure
 
 
 def criterion_phrases(question: str) -> list[str]:
@@ -245,14 +471,23 @@ def criterion_phrases(question: str) -> list[str]:
             out, seen = [], set()
             for c in cands:
                 n, last = _nrm(c), _nrm(c.split()[-1])
-                # 끝 낱말로 판정한다: 한국어는 수식이 앞에 붙으므로 구의 정체는 마지막 명사가 정한다.
-                # '판매중인 상품' 은 상품을 가리키는 말이지 값의 이름이 아니다.
+                # Judged by the last word: Korean modifiers come first, so the last noun decides what the
+                # phrase is.  '판매중인 상품' (products on sale) names products, not a value.
                 if len(n) < 2 or n in seen or n in _CRIT_STOP or last in _CRIT_STOP or _ADNOMINAL.search(n):
                     continue
                 seen.add(n)
                 out.append(c)
             if out:
                 return out
+    if is_english(q):
+        for pat in _CRITERION_EN:
+            for m in pat.finditer(q):
+                toks = [t.strip(",") for t in m.group("m").split() if t.strip(",")][:4]
+                if not toks or toks[-1].lower() in _CRIT_STOP_EN:
+                    continue
+                phrase = " ".join(toks)
+                if measure_phrase_ko(phrase) is not None:
+                    return [phrase]
     return []
 
 
@@ -260,11 +495,14 @@ _STATUS_RANK = {"resolved": 4, "period_missing": 3, "ambiguous": 2, "weak": 1, "
 
 
 def requested_count(question: str) -> int | None:
-    m = _COUNT_ASKED.search(question or "")
+    q = question or ""
+    m = _COUNT_ASKED.search(q)
+    if not m and is_english(q):
+        m = _COUNT_ASKED_EN.search(q)
     if not m:
         return None
     n = next((g for g in m.groups() if g), None)
-    return int(n) if n else None
+    return int(_NUMBER_WORDS.get(n.lower(), n)) if n else None
 
 
 class _Steps(list):
@@ -305,59 +543,76 @@ class _Steps(list):
 def _scalar_of(text: str) -> int | None:
     """The single number a COUNT-style query returned, or None if the result isn't one number.
 
-    ``rows_to_text`` renders it as ``cnt`` / ``240`` / ``총 1건``.  HCX has been observed running the
-    right SQL, reading 240 and then writing "24개" in the answer, so the server keeps the number the
-    tool actually produced and checks the answer against it.
+    ``rows_to_text`` renders it as ``cnt`` / ``240`` / ``Total rows: 1``.  HCX (the competition build's
+    model) has been observed running the right SQL, reading 240 and then writing "24개" in the answer,
+    so the server keeps the number the tool actually produced and checks the answer against it.
     """
-    # The tools append their own advisory lines ("⚠ 위 숫자는 행 수입니다" ...), so match the header /
-    # value / count prefix and ignore whatever follows — an exact 3-line check silently gave up on
-    # every result that carried a warning.
+    # The tools append their own advisory lines ("⚠ The number above is a row count" ...), so match the
+    # header / value / count prefix and ignore whatever follows — an exact 3-line check silently gave up
+    # on every result that carried a warning.
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 3 or "|" in lines[0] or "|" in lines[1] or not lines[2].startswith("총 1건"):
+    if len(lines) < 3 or "|" in lines[0] or "|" in lines[1] or not re.match(r"Total rows: 1(?!\d)", lines[2]):
         return None
     val = lines[1].replace(",", "").strip()
     return int(val) if re.fullmatch(r"-?\d+", val) else None
 
 
+# Expressions that show the answer has recognised that "that product does not exist" (or asks back).
 _ACKNOWLEDGED = ("확인할 수 없", "확인되지 않", "존재하지 않", "찾을 수 없", "없습니다만", "혹시", "말씀하시", "유사한", "다른 상품")
+_ACKNOWLEDGED_EN = re.compile(
+    r"\b(?:cannot|can't|can\s+not|could\s+not|couldn't|unable\s+to)\s+(?:be\s+)?"
+    r"(?:confirm(?:ed)?|find|found|locate[d]?|identif(?:y|ied))\b"
+    r"|\b(?:does|do|did)\s+not\s+exist\b|\bdoesn't\s+exist\b|\bnot\s+found\b|\bno\s+(?:such|matching|exact)\b"
+    r"|\bdid\s+you\s+mean\b|\bdo\s+you\s+mean\b|\bare\s+you\s+(?:looking\s+for|referring\s+to)\b|\bby\s+any\s+chance\b"
+    r"|\bsimilar(?:ly[\s-]+named)?\b|\b(?:another|a\s+different|other)\s+product\b"
+    r"|\b(?:is|are)\s+not\s+(?:available|provided|in\s+the\s+data)\b",
+    re.I,
+)
 
 
-# ---------------------------------------------------------------- 같은 호출 반복 감지
-# 첫 접근이 실패했을 때 같은 호출을 그대로 다시 보내는 사고가 실제로 났다(G-015: 8라운드 동안
-# 서로 다른 질의는 2개뿐이었고, 하나는 매번 'no such column: pd_no' 로 실패, 다른 하나는 매번
-# 0건이었다). 루프 안에서 "지금 같은 것을 또 보냈다"고 말해 주는 곳이 없었던 것이 원인이다.
+def _acknowledged(answer: str) -> bool:
+    return any(k in answer for k in _ACKNOWLEDGED) or bool(_ACKNOWLEDGED_EN.search(answer))
+
+
+# ---------------------------------------------------------------- detecting the same call repeated
+# Re-sending the very same call after a first approach failed really happened (G-015: in 8 rounds there
+# were only 2 distinct queries; one failed every time with 'no such column: pd_no', the other returned 0
+# rows every time).  The cause was that nothing in the loop said "you just sent the same thing again".
 #
-# ★ LLM 라운드는 어차피 소비된 뒤다. 여기서 얻는 것은 시간이 아니라 '모델이 자기가 막혔다는
-#   사실을 알아차릴 기회'다 — 같은 결과를 말없이 다시 주면 모델은 새 정보를 받았다고 착각하고
-#   같은 질의를 또 낸다.
+# ★ The LLM round has been spent by then anyway.  What this buys is not time but 'a chance for the
+#   model to notice it is stuck' — handing back the same result silently makes the model believe it got
+#   new information, and it sends the same query again.
 #
-# ★ 그래서 호출은 **막지 않고 그대로 실행하고**, 결과 뒤에 경고만 덧붙인다. 처음 판에서는 실행을
-#   건너뛰고 캐시를 돌려줬는데, G-040 에서 3·4라운드에 그게 걸리면서 모델이 막다른 길에서
-#   빠져나오려던 시도를 잘라 버렸고 결국 앞 라운드에 남아 있던 결과로 답을 지어냈다. 실행을
-#   건너뛰어 아끼는 것은 도구 시간 몇 밀리초뿐이고, 그 대가로 탈출구 하나가 사라진다.
+# ★ So the call is **not blocked; it runs as usual** and only a warning is appended to the result.  The
+#   first version skipped execution and returned the cached result; in G-040 that kicked in at rounds 3
+#   and 4, cut off the model's attempt to get out of the dead end, and it ended up making the answer up
+#   from results left over from earlier rounds.  Skipping execution saves only a few milliseconds of tool
+#   time, and costs one way out.
 
 _SQL_ARGS = ("sql", "sparql")
-# purpose 는 추적용 주석이라 결과를 바꾸지 않는다. 키에 넣으면 문구만 손봐도 '다른 호출'이 되어
-# 감지기를 그냥 빠져나간다 — 막으려는 루프가 정확히 그 모양이다.
+# purpose is a comment for the trace and does not change the result.  Put it in the key and merely
+# rewording it makes 'a different call' that slips past the detector — which is exactly the shape of the
+# loop being prevented.
 _KEY_IGNORED_ARGS = ("purpose",)
 _SQL_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
 def _norm_sql(s: str) -> str:
-    """두 SQL 이 '같은 질의'인지 비교하기 위한 정규화.
+    """Normalisation for comparing whether two SQL strings are 'the same query'.
 
-    코드펜스와 끝 세미콜론을 떼고, 공백을 접고(연산자·괄호·쉼표 주변 공백은 아예 제거),
-    **문자열 리터럴 밖만** 소문자로 내린다. 바꾸는 것은 표기뿐이고 의미는 건드리지 않는다.
+    Strip code fences and the trailing semicolon, collapse whitespace (whitespace around operators,
+    parens and commas is removed entirely), and lower-case **only outside string literals**.  Only the
+    notation changes; the meaning is not touched.
 
-    리터럴까지 소문자로 내리면 안 된다 — SQLite 에서 crd_grd='AA-' 와 'aa-' 는 다른 질의라서,
-    조건 값을 바꿔 가며 좁혀 가는 정상적인 재시도를 '반복'으로 오인하게 된다.
+    Literals must not be lower-cased — in SQLite crd_grd='AA-' and 'aa-' are different queries, and the
+    normal retry that narrows down by changing condition values would be mistaken for 'repetition'.
     """
     s = re.sub(r"^```(?:sql)?\s*|\s*```$", "", (s or "").strip(), flags=re.I).strip().rstrip(";")
     s = re.sub(r"\s+", " ", s).strip()
 
     def _plain(seg: str) -> str:
-        # 'a = 1' 과 'a=1', 'in (1, 2)' 와 'in(1,2)' 는 같은 질의다. 식별자끼리는 붙지 않는다
-        # (공백을 지우는 것은 구두점·연산자에 '붙은' 공백뿐이다).
+        # 'a = 1' and 'a=1', 'in (1, 2)' and 'in(1,2)' are the same query.  Identifiers never merge
+        # (only whitespace *attached* to punctuation and operators is removed).
         return re.sub(r"\s*([^\w\s가-힣])\s*", r"\1", seg.lower())
 
     out, last = [], 0
@@ -369,115 +624,124 @@ def _norm_sql(s: str) -> str:
     return "".join(out)
 
 
-# ------------------------------------------------- 조회 없이 낸 답변을 되돌리는 강제 재시도
-# HCX-005 는 도구를 한 번도 부르지 않고 사전학습 지식만으로 답해 버리는 경우가 있다. 같은 질문을
-# 5회씩 실측한 결과 그렇게 나온 답은 예외 없이 틀렸다:
-#   G-034 — 5/5 가 도구 0회로 3.3초에 끝나고 운용사를 약칭 'Invesco' 로 답했다.
-#           DB 의 값은 'Invesco Capital Management LLC' 라 공식 명칭이 아니어서 오답.
-#   G-010 — 5회 중 도구를 부른 3회는 정답, 부르지 않은 2회는 DB 에 존재하지도 않는 상품명과
-#           수치를 통째로 지어냈다(순수 환각).
-# 도구를 부르면 맞고 안 부르면 틀린다는 관찰에 예외가 없었으므로, 조회를 한 번도 하지 않은 채
-# 제출된 final_answer 는 받지 않고 한 라운드를 더 돌린다. 채점 기준의 [환각 방지] 항목이
-# "데이터에 없는 내용은 추출하지 않음" 을 요구한다.
+# ------------------------------------------------- forced retry that sends back an answer given without a lookup
+# HCX-005 (the competition build's model) sometimes answered from pre-training knowledge alone, without
+# calling a single tool.  Measured over 5 runs of the same questions, answers produced that way were
+# wrong without exception:
+#   G-034 — 5/5 ended in 3.3 seconds with 0 tools and gave the manager as the short form 'Invesco'.
+#           The DB value is 'Invesco Capital Management LLC', so not the official name — wrong.
+#   G-010 — of 5 runs, the 3 that called tools were right; the 2 that did not invented a product name
+#           and numbers that do not exist in the DB at all (pure hallucination).
+# The observation that calling tools is right and not calling them is wrong had no exception, so a
+# final_answer submitted without a single lookup is not accepted and one more round runs.  The grading
+# criterion [hallucination prevention] requires "does not extract content that is not in the data".
 #
-# '조회 도구'의 정의는 final_answer 를 뺀 나머지 전부다. 부정 조건(name != "final_answer")
-# 대신 명시적 허용 목록으로 적은 이유는, 모델이 존재하지 않는 이름의 도구를 부른 경우를 조회로
-# 세면 안 되기 때문이다 — 그런 호출은 실행되지 않고 "알 수 없는 도구" 오류만 돌아오므로 근거가
-# 생기지 않는다. 목록이 실제 레지스트리와 어긋나면 test_lookup_tools_matches_registry 가 잡는다.
+# 'Lookup tool' means everything except final_answer.  It is written as an explicit allow-list rather
+# than a negative condition (name != "final_answer") because the model calling a tool with a nonexistent
+# name must not count as a lookup — such a call is not executed and only an "Unknown tool" error comes
+# back, so no evidence arises.  If the list drifts from the real registry,
+# test_lookup_tools_matches_registry catches it.
 #
-# table_info 는 값이 아니라 스키마를 돌려주지만 조회로 친다: 기준일·허용값처럼 table_info 만으로
-# 답이 되는 문항이 있고, 여기서 빼면 그런 문항에 근거 없이 라운드가 하나 더 붙는다.
+# table_info returns a schema, not values, but counts as a lookup: some questions are answered by
+# table_info alone (base dates, allowed values), and leaving it out would add an evidence-less round to them.
 LOOKUP_TOOLS = frozenset({
     "sql_query", "table_info", "search_products", "resolve_entity",
     "graph_neighbors", "graph_query", "search_documents",
 })
 
-# 강제 재시도 1회의 실측 비용은 LLM 라운드 1회 ≈ 11초다. 다만 되돌린 뒤에는 도구를 실행하는
-# 라운드와 final_answer 를 다시 받는 라운드가 더 필요하므로 세 라운드 분의 여유를 요구한다.
-# 남은 예산이 이보다 적으면 되돌리지 않고 있는 답을 그대로 받는다 — 근거 없는 답 하나보다
-# 응답시간(주최측 권장 60초)을 넘겨 문항을 통째로 잃는 쪽이 나쁘다.
+# The measured cost of one forced retry is one LLM round ≈ 11 seconds.  After sending it back, though, a
+# round to run the tools and a round to receive final_answer again are needed, so three rounds' worth of
+# headroom is required.  With less budget left the answer is accepted as is without sending it back —
+# losing the whole question by exceeding the response time (the organisers recommend 60 seconds) is worse
+# than one answer without evidence.
 FORCED_LOOKUP_MIN_REMAINING_SEC = 33.0
 
-# final_answer 호출에 되돌려 주는 tool_result. OpenAI/CLOVA 프로토콜은 이 턴의 tool_call 마다
-# 결과를 요구하므로, 대화를 이어가려면 반드시 채워야 한다(비우면 다음 요청이 400 으로 떨어진다).
+# The tool_result returned for the final_answer call.  The OpenAI/CLOVA protocol requires a result for
+# every tool_call of the turn, so it must be filled to continue the conversation (left empty, the next
+# request fails with 400).
 _NO_LOOKUP_TOOL_RESULT = (
-    "제출이 거부되었습니다. 이번 질문에서 데이터 조회 도구를 한 번도 호출하지 않았습니다. "
-    "조회 결과에 근거하지 않은 답변은 환각으로 처리됩니다. 데이터를 먼저 조회한 뒤 "
-    "final_answer 를 다시 호출하세요."
+    "Submission rejected. No data lookup tool has been called for this question. "
+    "An answer not grounded in lookup results counts as a hallucination. Look up the data first, then "
+    "call final_answer again."
 )
 
 _UNRUN_TOOL_RESULT = (
-    "이 호출은 같은 턴에 final_answer 가 함께 있어 실행되지 않았습니다. 필요하면 지금 다시 호출하세요."
+    "This call was not executed because final_answer came in the same turn. Call it again now if you need it."
 )
 
-# 재시도 지시는 '사용 시점의 사실'로 준다. 이 프로젝트에서 미리 준 프롬프트 규칙은 무시됐고
-# (4/4), 그 순간의 사실로 준 지시는 지켜졌다(5/5). 마지막 문단은 확인불가 문항이 이 재시도
-# 때문에 답을 지어내기 시작하는 부작용을 막는다 — 조회 후의 거절은 유지되어야 한다.
+# The retry instruction is given as 'a fact at the point of use'.  In this project, prompt rules given in
+# advance were ignored (4/4) and instructions given as facts of the moment were followed (5/5).  The last
+# paragraph prevents the side effect of cannot-confirm questions starting to make up answers because of
+# this retry — a refusal after a lookup must stand.
 _NO_LOOKUP_RETRY = (
-    "[답변 전 데이터 조회 필수] 방금 제출한 final_answer 는 받지 않았습니다. 이번 질문에서 "
-    "데이터 조회 도구를 한 번도 부르지 않았기 때문입니다.\n"
-    "답변 전에 최소 한 번은 데이터를 조회해야 합니다. 상품의 공식 명칭·수치·날짜는 반드시 조회 "
-    "결과에서 그대로 가져오세요. 기억에 있는 이름을 쓰면 안 됩니다 — 이 데이터에 실린 정식 명칭은 "
-    "흔히 쓰는 약칭과 다르고(예: 운용사명은 법인 정식명입니다), 기억에서 꺼낸 수치는 이 데이터의 "
-    "값이 아닙니다.\n"
-    "지금 할 일: 관련 뷰를 sql_query 로 조회하세요. 컬럼 이름이 불확실하면 table_info 를, 상품의 "
-    "정확한 표기를 모르면 search_products 나 resolve_entity 를 먼저 부르세요. 조회 결과를 확인한 "
-    "뒤 다시 final_answer 를 호출하세요.\n"
-    "조회 결과가 비어 있거나 근거를 찾지 못했다면 답을 지어내지 마세요. 그럴 때는 "
-    "status=cannot_confirm 을 그대로 유지하는 것이 정답입니다. 조회한 뒤의 '제공된 데이터로는 "
-    "확인할 수 없습니다' 는 맞는 답이지만, 조회 없이 단정한 답은 틀린 답입니다."
+    "[Data lookup required before answering] The final_answer you just submitted was not accepted, because "
+    "no data lookup tool has been called for this question.\n"
+    "You must look up data at least once before answering. Take official product names, numbers and dates "
+    "exactly as the lookup results give them. Do not use names from memory — the official names in this "
+    "data differ from the common short forms (e.g. manager names are full legal names), and numbers from "
+    "memory are not this data's values.\n"
+    "What to do now: query the relevant view with sql_query. If unsure of a column name, call table_info "
+    "first; if you do not know a product's exact spelling, call search_products or resolve_entity first. "
+    "After checking the lookup results, call final_answer again.\n"
+    "If the lookup results are empty or you found no evidence, do not make up an answer. In that case "
+    "keeping status=cannot_confirm is the right answer. 'This cannot be confirmed with the provided data' "
+    "after a lookup is a correct answer; an assertion made without a lookup is a wrong one."
 )
 
 
-# ---------------------------------------------------------------- final_answer 게이트
-# 도구 루프가 final_answer 없이 끝나면 오케스트레이터는 모델이 마지막에 흘린 텍스트를 그대로
-# 답변으로 채택한다. 54문항 중 7문항이 이 경로를 탔고 그중 4문항이 오답이었다(G-007/G-009/G-025).
-# G-009 는 SQL 3건을 이미 받아 놓고 "제공된 데이터로는 확인할 수 없습니다" 를 흘렸다.
+# ---------------------------------------------------------------- final_answer gate
+# When the tool loop ends without final_answer, the orchestrator takes the last text the model let out
+# as the answer.  7 of the 54 questions took this path and 4 of them were wrong (G-007/G-009/G-025).
+# G-009 had already received 3 SQL results and let out "제공된 데이터로는 확인할 수 없습니다" (cannot be
+# confirmed with the provided data).
 #
-# 지시문은 조회 0회 게이트(_NO_LOOKUP_RETRY)와 같은 방식으로 '사용 시점의 사실'만 담는다 —
-# 이 프로젝트의 측정에서 미리 준 프롬프트 규칙은 4/4 무시됐고, 그 순간의 사실로 준 지시는
-# 5/5 지켜졌다. 마지막 문단은 G-025 형태(같은 답변 안에서 확인불가와 집계 결과를 동시에
-# 주장하는 자기모순)를 겨냥한 것이다.
+# Like the zero-lookup gate (_NO_LOOKUP_RETRY), the instruction carries only 'facts at the point of use'
+# — in this project's measurements prompt rules given in advance were ignored 4/4 and instructions given
+# as facts of the moment were followed 5/5.  The last paragraph targets the G-025 shape (claiming both
+# cannot-confirm and an aggregate result in the same answer, a self-contradiction).
 _NO_FINAL_RETRY_HEAD = (
-    "[답변 미확정] 아직 final_answer 를 호출하지 않았습니다. 지금까지의 텍스트 응답은 답변으로 "
-    "확정되지 않습니다 — 답변은 final_answer 도구로만 제출됩니다.\n"
-)
-_NO_FINAL_RETRY_TAIL = (
-    "지금 할 일: 추가 조회 없이, 지금까지 확보한 결과만으로 final_answer(status, answer) 를 "
-    "한 번 호출하세요.\n"
-    "answer 에는 완성된 한국어 문장을 넣으세요. JSON·코드펜스·도구 호출 구문을 answer 문자열 "
-    "안에 다시 쓰지 마세요 — 그대로 채점자에게 보입니다.\n"
-    "status 는 근거를 확보했으면 answered, 조회했지만 근거를 찾지 못했으면 cannot_confirm, "
-    "질문 자체가 모호하면 clarify 입니다. 하나만 고르세요 — '확인할 수 없습니다' 로 시작해 놓고 "
-    "같은 답변에 조회 결과를 단정해 붙이면 서로 모순됩니다."
+    "[Answer not submitted] final_answer has not been called yet. The text replies so far are not an "
+    "answer — an answer is submitted only through the final_answer tool.\n"
 )
 
 
-def _no_final_retry(lookups: int, evidence_count: int) -> str:
-    """final_answer 미호출 재제출 지시문. 두 인자는 '사용 시점의 사실'이다."""
+def _no_final_retry_tail(lang: str) -> str:
+    return (
+        "What to do now: without further lookups, call final_answer(status, answer) once, using only the "
+        "results gathered so far.\n"
+        f"Put the answer in complete sentences in {language_name(lang)}. Do not write JSON, code fences or "
+        "tool-call syntax inside the answer string — the grader sees it as is.\n"
+        "status is answered if you have evidence, cannot_confirm if you looked but found no evidence, and "
+        "clarify if the question itself is ambiguous. Pick one — starting with 'this cannot be confirmed' "
+        "and then asserting lookup results in the same answer contradicts itself."
+    )
+
+
+def _no_final_retry(lookups: int, evidence_count: int, lang: str = "en") -> str:
+    """The instruction to resubmit when final_answer was not called.  Both arguments are 'facts at the point of use'."""
     if lookups <= 0:
-        fact = "이번 질문에서는 데이터 조회 도구도 한 번도 부르지 않았습니다."
+        fact = "No data lookup tool has been called for this question either."
     else:
-        fact = f"이번 질문에서 데이터 조회를 {lookups}회 실행했고, 그 결과는 위 대화에 그대로 남아 있습니다."
+        fact = f"Data lookups run for this question: {lookups}; their results are still in the conversation above."
         if evidence_count:
-            fact += f" 그중 {evidence_count}건이 근거로 기록됐습니다."
-    return _NO_FINAL_RETRY_HEAD + fact + "\n" + _NO_FINAL_RETRY_TAIL
+            fact += f" Recorded as evidence: {evidence_count}."
+    return _NO_FINAL_RETRY_HEAD + fact + "\n" + _no_final_retry_tail(lang)
 
 
-# ------------------------------------------- 폴백 텍스트에 섞여 나온 final_answer 인자 JSON
-# G-007 은 answer 필드에 {"answer": "...", "status": ...} 원문이 그대로 실려 채점자 화면에 보였다.
-# answer.strip_tool_call_syntax 는 `final_answer(answer="…")` 형태의 누출만 벗기므로 이 모양은
-# 그대로 통과한다. 여기서 따로 푼다.
+# ------------------------------------------- final_answer argument JSON mixed into the fallback text
+# In G-007 the raw {"answer": "...", "status": ...} ended up in the answer field and was shown to the
+# grader.  answer.strip_tool_call_syntax only peels leaks of the form `final_answer(answer="…")`, so this
+# shape passes straight through.  It is unwrapped here separately.
 _FINAL_JSON_KEYS = re.compile(r'"(answer|status)"\s*:\s*')
 _JSON_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", '"': '"', "\\": "\\", "/": "/"}
 
 
 def _json_string_at(text: str, i: int) -> str | None:
-    """text[i] 가 여는 큰따옴표이면 그 JSON 문자열의 값을 돌려준다(아니면 None).
+    """If text[i] is an opening double quote, return that JSON string's value (else None).
 
-    json.loads 를 쓰지 않는 이유는 실제 사고가 **잘린** JSON 이었기 때문이다 — G-007 은
-    max_tokens 로 문장 중간에서 끊겨 있어 json.loads 로는 열리지 않는다. 닫는 따옴표가 없으면
-    끝까지 읽어 있는 만큼이라도 건진다.
+    json.loads is not used because the real incident was **truncated** JSON — G-007 was cut mid-sentence
+    by max_tokens and json.loads cannot open it.  Without a closing quote, whatever is there is salvaged
+    up to the end.
     """
     if i >= len(text) or text[i] != '"':
         return None
@@ -488,7 +752,7 @@ def _json_string_at(text: str, i: int) -> str | None:
         if ch == "\\":
             esc = text[j + 1: j + 2]
             if not esc:
-                break                                    # 이스케이프 도중에 잘렸다
+                break                                    # cut off in the middle of an escape
             if esc == "u":
                 hexs = text[j + 2: j + 6]
                 if len(hexs) == 4:
@@ -511,12 +775,12 @@ def _json_string_at(text: str, i: int) -> str | None:
 
 
 def unwrap_final_answer_json(text: str) -> tuple[str, str] | None:
-    """final_answer 인자 JSON 이 통째로 답변 자리에 온 경우 (status, answer) 로 푼다.
+    """When final_answer's argument JSON arrives whole in the answer's place, unwrap it into (status, answer).
 
-    받는 변형: 순수 JSON, 코드펜스로 감싼 것, 앞뒤에 설명 문장이 붙은 것, 줄바꿈이 역슬래시-n 으로
-    이스케이프된 것, 그리고 중간에서 잘린 것. 풀지 못하면 None 을 돌려주고 호출부는 지금 동작
-    그대로 간다 — **예외를 던지지 않는다.** status 를 찾지 못하면 빈 문자열을 돌려주고 상태 판정은
-    호출부의 기존 로직에 맡긴다.
+    Accepted variants: pure JSON, wrapped in a code fence, with explanatory sentences before or after,
+    with line breaks escaped as backslash-n, and cut off in the middle.  If it cannot be unwrapped it
+    returns None and the caller carries on exactly as now — **it never raises.**  If no status is found it
+    returns an empty string and leaves the status decision to the caller's existing logic.
     """
     try:
         if not text or '"answer"' not in text:
@@ -526,7 +790,7 @@ def unwrap_final_answer_json(text: str) -> tuple[str, str] | None:
         for m in _FINAL_JSON_KEYS.finditer(text):
             val = _json_string_at(text, m.end())
             if val is None:
-                continue                                 # 문자열이 아닌 값(null 등)은 무시한다
+                continue                                 # non-string values (null etc.) are ignored
             if m.group(1) == "answer":
                 if answer is None:
                     answer = val
@@ -535,22 +799,22 @@ def unwrap_final_answer_json(text: str) -> tuple[str, str] | None:
         if answer is None or not answer.strip():
             return None
         return (status or ""), answer
-    except Exception:                                    # noqa: BLE001 - 폴백 경로는 죽으면 안 된다
+    except Exception:                                    # noqa: BLE001 - the fallback path must not die
         log.exception("final_answer JSON unwrap failed")
         return None
 
 
 def _call_key(call: ToolCall):
-    """'같은 호출'의 정의 = 도구 이름 + (purpose 를 뺀) 인자들의 정규화 형태.
+    """The definition of 'the same call' = tool name + the normalised form of its arguments (purpose excluded).
 
-    더 느슨하게(예: 모든 인자를 casefold·특수문자 제거) 잡으면 서로 다른 검색어를 한 호출로
-    묶어 멀쩡한 시도를 막는다. 오탐 1건의 손해(엉뚱한 이전 결과를 돌려주고 '막혔다'고 말함)가
-    미탐 1건의 손해(지금과 동일한 상태)보다 크므로 엄격한 쪽으로 정의했다.
-    SQL 만 예외적으로 완화한 이유는 위 _norm_sql 참고 — 대소문자·들여쓰기만 바꿔 같은 질의를
-    다시 보내는 것이 실제로 관찰된 형태이기 때문이다.
+    A looser definition (e.g. casefolding every argument and removing punctuation) would lump different
+    search terms into one call and block legitimate attempts.  One false positive (handing back an
+    unrelated earlier result and saying 'you are stuck') costs more than one false negative (the same
+    state as now), so the strict side was chosen.  Only SQL is relaxed — see _norm_sql above — because
+    re-sending the same query with only case or indentation changed is the form actually observed.
     """
     if call.name == "final_answer":
-        return None  # 종료 호출은 중복 판정 대상이 아니다
+        return None  # the terminating call is not subject to the duplicate check
     args = call.input or {}
     parts = []
     for k in sorted(args):
@@ -567,23 +831,23 @@ def _looks_empty(res: ToolResult) -> bool:
     if ev is not None and ev.row_count == 0:
         return True
     c = res.content or ""
-    return "(0건)" in c or "검색 결과 없음" in c or "관련 문서 없음" in c
+    return "(0 rows)" in c or "No search results" in c or "No matching documents" in c
 
 
 def _repeat_note(n: int, res: ToolResult) -> str:
-    """반복 호출에 붙이는 안내. 무엇에 막혔는지에 따라 다음 수를 구체적으로 지정한다."""
+    """The note appended to a repeated call.  The next move is named according to what it got stuck on."""
     if res.is_error:
-        nxt = ("위 오류 메시지가 알려준 실제 컬럼·뷰 이름으로 SQL 을 고치세요. "
-               "이름이 확실하지 않으면 table_info 로 컬럼 목록부터 확인하세요.")
+        nxt = ("Fix the SQL with the real column and view names the error message above gave. "
+               "If unsure of a name, check the column list with table_info first.")
     elif _looks_empty(res):
-        nxt = ("조건을 하나씩 빼면서 어느 조건이 결과를 0건으로 만드는지 찾으세요. "
-               "값의 표기가 어긋났을 수 있으니 table_info 로 허용값을, resolve_entity·search_products 로 "
-               "실제 표기를 확인한 뒤 다시 거세요.")
+        nxt = ("Drop the conditions one at a time to find which one makes the result 0 rows. "
+               "A value may be spelled differently: check the allowed values with table_info and the actual "
+               "spelling with resolve_entity or search_products, then apply the condition again.")
     else:
-        nxt = "이미 확보한 결과입니다. 이 값을 그대로 쓰고 남은 라운드는 아직 확인하지 않은 부분에 쓰세요."
-    return (f"\n\n⚠ 이 호출은 이번 질문에서 {n}번째 동일한 호출입니다. 위 결과는 다시 실행해서 받은 "
-            f"것이며 처음과 같습니다 — 같은 입력은 몇 번을 보내도 결과가 달라지지 않습니다. "
-            f"다른 접근이 필요합니다: {nxt}")
+        nxt = "You already have this result. Use these values as they are and spend the remaining rounds on what you have not checked yet."
+    return (f"\n\n⚠ This is identical call #{n} for this question. The result above was obtained by running it "
+            f"again and is the same as the first time — the same input gives the same result however often it "
+            f"is sent. A different approach is needed: {nxt}")
 
 
 class Orchestrator:
@@ -593,14 +857,16 @@ class Orchestrator:
         self.system_prompt = system_prompt
         self.specs = tools.specs()
         self.base_date = (tools.meta.get("v_etf_kr") or {}).get("base_date") or "2026-08-21"
-        # 편입종목을 가진 상품 수. 주입문에 숫자를 적으려면 온톨로지가 아니라 데이터에서 세야 한다
-        # (온톨로지는 '어느 상품군이 갖는가'를 알지 '몇 개인가'를 모른다).
+        # The number of products that have holdings.  To put a number in the injected text it has to be
+        # counted from the data, not the ontology (the ontology knows 'which product groups have them',
+        # not 'how many').
         self.holding_product_count = self._count_holding_products()
-        # 편입종목 뷰에서 실제로 통하는 조회 키. 사전의 한글명이 원천 표기와 다른 기업이 있어서
-        # (캠브리콘 -> '한무기', 네이버 -> 'NAVER', 에코프로머티리얼즈 -> '에코프로머티') 한글명을
-        # 그대로 WHERE 에 넣으면 0건이 돌아오고, 모델은 그것을 '데이터에 없음'으로 단정한다.
-        # 질문마다 조회하면 기업 하나당 약 12ms 가 붙지만(company_id 에 인덱스가 없다) 기동 시
-        # 한 번의 GROUP BY 는 실측 16~24ms 라, 매핑을 미리 만들고 질문 시점에는 dict 만 본다(µs 단위).
+        # The lookup keys that actually work in the holdings view.  Some companies' Korean names in the
+        # lexicon differ from the source spelling (캠브리콘 -> '한무기', 네이버 -> 'NAVER',
+        # 에코프로머티리얼즈 -> '에코프로머티'), so putting the Korean name straight into WHERE returns 0 rows
+        # and the model concludes 'not in the data'.  Looking it up per question would add about 12ms per
+        # company (company_id has no index), while one GROUP BY at startup measures 16-24ms, so the map is
+        # built in advance and a question only reads a dict (microseconds).
         self.constituent_keys = self._load_constituent_keys()
 
     def _count_holding_products(self) -> int | None:
@@ -614,14 +880,15 @@ class Orchestrator:
             return None
 
     def _load_constituent_keys(self) -> dict[str, list[tuple[str, str, int]]]:
-        """{기업 id: [(company_code, company_name, 행수), ...]} — 편입종목 뷰의 실제 표기.
+        """{company id: [(company_code, company_name, row count), ...]} — the holdings view's real spellings.
 
-        키는 추측하지 않는다.  ETL 이 원천의 종목코드로 이미 붙여 둔 ``etf_constituent.company_id``
-        를 그대로 읽는다 — 그래프의 편입 엣지도 같은 열로 만들어지므로, 여기서 주입하는 키의 건수와
-        같은 줄에 이미 실려 나가는 그래프 건수가 서로 어긋나지 않는다.  (사전의 티커로 뷰를 뒤지는
-        방법도 있지만 그것은 추측이다: 에어버스의 티커 'AIR' 는 이 데이터에서 AAR 을 가리킨다.)
+        The keys are not guessed.  They read ``etf_constituent.company_id``, which the ETL already
+        attached from the source's stock codes — the graph's holding edges are built from the same
+        column, so the counts of the keys injected here and the graph counts already sent on the same
+        line cannot disagree.  (Searching the view by the lexicon's ticker is possible too, but that is
+        a guess: Airbus's ticker 'AIR' points to AAR in this data.)
 
-        그 열이 없는 스토어에서는 빈 매핑이 되고, 빈 매핑이면 주입문은 예전 그대로다.
+        A store without that column gets an empty map, and with an empty map the injected text is as before.
         """
         if self.tools.rdb is None or self.lexicon is None:
             return {}
@@ -632,8 +899,8 @@ class Orchestrator:
                 "WHERE is_cash = 0 AND company_id IS NOT NULL AND company_code IS NOT NULL "
                 "GROUP BY 1, 2, 3"
             )
-        except Exception:  # noqa: BLE001 - 매핑이 없으면 키를 안 붙일 뿐, 답변을 막지 않는다
-            log.exception("constituent key map unavailable - 조회 키 주입 없이 진행")
+        except Exception:  # noqa: BLE001 - without the map no key is attached; the answer is not blocked
+            log.exception("constituent key map unavailable - continuing without lookup keys")
             return {}
         out: dict[str, list[tuple[str, str, int]]] = {}
         for cid, code, name, n in rows:
@@ -649,37 +916,37 @@ class Orchestrator:
         return view or "v_etf_constituent"
 
     def _constituent_key_note(self, company) -> str:
-        """편입종목 뷰에서 이 기업을 찾는 방법 — 한 줄, 스토어에서 읽은 사실만.
+        """How to find this company in the holdings view — one line, only facts read from the store.
 
-        한글명이 뷰 표기와 그대로 일치하는 기업(사전 97개 중 61개)에는 **아무것도 붙이지 않는다**.
-        그 경로는 이미 맞게 조회되고 있고, 잘 되는 것을 건드릴 이유가 없다.  표기가 어긋나는 32개와
-        행이 아예 없는 4개만 사실을 받는다 — 후자는 0건이 질의 잘못이 아니라 데이터의 부재임을
-        모델이 올바로 읽게 하려는 것이다.
+        A company whose Korean name matches the view's spelling as is (61 of the lexicon's 97) gets
+        **nothing attached**.  That path already queries correctly, and there is no reason to touch what
+        works.  Only the 32 with a mismatched spelling and the 4 with no rows at all get the fact — the
+        latter so the model reads 0 rows as the absence of data, not a faulty query.
         """
         if not self.constituent_keys:
             return ""
         rows = self.constituent_keys.get(company.id) or []
         view = self._holding_view
         if not rows:
-            return (f". ⚠ {view} 에 이 기업의 행은 0건입니다 — 어떤 조회 키를 써도 0건이며, "
-                    f"이는 질의가 잘못된 것이 아니라 편입종목 데이터에 이 기업이 없다는 사실입니다")
+            return (f". ⚠ {view} has 0 rows for this company — every lookup key returns 0 rows, and that is "
+                    f"not a faulty query but the fact that the holdings data does not contain this company")
         if any(name == company.name_ko for _, name, _ in rows):
             return ""
         shown = rows[:3]
         codes = ", ".join(f"'{c}'" for c, _, _ in shown)
         names = " / ".join(f"'{n}'" for _, n, _ in shown)
         where = f"company_code = {codes}" if len(rows) == 1 else f"company_code IN ({codes})"
-        more = f" (코드 {len(rows)}개 중 상위 {len(shown)}개만 표시)" if len(rows) > len(shown) else ""
-        return (f". 편입종목 조회 키: {view} 에서 {where} 로 조회하세요{more} "
-                f"(이 뷰의 company_name 값은 {names} — 한글명으로 WHERE 하면 0건입니다)")
+        more = f" (top {len(shown)} of {len(rows)} codes shown)" if len(rows) > len(shown) else ""
+        return (f". Holdings lookup key: query {view} with {where}{more} "
+                f"(this view's company_name value is {names} — a WHERE on the Korean name returns 0 rows)")
 
     def _subsidiary_key_line(self, subs) -> str:
-        """자회사들의 조회 키를 한 줄로.  자회사 이름은 질문에 없어서 각자 줄을 받지 못한다.
+        """The subsidiaries' lookup keys on one line.  Subsidiary names are not in the question, so they get no line of their own.
 
-        '에코프로의 자회사를 편입한 ETF' 에서 모델이 실제로 WHERE 에 넣는 것은 바로 위 줄이 나열한
-        이 이름들이다 — 셋 중 하나는 뷰 표기가 다르고(에코프로머티리얼즈 -> '에코프로머티') 하나는
-        행이 아예 없다.  하나라도 어긋날 때만, 그때는 전부를 싣는다(일부만 주면 나머지는 다시
-        추측 대상이 된다).
+        In '에코프로의 자회사를 편입한 ETF' (ETFs holding 에코프로's subsidiaries), what the model really puts
+        in WHERE are exactly the names listed on the line above — of the three, one is spelled differently
+        in the view (에코프로머티리얼즈 -> '에코프로머티') and one has no rows at all.  Only when at least one
+        is off, and then all of them are given (giving only some leaves the rest to guesswork again).
         """
         if not self.constituent_keys or not subs:
             return ""
@@ -687,22 +954,38 @@ class Orchestrator:
         for s in subs[:6]:
             rows = self.constituent_keys.get(s.id) or []
             if not rows:
-                parts.append(f"{s.name_ko} → 행 0건(편입종목 데이터에 없음)")
+                parts.append(f"{s.name_ko} → 0 rows (not in the holdings data)")
                 off = True
             elif any(n == s.name_ko for _, n, _ in rows):
                 parts.append(f"{s.name_ko} → company_code='{rows[0][0]}'")
             else:
-                parts.append(f"{s.name_ko} → company_code='{rows[0][0]}' (뷰 표기 '{rows[0][1]}')")
+                parts.append(f"{s.name_ko} → company_code='{rows[0][0]}' (written '{rows[0][1]}' in the view)")
                 off = True
         if not off:
             return ""
-        return f"  · 자회사 {self._holding_view} 조회 키: " + ", ".join(parts)
+        return f"  · Subsidiaries' {self._holding_view} lookup keys: " + ", ".join(parts)
 
     @property
     def base_year(self) -> int:
-        """데이터 기준연도. '2027년' 같은 표기가 미래인지 판정하는 기준이다(스토어 meta 에서 온다)."""
+        """The data's base year — the reference for judging whether a year like '2027년' is in the future (from the store meta)."""
         m = re.match(r"(\d{4})", self.base_date or "")
         return int(m.group(1)) if m else _BASE_YEAR_FALLBACK
+
+    def _grade_mentions(self, question: str):
+        """(credit ratings, risk grades) the question names, Korean and English phrasing."""
+        credit = [(m.group(1) or m.group(2) or "").upper() for m in _GRADE_MENTION.finditer(question)]
+        risk = [m.group(1) for m in _RISK_MENTION.finditer(question)]
+        if is_english(question):
+            en = fold_sentence_starts(question)
+            for m in _GRADE_MENTION_EN.finditer(en):
+                g = next(x for x in m.groups() if x).upper()
+                if g not in credit:
+                    credit.append(g)
+            for m in _RISK_MENTION_EN.finditer(en):
+                v = next(x for x in m.groups() if x)
+                if v not in risk:
+                    risk.append(v)
+        return credit, risk
 
     # ------------------------------------------------------------ pre-analysis
     def pre_analyze(self, question: str) -> PreAnalysis:
@@ -710,53 +993,56 @@ class Orchestrator:
 
         lines: list[str] = []
         invalid: list[str] = []
+        invalid_ko: list[str] = []
         steps: list[str] = []
         mentions = extract_product_mentions(question)
         unresolved: list[tuple[str, list[str]]] = []
         for m in mentions:
             r = self.resolver.resolve(m, k=4)
-            resolved = r.resolved  # 판정은 EntityResolver 가 소유한다(도구 출력과 동일 기준)
-            tag = "정확 일치" if r.exact else ("유사 상품으로 해석 가능" if resolved else "일치하는 상품 없음")
-            lines.append(f"- 상품 언급 '{m}': {tag}. " + ("; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in r.products[:4]) or "후보 없음"))
+            resolved = r.resolved  # the EntityResolver owns the judgement (same criterion as the tool output)
+            tag = "exact match" if r.exact else ("resolvable as a similar product" if resolved else "no matching product")
+            lines.append(f"- Product mention '{m}': {tag}. " + ("; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in r.products[:4]) or "no candidates"))
             if not resolved:
                 cands = [h.title for h in r.products[:3]]
                 unresolved.append((m, cands))
                 lines.append(
-                    f"  ⚠ '{m}' 이라는 상품은 데이터에 존재하지 않습니다. 위 후보는 이름이 비슷할 뿐 다른 상품이므로, "
-                    f"그 중 하나를 질문의 상품인 것처럼 답하면 오답입니다. 존재하지 않음을 밝히고 후보를 제시하며 되물으세요."
+                    f"  ⚠ The product '{m}' does not exist in the data. The candidates above only have similar names and are "
+                    f"different products, so answering with one of them as if it were the product asked about is wrong. "
+                    f"Say that it does not exist, offer the candidates and ask back."
                 )
         whole = self.resolver.resolve(question, k=3) if not mentions else None
         comps = self.lexicon.match_companies(question)
         groups = self._groups(question)
-        # 질문이 지목한 상품군 전부가 편입종목 데이터를 갖지 않는가. 이 판정의 근거는 프롬프트의
-        # 문장이 아니라 온톨로지다(fp:hasConstituent 의 정의역 = fp:DomesticETF).
+        # Does every product group the question names lack holdings data?  The basis of this judgement is
+        # the ontology, not a sentence in the prompt (fp:hasConstituent's domain = fp:DomesticETF).
         holding_blind = bool(
-            groups and _HOLDING_WORD.search(question)
+            groups and mentions_holdings(question)
             and self.ontology is not None
             and not any(self.ontology.class_has_holdings(ci.name) for ci in groups)
         )
         holder_label = "/".join(c.label_ko for c in self.ontology.holding_classes()) if self.ontology is not None else ""
         for c in comps:
             subs = self.lexicon.subsidiaries_of(c.id)
-            info = f"- 기업 '{c.name_ko}' ({c.name_en}{', 비상장' if c.not_listed else ''})"
+            info = f"- Company '{c.name_ko}' ({c.name_en}{', unlisted' if c.not_listed else ''})"
             if c.parent:
                 p = self.lexicon.company(c.parent)
-                info += f", 모회사: {p.name_ko if p else c.parent}"
+                info += f", parent: {p.name_ko if p else c.parent}"
             if subs:
-                info += ", 자회사: " + ", ".join(s.name_ko for s in subs)
+                info += ", subsidiaries: " + ", ".join(s.name_ko for s in subs)
             if self.tools.kg is not None and not holding_blind:
-                # ★ 건수는 totals 로 받는다. 예전에는 limit=100 으로 자른 목록의 len 을 적어서
-                #   삼성전자(실제 238건)가 언제나 '100건' 으로 주입됐다 — 상한이 답이 된 것이다.
+                # ★ The count comes from totals.  It used to be len() of a list cut at limit=100, so
+                #   삼성전자 (really 238) was always injected as '100' — the cap became the answer.
                 totals: dict[str, int] = {}
                 self.tools.kg.neighbors(c.name_ko, relation="constituentOf", limit=1, totals=totals)
                 n = totals.get("constituentOf", 0)
-                info += f", 편입 {holder_label or '상품'} {n}건(그래프)" if n else ", 편입 상품 없음(그래프)"
-            # 해소된 개체를 SQL 까지 데려가는 줄.  라벨만 주면 모델은 질문의 표면 문자열을 그대로
-            # WHERE 리터럴로 쓰고 0건을 받는다 — 이 프로젝트에서 반복 확인된 근본 결함이다.
+                info += f", held by {n} {holder_label or 'products'} (graph)" if n else ", held by no product (graph)"
+            # The line that carries the resolved entity all the way to SQL.  Given only the label, the model
+            # uses the question's surface string as the WHERE literal and gets 0 rows — the root defect
+            # this project confirmed again and again.
             if not holding_blind:
                 info += self._constituent_key_note(c)
             if c.note:
-                info += f". 비고: {c.note}"
+                info += f". Note: {c.note}"
             lines.append(info)
             if not holding_blind:
                 sub_keys = self._subsidiary_key_line(subs)
@@ -769,58 +1055,63 @@ class Orchestrator:
             cnt = ""
             if self.tools.kg is not None:
                 n = len(self.tools.kg.neighbors(f"d:theme/{t.id}", relation="hasTheme_inverse", limit=10000).get("hasTheme_inverse", []))
-                cnt = f", 그래프 태깅 상품 {n}건 (graph_neighbors('{t.label_ko}','hasTheme_inverse'))"
-            # 여기에 "이름 LIKE 로 테마를 좁히면 0건이 나온다"는 경고를 넣어 봤다가 뺐다.  캠브리콘에는
-            # 효과가 없었고(모델은 여전히 이름 LIKE 를 먼저 시도했다), 국민성장펀드를 깨뜨렸다 —
-            # 그 질문이 성공하던 경로가 바로 fund_family LIKE '%국민성장%' 였는데 경고가 그 길을
-            # 막았다.  테마 이름으로 좁히는 것이 맞는 질문과 틀린 질문이 섞여 있으므로, 어느 쪽도
-            # 미리 금지하지 않고 동의어와 그래프 건수라는 사실만 준다.
-            lines.append(f"- 테마 '{t.label_ko}' ({t.label_en}; 동의어 {', '.join(t.synonyms[:6])}){cnt}")
+                cnt = f", {n} products tagged in the graph (graph_neighbors('{t.label_ko}','hasTheme_inverse'))"
+            # A warning that "narrowing a theme by name LIKE returns 0 rows" was tried here and removed.  It
+            # had no effect on 캠브리콘 (the model still tried name LIKE first) and broke 국민성장펀드 — the
+            # path by which that question succeeded was exactly fund_family LIKE '%국민성장%', and the
+            # warning blocked it.  Questions where narrowing by theme name is right and wrong are mixed, so
+            # neither is forbidden in advance; only the synonyms and the graph count are given as facts.
+            lines.append(f"- Theme '{t.label_ko}' ({t.label_en}; synonyms {', '.join(t.synonyms[:6])}){cnt}")
         mgrs = self.lexicon.match_managers(question)
         if mgrs:
-            lines.append("- 운용사: " + ", ".join(f"{m.canonical}(manager_name='{m.canonical}')" for m in mgrs))
+            lines.append("- Managers: " + ", ".join(f"{m.canonical}(manager_name='{m.canonical}')" for m in mgrs))
         # ontology validators
-        for m in _GRADE_MENTION.finditer(question):
-            g = (m.group(1) or m.group(2) or "").upper()
+        credit, risk = self._grade_mentions(question)
+        for g in credit:
             if re.fullmatch(r"[A-D]{1,5}[+\-0]?", g) and self.ontology is not None:
                 ok, msg = self.ontology.validate_credit_grade(g)
                 if not ok:
-                    invalid.append(f"신용등급 '{g}'는 존재하지 않는 값입니다. {msg}")
+                    codes = [e.code for e in self.ontology.credit_grades()]
+                    invalid.append(f"Credit rating '{g}' does not exist. {msg}")
+                    invalid_ko.append(f"신용등급 '{g}'는 존재하지 않는 값입니다. 유효한 신용등급: {', '.join(codes)}")
                 else:
                     ge = self.ontology.credit_grades_at_or_above(g)
-                    lines.append(f"- 신용등급 '{g}' 유효. '{g} 이상' = crd_grd IN ({', '.join(repr(x) for x in ge)})")
-        for m in _RISK_MENTION.finditer(question):
-            v = m.group(1)
+                    lines.append(f"- Credit rating '{g}' is valid. '{g} or higher' = crd_grd IN ({', '.join(repr(x) for x in ge)})")
+        for v in risk:
             if self.ontology is not None:
                 ok, msg = self.ontology.validate_risk_grade(v)
                 if not ok:
-                    invalid.append(f"위험등급 '{v}등급'은 존재하지 않습니다. {msg}")
-        if re.search(r"최근\s*(\d+)\s*개월", question):
-            n = int(re.search(r"최근\s*(\d+)\s*개월", question).group(1))
+                    codes = [e.code for e in self.ontology.risk_grades()]
+                    rng = f"{codes[0]}~{codes[-1]}" if codes else "?"
+                    invalid.append(f"Risk grade '{v}' does not exist. {msg}")
+                    invalid_ko.append(f"위험등급 '{v}등급'은 존재하지 않습니다. 위험등급은 {rng}등급만 존재합니다 (1등급이 가장 높은 위험).")
+        recent = _RECENT_MONTHS.search(question) or (_RECENT_MONTHS_EN.search(question) if is_english(question) else None)
+        if recent:
+            n = int(recent.group(1))
             base = dt.date.fromisoformat(self.base_date)
             month = base.month - n
             year = base.year + (month - 1) // 12
             month = (month - 1) % 12 + 1
             cutoff = base.replace(year=year, month=month, day=min(base.day, 28))
-            lines.append(f"- '최근 {n}개월' = {cutoff.isoformat()} ~ {self.base_date} (데이터 기준일 기준)")
+            lines.append(f"- 'last {n} months' = {cutoff.isoformat()} ~ {self.base_date} (counted from the data base date)")
         if whole is not None and whole.products and whole.products[0].score >= 60:
-            lines.append("- 질문 전체와 유사한 상품: " + "; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in whole.products[:3]))
+            lines.append("- Products similar to the whole question: " + "; ".join(f"[{h.table}] {h.title} (id={h.id})" for h in whole.products[:3]))
         crit_phrase, crit = self._criterion_lines(question, groups)
         lines += crit
         if invalid:
-            lines.insert(0, "- ⚠ 온톨로지 위반: " + " / ".join(invalid))
-        text = "[사전 분석 — 참고용, 최종 판단은 도구로 확인]\n" + ("\n".join(lines) if lines else "- 특기사항 없음")
+            lines.insert(0, "- ⚠ Ontology violation: " + " / ".join(invalid))
+        text = "[Pre-analysis — for reference; confirm the final judgement with tools]\n" + ("\n".join(lines) if lines else "- nothing notable")
         steps.append(
-            "사전분석: 상품언급 " + (", ".join(mentions) if mentions else "없음")
-            + (f"; 기업 {', '.join(c.name_ko for c in comps)}" if comps else "")
-            + (f"; 테마 {', '.join(t.label_ko for t in themes)}" if themes else "")
-            + (f"; 상품군 {', '.join(group_name(ci) for ci in groups)}" if groups else "")
-            + ("; 편입데이터 없는 상품군" if holding_blind else "")
-            + (f"; 정렬기준 '{crit_phrase}'" if crit_phrase else "")
-            + (f"; 온톨로지 위반 {len(invalid)}건" if invalid else "")
-            + (f"; 미존재 상품 {len(unresolved)}건" if unresolved else "")
+            "Pre-analysis: product mentions " + (", ".join(mentions) if mentions else "none")
+            + (f"; companies {', '.join(c.name_ko for c in comps)}" if comps else "")
+            + (f"; themes {', '.join(t.label_ko for t in themes)}" if themes else "")
+            + (f"; product groups {', '.join(group_name(ci) for ci in groups)}" if groups else "")
+            + ("; product group without holdings data" if holding_blind else "")
+            + (f"; sort criterion '{crit_phrase}'" if crit_phrase else "")
+            + (f"; {len(invalid)} ontology violation(s)" if invalid else "")
+            + (f"; {len(unresolved)} nonexistent product(s)" if unresolved else "")
         )
-        return PreAnalysis(text, invalid, mentions, steps, unresolved)
+        return PreAnalysis(text, invalid, mentions, steps, unresolved, invalid_ko)
 
     # ------------------------------------------------------------ pre-analysis helpers
     def _groups(self, question: str) -> list:
@@ -836,23 +1127,24 @@ class Orchestrator:
         Every number here is read, not remembered: the class from fp:hasConstituent's domain, the
         view from its fp:sourceTable, the product count from that view.
         """
-        view = self.ontology.holding_view() or "편입종목 뷰"
+        view = self.ontology.holding_view() or "the holdings view"
         named = ", ".join(f"{group_name(ci)}({', '.join(sorted(v))})" for ci, v in
-                          ((ci, group_views([ci], self.ontology).get(ci.iri) or {"해당 뷰 없음"}) for ci in groups))
-        cnt = f" {self.holding_product_count:,}종목" if self.holding_product_count else ""
+                          ((ci, group_views([ci], self.ontology).get(ci.iri) or {"no view"}) for ci in groups))
+        cnt = f" ({self.holding_product_count:,} products)" if self.holding_product_count else ""
         return (
-            f"- ⚠ 편입종목 데이터 범위: {named} 에는 보유·편입 종목 데이터가 없습니다. "
-            f"편입종목은 {view} 하나뿐이고 대상은 {holder_label or '국내ETF'}{cnt} 입니다"
-            f"(온톨로지 fp:hasConstituent 의 정의역 = {', '.join(c.name for c in self.ontology.holding_classes())}). "
-            f"따라서 이 상품군으로 한정된 'X를 보유한 …' 질문은 '0건'이 아니라 **제공된 데이터로 확인할 수 없음**입니다. "
-            f"이름이나 테마가 비슷한 상품을 보유 상품인 것처럼 제시하면 오답입니다."
+            f"- ⚠ Holdings data scope: {named} have no holdings data. "
+            f"Holdings exist only in {view}, covering {holder_label or '국내ETF'}{cnt} "
+            f"(the domain of the ontology's fp:hasConstituent = {', '.join(c.name for c in self.ontology.holding_classes())}). "
+            f"So a '… that holds X' question restricted to this product group is not '0 products' but **cannot be confirmed with the provided data**. "
+            f"Presenting products with a similar name or theme as holders is wrong."
         )
 
     def _pick_criterion(self, question: str):
         """(phrase, resolution) for the candidate the ontology resolves best, or None."""
         best = None
         for phrase in criterion_phrases(question):
-            res = self.ontology.resolve_measure(phrase)
+            # An English phrase is looked up through its Korean label words; the phrase shown stays as asked.
+            res = self.ontology.resolve_measure(measure_phrase_ko(phrase) or phrase if is_english(question) else phrase)
             if res.status == "none":
                 continue
             score = max((h.score for h in res.hits + res.other_periods), default=0)
@@ -864,7 +1156,7 @@ class Orchestrator:
     def _criterion_lines(self, question: str, groups) -> tuple[str | None, list[str]]:
         """(phrase, lines) for the ranking criterion — (None, []) when the question ranks nothing.
 
-        Silence is the default and the common case: 순위를 묻지 않는 질문에는 한 줄도 붙지 않는다.
+        Silence is the default and the common case: a question that asks for no ranking gets not a single line.
         """
         if self.ontology is None:
             return None, []
@@ -875,40 +1167,41 @@ class Orchestrator:
             phrase, res = picked
             out: list[str] = []
             if res.status == "resolved":
-                # 질문이 상품군을 지목했으면 그 뷰의 컬럼을 앞에 둔다. '국내 ETF 중 분배율' 에
-                # v_fund_pub 컬럼이 먼저 오면 첫 줄만 읽은 모델이 엉뚱한 뷰로 간다.
+                # If the question names a product group, that view's columns come first.  With v_fund_pub
+                # columns first for '국내 ETF 중 분배율' (distribution rate among domestic ETFs), a model
+                # reading only the first line goes to the wrong view.
                 scope = {v for s in group_views(groups, self.ontology).values() for v in s}
                 hits = sorted(res.hits, key=lambda h: (h.prop.table not in scope, -h.score)) if scope else res.hits
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
-                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in hits[:6])
-                out.append(f"- 정렬 기준 '{phrase}' → 온톨로지 라벨 조회 결과 {cols}. 이 컬럼으로 정렬하고 NULL·0 은 후보에서 제외하세요.")
+                                 + (f", unit {h.prop.unit}" if h.prop.unit else "") + ")" for h in hits[:6])
+                out.append(f"- Sort criterion '{phrase}' → ontology label lookup: {cols}. Sort by this column and drop NULL and 0 from the candidates.")
                 out += self._missing_in_groups(res, groups)
             elif res.status == "period_missing":
                 have = ", ".join(sorted({f"{h.prop.table}.{h.prop.column}({h.prop.label_ko})"
                                          for h in res.other_periods if h.period})[:6])
                 out.append(
-                    f"- 정렬 기준 '{phrase}': 요청한 기간({res.period})의 컬럼이 온톨로지에 없습니다. "
-                    f"같은 개념의 다른 기간 컬럼: {have or '없음'}. 기간을 바꿔 답하려면 그 사실을 답변에 밝히세요."
+                    f"- Sort criterion '{phrase}': the ontology has no column for the requested period ({res.period}). "
+                    f"Columns of the same concept for other periods: {have or 'none'}. If you answer with another period, say so in the answer."
                 )
             elif res.status == "ambiguous":
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko})" for h in res.hits[:10])
                 out.append(
-                    f"- 정렬 기준 '{phrase}' 는 기간·대상이 지정되지 않아 온톨로지에서 "
-                    f"{len({(h.prop.table, h.prop.column) for h in res.hits})}개 컬럼에 대응합니다: {cols}. "
-                    f"질문 맥락에 맞는 컬럼을 고르고 그 기준을 답변 첫 문장에 밝히세요. "
-                    f"맥락으로도 정해지지 않으면 임의로 고르지 말고 되물으세요."
+                    f"- Sort criterion '{phrase}' names no period or target, so in the ontology it maps to "
+                    f"{len({(h.prop.table, h.prop.column) for h in res.hits})} columns: {cols}. "
+                    f"Pick the column that fits the question's context and state the criterion in the answer's first sentence. "
+                    f"If the context does not settle it either, do not pick one arbitrarily; ask back."
                 )
             elif res.status == "weak":
                 cols = ", ".join(f"{h.prop.table}.{h.prop.column}({h.prop.label_ko}"
-                                 + (f", 단위 {h.prop.unit}" if h.prop.unit else "") + ")" for h in res.hits[:4])
+                                 + (f", unit {h.prop.unit}" if h.prop.unit else "") + ")" for h in res.hits[:4])
                 out.append(
-                    f"- 정렬 기준 '{phrase}' 는 온톨로지 라벨과 정확히 일치하는 컬럼이 없습니다. 근접 후보: {cols}. "
-                    f"**라벨이 없다고 데이터에 없는 것이 아닙니다** — table_info 로 확인한 뒤 판단하세요."
+                    f"- Sort criterion '{phrase}' has no column whose ontology label matches exactly. Close candidates: {cols}. "
+                    f"**No label does not mean no data** — check with table_info before judging."
                 )
             if out:
                 n = requested_count(question)
                 if n is not None:
-                    out.append(f"- 요청 개수: {n}개 (LIMIT {n})")
+                    out.append(f"- Requested count: {n} (LIMIT {n})")
             return (phrase if out else None), out
         except Exception:  # noqa: BLE001
             log.exception("criterion resolution failed")
@@ -932,19 +1225,19 @@ class Orchestrator:
                                 if h.prop.table == view and h.period})
                 if other:
                     out.append(
-                        f"  ⚠ {group_name(ci)}({view})에는 '{res.period} {res.base}' 컬럼이 없습니다 — 같은 개념은 "
-                        f"{', '.join(other[:4])} 뿐입니다. 순위 비교에서 제외하고 그 사실을 답변에 밝히세요(값을 0으로 채우지 마세요)."
+                        f"  ⚠ {group_name(ci)}({view}) has no '{res.period} {res.base}' column — the same concept exists only as "
+                        f"{', '.join(other[:4])}. Exclude it from the ranking and say so in the answer (do not fill the value with 0)."
                     )
                     continue
                 probe = self.ontology.measure_candidates_in(res.base, view)
                 if probe:
                     cand = ", ".join(f"{h.prop.column}({h.prop.label_ko})" for h in probe[:3])
                     out.append(
-                        f"  · {group_name(ci)}({view})에는 라벨이 같은 컬럼이 없습니다. 관련 후보: {cand}. "
-                        f"없다고 단정하지 말고 table_info 로 확인하세요."
+                        f"  · {group_name(ci)}({view}) has no column with the same label. Related candidates: {cand}. "
+                        f"Do not conclude it is missing; check with table_info."
                     )
                 else:
-                    out.append(f"  ⚠ {group_name(ci)}({view})에는 이 기준에 해당하는 컬럼이 없습니다. 순위 비교에서 제외하고 그 사실을 밝히세요.")
+                    out.append(f"  ⚠ {group_name(ci)}({view}) has no column for this criterion. Exclude it from the ranking and say so.")
         return out
 
     # ------------------------------------------------------------ main loop
@@ -961,6 +1254,9 @@ class Orchestrator:
         evidences: list[Evidence] = []
         scalars: list[int] = []
         final: dict | None = None
+        # The answer language, decided once: stated to the model next to the question, and the language of
+        # every answer sentence written below.  The system prompt stays identical across requests (cached).
+        lang = detect_lang(question)
 
         def emit(kind: str, **data) -> None:
             if on_event:
@@ -975,7 +1271,7 @@ class Orchestrator:
             steps += pre.steps
         except Exception as e:  # noqa: BLE001
             log.exception("pre-analysis failed")
-            pre = PreAnalysis("[사전 분석 실패]", [], [], [f"사전분석 오류: {type(e).__name__}"])
+            pre = PreAnalysis("[Pre-analysis failed]", [], [], [f"Pre-analysis error: {type(e).__name__}"])
             steps += pre.steps
         emit(
             "pre_analysis",
@@ -986,11 +1282,12 @@ class Orchestrator:
             elapsed=time.monotonic() - t0,
         )
 
-        # ---- 라운드 0: 검색 실행 계획(agent/routing.py)
-        # 사전분석이 "이 저장소가 필요하다"고 판정한 것만 미리 조회해서, 그 결과를 첫 프롬프트에
-        # 사실로 싣는다. 프롬프트로 "그래프를 쓰라"고 지시하는 것과 달리 이것은 지켜진다
-        # (이 프로젝트의 측정: 사용 시점의 사실 5/5 준수, 사전 규칙 4/4 무시).
-        # 실패하거나 예산을 넘기면 아무것도 싣지 않고 기존 도구 루프가 그대로 이어진다.
+        # ---- round 0: the retrieval plan (agent/routing.py)
+        # Only what the pre-analysis judged "this store is needed" is looked up in advance, and the
+        # result goes into the first prompt as facts.  Unlike telling the model "use the graph" in the
+        # prompt, this is honoured (this project's measurement: facts at the point of use 5/5 followed,
+        # rules in advance 4/4 ignored).  On failure or over budget nothing is injected and the existing
+        # tool loop continues as is.
         prefetch_block = ""
         prefetch_ran = 0
         try:
@@ -1002,52 +1299,53 @@ class Orchestrator:
             )
             steps += pf.steps
             prefetch_block = pf.block
-            prefetch_ran = int(pf.ran or 0)   # 라운드 0 이 실제로 실행한 조회 수
-            # 라운드 0 근거는 retrieved_context 에 넣지 않는다: 도구 루프가 같은 조회를 다시 하는
-            # 경우가 대부분이라 [근거] 가 중복으로 찍힌다(근거 개수를 세는 기존 테스트가 이를 잡는다).
-            # 라운드 0 이 무엇을 왜 조회했는지는 think_trace 의 '라운드 0' 줄이 그대로 보여준다.
+            prefetch_ran = int(pf.ran or 0)   # lookups round 0 actually ran
+            # Round-0 evidence does not go into retrieved_context: the tool loop usually repeats the same
+            # lookup, so [Evidence] would be printed twice (an existing test counting evidence catches
+            # that).  What round 0 looked up and why is shown by the 'Round 0' lines of think_trace.
             emit("prefetch", text=pf.block, ran=pf.ran, seconds=pf.seconds,
                  elapsed=time.monotonic() - t0)
-        except Exception as e:  # noqa: BLE001 - 사전검색은 최적화일 뿐 의존성이 아니다
+        except Exception as e:  # noqa: BLE001 - prefetching is an optimisation, not a dependency
             log.exception("retrieval routing failed")
-            steps.append(f"라운드 0 라우팅 실패({type(e).__name__}) — 기존 흐름으로 진행")
+            steps.append(f"Round 0 routing failed ({type(e).__name__}) — continuing with the normal flow")
 
         conv = self.llm.start(self.system_prompt, self.specs,
-                              f"질문: {question}\n\n{pre.text}"
+                              f"Question: {question}\nAnswer language: {language_name(lang)}\n\n{pre.text}"
                               + (f"\n\n{prefetch_block}" if prefetch_block else ""))
         last_text = ""
         nudged = False
-        # key -> (지금까지 몇 번째 호출인지, 첫 실행 결과)
+        # key -> (how many times it has been called so far, result of the first run)
         seen_calls: dict = {}
         repeat_nudged = False
-        # 이번 질의에서 실제로 "실행된" 데이터 조회 호출 수. 같은 턴에 final_answer 와 섞여 나와
-        # 실행되지 않은 호출은 세지 않는다 — 결과를 못 봤으면 근거가 없는 것과 같다.
-        # 라운드 0 사전검색이 실제로 실행한 조회도 여기 포함한다.  제외했더니 게이트가 역효과를 냈다:
-        # '국민성장펀드의 구조와 투자전략' 은 라운드 0 이 문서 2건을 가져와 제대로 답했는데, 게이트가
-        # "조회 0회"라며 되돌려보내자 모델이 조회를 더 하는 대신 맞는 답을 철회하고 "데이터 조회 도구를
-        # 사용하지 않았음을 확인했습니다" 라고 사과했다.  사전검색은 서버가 결정론적으로 실행한 진짜
-        # 조회이므로 근거가 없는 것이 아니다.
+        # Data lookup calls actually *executed* for this question.  Calls that came in the same turn as
+        # final_answer and were not executed do not count — a result not seen is the same as no evidence.
+        # Lookups that round 0's prefetch actually ran count too.  Excluding them made the gate backfire:
+        # for '국민성장펀드의 구조와 투자전략' (the structure and investment strategy of 국민성장펀드) round 0
+        # fetched 2 documents and the answer was right, but when the gate sent it back for "0 lookups", the
+        # model withdrew the right answer instead of looking up more and apologised "I confirm I did not
+        # use the data lookup tools".  The prefetch is a real lookup the server ran deterministically, so
+        # it is not a lack of evidence.
         lookups = 0
-        forced_lookup = False                 # 강제 재시도는 질문당 한 번뿐(무한 루프 금지)
-        rejected_final: dict | None = None    # 되돌린 답변. 재시도가 빈손으로 끝나면 이것을 쓴다.
-        # 아래 final_answer 게이트가 보는 상태.
-        last_turn_ok = False                  # 정상 응답(오류·거부·타임아웃이 아닌)을 한 번이라도 받았는가
-        pending_calls: list[ToolCall] = []    # 아직 결과를 돌려주지 않은 호출(프로토콜상 반드시 채워야 한다)
+        forced_lookup = False                 # the forced retry happens at most once per question (no infinite loop)
+        rejected_final: dict | None = None    # the answer sent back; used if the retry comes back empty-handed
+        # State the final_answer gate below looks at.
+        last_turn_ok = False                  # was a normal reply (not an error, refusal or timeout) received even once?
+        pending_calls: list[ToolCall] = []    # calls whose results have not been returned yet (the protocol requires them)
         for rnd in range(1, self.settings.max_tool_rounds + 2):
             remaining = deadline - time.monotonic()
             if remaining < 3:
-                steps.append(f"라운드 {rnd}: 시간 예산 소진 → 강제 종료")
+                steps.append(f"Round {rnd}: time budget used up → forced stop")
                 break
             try:
                 turn = await asyncio.wait_for(conv.step(), timeout=max(3.0, remaining - 1.0))
             except asyncio.TimeoutError:
-                steps.append(f"라운드 {rnd}: LLM 응답 대기 시간 초과")
+                steps.append(f"Round {rnd}: timed out waiting for the LLM")
                 break
             if turn.stop_reason == "error":
-                steps.append(f"라운드 {rnd}: LLM 오류 — {turn.text[:120]}")
+                steps.append(f"Round {rnd}: LLM error — {turn.text[:120]}")
                 break
             if turn.stop_reason == "refusal":
-                steps.append(f"라운드 {rnd}: 모델 응답 거부")
+                steps.append(f"Round {rnd}: the model refused to answer")
                 break
             last_turn_ok = True
             pending_calls = list(turn.tool_calls)
@@ -1057,15 +1355,15 @@ class Orchestrator:
             if fa is not None:
                 final = fa.input or {}
                 others = [c for c in turn.tool_calls if c.name != "final_answer"]
-                steps.append(f"라운드 {rnd}: final_answer(status={final.get('status', '?')})" + (f" + 무시된 도구 {len(others)}개" if others else ""))
+                steps.append(f"Round {rnd}: final_answer(status={final.get('status', '?')})" + (f" + {len(others)} ignored tool call(s)" if others else ""))
                 remaining = deadline - time.monotonic()
                 if lookups == 0 and prefetch_ran == 0 and not forced_lookup:
-                    # 되돌릴 여유가 있는지 라운드와 시간을 모두 본다. 재시도가 쓸모 있으려면
-                    # 도구를 실행할 라운드가 최소 하나 남아 있어야 한다(rnd+1 <= max_tool_rounds).
+                    # Check both rounds and time for room to send it back.  For the retry to be useful at
+                    # least one round to run tools must be left (rnd+1 <= max_tool_rounds).
                     if rnd >= self.settings.max_tool_rounds or remaining < FORCED_LOOKUP_MIN_REMAINING_SEC:
                         steps.append(
-                            f"라운드 {rnd}: 데이터 조회 0회지만 예산 부족(잔여 {remaining:.0f}s, "
-                            f"최대 {self.settings.max_tool_rounds}라운드) → 강제 재시도 생략하고 답변 수용"
+                            f"Round {rnd}: 0 data lookups, but not enough budget ({remaining:.0f}s left, "
+                            f"at most {self.settings.max_tool_rounds} rounds) → forced retry skipped, answer accepted"
                         )
                         break
                     forced_lookup = True
@@ -1076,44 +1374,44 @@ class Orchestrator:
                     )
                     pending_calls = []
                     conv.add_user(_NO_LOOKUP_RETRY)
-                    steps.append(f"라운드 {rnd}: 데이터 조회 0회 상태의 final_answer → 제출 거부, 조회 후 재제출 지시")
+                    steps.append(f"Round {rnd}: final_answer with 0 data lookups → submission rejected, told to look up and resubmit")
                     emit("forced_lookup_retry", round=rnd,
                          status=str(rejected_final.get("status") or "?"),
                          elapsed=time.monotonic() - t0)
                     continue
                 break
             if not turn.tool_calls:
-                steps.append(f"라운드 {rnd}: 도구 호출 없이 텍스트 응답")
+                steps.append(f"Round {rnd}: text reply without a tool call")
                 if rnd <= self.settings.max_tool_rounds and not nudged:
                     nudged = True
-                    conv.add_user("답변을 final_answer 도구로 제출하세요(status 포함).")
+                    conv.add_user("Submit the answer with the final_answer tool (including status).")
                     continue
                 break
             if rnd > self.settings.max_tool_rounds:
-                steps.append(f"라운드 {rnd}: 최대 라운드 초과")
+                steps.append(f"Round {rnd}: maximum rounds exceeded")
                 break
-            # 여기까지 왔으면 이 턴의 호출은 아래 gather 에서 전부 실행된다 — 실행되는 것만 센다.
+            # Past this point every call of this turn runs in the gather below — count only what runs.
             lookups += sum(1 for c in turn.tool_calls if c.name in LOOKUP_TOOLS)
             # execute all tool calls of this turn concurrently
             for call in turn.tool_calls:
                 emit("tool_call", round=rnd, name=call.name, args=call.input or {},
                      elapsed=time.monotonic() - t0)
             tool_t0 = time.monotonic()
-            # 이미 낸 적 있는 호출도 그대로 실행하고, 결과 뒤에 '몇 번째 같은 호출인지'만 덧붙인다.
-            # 실행을 막으면 도구 시간 몇 밀리초를 아끼는 대신 모델이 막다른 길에서 빠져나올 길을
-            # 하나 없앤다(G-040). LLM 라운드는 이 시점에 이미 소비됐다 — 여기서 얻는 것은
-            # 시간이 아니라 모델이 '내가 막혔다'는 사실을 알아차릴 기회다(_repeat_note 참고).
+            # A call made before still runs as usual; only 'which identical call this is' is appended to the
+            # result.  Blocking execution would save a few milliseconds of tool time and remove one way for
+            # the model to get out of a dead end (G-040).  The LLM round has been spent at this point — what
+            # this buys is not time but a chance for the model to notice 'I am stuck' (see _repeat_note).
             keys = [_call_key(c) for c in turn.tool_calls]
-            ordn: list[int] = []                      # 이 질문에서 몇 번째 동일 호출인지(1 = 처음)
+            ordn: list[int] = []                      # which identical call this is for the question (1 = first)
             for i, key in enumerate(keys):
-                if key is None:                       # final_answer 등 판정 제외 호출
+                if key is None:                       # calls exempt from the check, such as final_answer
                     ordn.append(1)
                     continue
-                # 이전 라운드까지의 횟수 + 이번 턴에서 앞쪽에 있던 같은 호출 수 + 자기 자신
+                # count up to the previous round + identical calls earlier in this turn + itself
                 ordn.append(seen_calls.get(key, 0) + sum(1 for j in range(i) if keys[j] == key) + 1)
             bases = await asyncio.gather(*(self._run_tool(c) for c in turn.tool_calls))
-            # 반복분은 evidence 를 떼고 돌려준다 — 근거는 첫 실행 때 이미 기록했고,
-            # 다시 넣으면 retrieved_context 에 같은 [근거] 가 중복으로 찍힌다.
+            # Repeats go back without evidence — the evidence was recorded on the first run, and adding it
+            # again would print the same [Evidence] twice in retrieved_context.
             results = [b if n == 1 else ToolResult(b.content + _repeat_note(n, b), b.is_error, None)
                        for b, n in zip(bases, ordn)]
             for key, n in zip(keys, ordn):
@@ -1135,14 +1433,14 @@ class Orchestrator:
                     elapsed=time.monotonic() - t0,
                 )
                 if ncall > 1:
-                    steps.append(f"라운드 {rnd}: {desc} → 동일 호출 {ncall}번째 — 재실행 + 다른 접근 안내")
+                    steps.append(f"Round {rnd}: {desc} → identical call #{ncall} — re-run + told to change approach")
                     packed.append((call.id, res.content, res.is_error))
                     continue
                 if res.is_error:
-                    steps.append(f"라운드 {rnd}: {desc} → 오류: {res.content[:100]}")
+                    steps.append(f"Round {rnd}: {desc} → error: {res.content[:100]}")
                 else:
-                    n = f", {res.evidence.row_count}건" if res.evidence and res.evidence.row_count is not None else ""
-                    steps.append(f"라운드 {rnd}: {desc} → 결과 {len(res.content)}자{n}")
+                    n = f", {res.evidence.row_count} rows" if res.evidence and res.evidence.row_count is not None else ""
+                    steps.append(f"Round {rnd}: {desc} → result {len(res.content)} chars{n}")
                     if res.evidence is not None and res.evidence.kind != "schema":
                         evidences.append(res.evidence)
                     if call.name == "sql_query":
@@ -1152,45 +1450,46 @@ class Orchestrator:
                 packed.append((call.id, res.content, res.is_error))
             conv.add_tool_results(packed)
             pending_calls = []
-            # 3번째 동일 호출이면 마무리를 유도한다. 강제 종료가 아니라 안내인 이유:
-            # (1) 2번째에 붙인 경고를 보고 방향을 트는 경우가 있고, (2) 키 정규화가 오탐했을 때
-            # 문항 하나를 통째로 날리지 않기 위해서다. 질문당 한 번만 보낸다.
+            # On the 3rd identical call, steer toward wrapping up.  Guidance, not a forced stop, because
+            # (1) the model sometimes changes course after the warning on the 2nd, and (2) a false
+            # positive of the key normalisation must not throw away a whole question.  Sent once per question.
             if max(ordn, default=1) >= 3 and not repeat_nudged:
                 repeat_nudged = True
                 conv.add_user(
-                    "[같은 호출 반복] 동일한 도구 호출이 3번 나왔습니다. 이 접근으로는 더 진전이 없습니다. "
-                    "조건이나 도구를 바꿔 한 번만 더 시도하고, 그래도 근거를 얻지 못하면 즉시 final_answer 를 "
-                    "호출하세요(근거가 없으면 status=cannot_confirm)."
+                    "[Same call repeated] The same tool call has come 3 times. This approach is making no progress. "
+                    "Change the conditions or the tool and try once more; if that still yields no evidence, call "
+                    "final_answer immediately (status=cannot_confirm if there is no evidence)."
                 )
-                steps.append(f"라운드 {rnd}: 동일 호출 3회 → 조기 마무리 안내")
+                steps.append(f"Round {rnd}: identical call 3 times → told to wrap up early")
             remaining = deadline - time.monotonic()
             if remaining < 14 or rnd == self.settings.max_tool_rounds:
-                conv.add_user("[시간 예산 임박] 추가 도구 호출 없이 지금까지 확보한 근거로 즉시 final_answer 를 호출하세요.")
-                steps.append(f"라운드 {rnd}: 시간 예산 임박 안내 (잔여 {remaining:.0f}s)")
+                conv.add_user("[Time budget nearly spent] Call final_answer immediately with the evidence gathered so far, without further tool calls.")
+                steps.append(f"Round {rnd}: time-budget warning sent ({remaining:.0f}s left)")
 
-        # ---- final_answer 게이트: 루프가 final_answer 없이 끝나려 하면 한 번만 되돌려 보낸다.
-        # 되돌리기는 질문당 최대 1회다(무한 루프 금지) — 두 번째에도 final_answer 가 없으면 아래
-        # 폴백이 그대로 받는다. 예산 판정은 조회 0회 게이트의 것을 그대로 쓴다: 이 되돌리기는 LLM
-        # 라운드 1회(실측 ≈11초)를 더 쓰고, 근거 없는 답 하나보다 응답시간(주최측 권장 60초)을
-        # 넘겨 문항을 통째로 잃는 쪽이 나쁘다.
+        # ---- final_answer gate: if the loop is about to end without final_answer, send it back once.
+        # At most one send-back per question (no infinite loop) — if final_answer is still missing the
+        # second time, the fallback below takes it as is.  The budget check is the zero-lookup gate's: this
+        # send-back costs one more LLM round (measured ≈11 seconds), and losing the whole question by
+        # exceeding the response time (the organisers recommend 60 seconds) is worse than one answer
+        # without evidence.
         #
-        # rejected_final 이 있으면 걸지 않는다 — 그때는 조회 0회 게이트가 이미 한 라운드를 썼고,
-        # 되돌린 답변이 바로 아래에서 final 로 복구되므로 폴백 경로 자체를 타지 않는다.
-        # last_turn_ok 가 False 면(LLM 오류·거부·첫 응답 전 타임아웃) 걸지 않는다 — 대화가 성립하지
-        # 않은 상태에서 한 라운드를 더 태워 봐야 같은 실패를 반복할 뿐이다.
+        # Not applied when rejected_final exists — the zero-lookup gate has already used a round then, and
+        # the answer it sent back is restored as final just below, so the fallback path is never taken.
+        # Not applied when last_turn_ok is False (LLM error, refusal, timeout before the first reply) — with
+        # no working conversation, one more round only repeats the same failure.
         if final is None and rejected_final is None and last_turn_ok:
             remaining = deadline - time.monotonic()
             if remaining < FORCED_LOOKUP_MIN_REMAINING_SEC:
-                steps.append(f"final_answer 미호출이지만 예산 부족(잔여 {remaining:.0f}s) → 재제출 지시 생략")
+                steps.append(f"final_answer not called, but not enough budget ({remaining:.0f}s left) → resubmission request skipped")
             else:
-                # OpenAI/CLOVA 는 assistant 의 tool_call 마다 결과를 요구한다. 최대 라운드 초과로
-                # 실행하지 못한 호출이 남아 있으면 먼저 채운다(비우면 다음 요청이 400 이다).
+                # OpenAI/CLOVA require a result for every assistant tool_call.  Calls left unexecuted
+                # because the maximum rounds were exceeded are filled first (left empty, the next request fails with 400).
                 if pending_calls:
                     conv.add_tool_results([(c.id, _UNRUN_TOOL_RESULT, True) for c in pending_calls])
                     pending_calls = []
-                conv.add_user(_no_final_retry(lookups, len(evidences)))
+                conv.add_user(_no_final_retry(lookups, len(evidences), lang))
                 steps.append(
-                    f"final_answer 미호출 → 지금까지의 결과로 재제출 지시(조회 {lookups}회, 근거 {len(evidences)}건)"
+                    f"final_answer not called → asked to resubmit with the results so far ({lookups} lookups, {len(evidences)} evidence)"
                 )
                 emit("forced_final_retry", lookups=lookups, evidence=len(evidences),
                      elapsed=time.monotonic() - t0)
@@ -1198,119 +1497,145 @@ class Orchestrator:
                     rturn = await asyncio.wait_for(conv.step(), timeout=max(3.0, remaining - 1.0))
                 except asyncio.TimeoutError:
                     rturn = None
-                    steps.append("재제출: LLM 응답 대기 시간 초과")
+                    steps.append("Resubmission: timed out waiting for the LLM")
                 if rturn is not None and rturn.stop_reason in ("error", "refusal"):
-                    steps.append(f"재제출: LLM {rturn.stop_reason} — {rturn.text[:120]}")
+                    steps.append(f"Resubmission: LLM {rturn.stop_reason} — {rturn.text[:120]}")
                 elif rturn is not None:
-                    # 재제출에서 나온 텍스트가 더 최신이다. G-009 의 사고는 '이미 조회한 결과를
-                    # 손에 쥐고 확인불가를 흘린' 것이라, 조회 사실을 알려 준 뒤의 응답으로 바꾸는
-                    # 편이 낫다고 판단했다.
+                    # The text from the resubmission is newer.  The G-009 incident was 'holding the lookup
+                    # results already and letting out cannot-confirm', so switching to the reply given after
+                    # being told about the lookups was judged better.
                     if rturn.text:
                         last_text = rturn.text
                     rfa = next((c for c in rturn.tool_calls if c.name == "final_answer"), None)
                     if rfa is not None:
                         final = rfa.input or {}
-                        steps.append(f"재제출: final_answer(status={final.get('status', '?')}) → 채택")
+                        steps.append(f"Resubmission: final_answer(status={final.get('status', '?')}) → adopted")
                     else:
-                        steps.append("재제출에도 final_answer 미호출 → 마지막 텍스트로 폴백")
-        # 되돌린 답변을 잃지 않는다. 재시도 라운드가 LLM 오류·시간 초과·라운드 소진으로 아무것도
-        # 내놓지 못하면, 근거는 없어도 원래 있던 답이 빈손보다 낫다.
+                        steps.append("No final_answer on resubmission either → falling back to the last text")
+        # Do not lose the answer that was sent back.  If the retry round produced nothing (LLM error,
+        # timeout, rounds used up), the original answer, even without evidence, beats empty hands.
         if final is None and rejected_final is not None:
             final = rejected_final
-            steps.append("강제 재시도 후 final_answer 재호출 없음 → 처음 제출된 답변을 사용")
+            steps.append("No final_answer after the forced retry → using the answer first submitted")
         # ---------------------------------------------------------- compose
         if final is not None:
             status = str(final.get("status") or "answered")
             if status not in ("answered", "cannot_confirm", "clarify"):
                 status = "answered"
-            answer = normalize_answer(status, str(final.get("answer") or last_text))
+            answer = normalize_answer(status, str(final.get("answer") or last_text), lang)
             refs = [str(x) for x in (final.get("evidence_refs") or [])]
         elif last_text.strip():
             status = "answered" if evidences else "cannot_confirm"
             refs = []
-            steps.append("final_answer 미호출 → 마지막 텍스트를 답변으로 사용")
-            # 그 텍스트가 final_answer 인자 JSON 이면(G-007) 원문 그대로 내보내지 말고 풀어서 쓴다.
-            # 풀지 못하면 아무것도 바꾸지 않는다. 어느 쪽이든 normalize_answer 를 거쳐 나간다.
+            steps.append("final_answer not called → using the last text as the answer")
+            # If that text is final_answer's argument JSON (G-007), do not send it out raw; unwrap it.
+            # If it cannot be unwrapped nothing changes.  Either way it goes out through normalize_answer.
             body = last_text
             unwrapped = unwrap_final_answer_json(last_text)
             if unwrapped is not None:
                 js, body = unwrapped
                 if js in ("answered", "cannot_confirm", "clarify"):
                     status = js
-                    steps.append(f"마지막 텍스트가 final_answer 인자 JSON → answer/status={js} 로 해석")
+                    steps.append(f"The last text is final_answer argument JSON → read as answer/status={js}")
                 else:
-                    steps.append("마지막 텍스트가 final_answer 인자 JSON → answer 만 해석(status 는 기존 판정)")
-            answer = normalize_answer(status, body)
+                    steps.append("The last text is final_answer argument JSON → only answer read (status from the existing judgement)")
+            answer = normalize_answer(status, body, lang)
         else:
-            reason = "시간 초과" if time.monotonic() >= deadline else "LLM 응답 없음"
-            status, answer, refs = "cannot_confirm", fallback_answer(reason), []
-        # 예전 조건은 답변에 "존재하지 않"이 들어 있으면 보정을 통째로 건너뛰었다.  그런데 모델은
-        # "존재하지 않습니다" 라고 쓴 다음 대체 상품을 나열한다 — 'AAAA 채권' 질문에 채권 5종목이
-        # 코드·수익률까지 달려 나갔고, status 가 answered 로 남아 normalize_answer 의 대체목록 절단도
-        # 돌지 않았다.  주최측은 답변 불가 문항에 답을 생성하면 감점한다(과제설명 p7).  값 도메인
-        # 위반이 확인되면 문구와 무관하게 확인불가로 낮춰, 절단이 반드시 걸리게 한다.
+            reason = (pick(lang, "time limit exceeded", "시간 초과") if time.monotonic() >= deadline
+                      else pick(lang, "no response from the LLM", "LLM 응답 없음"))
+            status, answer, refs = "cannot_confirm", fallback_answer(reason, lang), []
+        # The old condition skipped this correction entirely when the answer contained "존재하지 않" (does
+        # not exist).  But the model writes "존재하지 않습니다" and then lists substitute products — for an
+        # 'AAAA bond' question 5 bonds went out with codes and yields attached, status stayed answered, and
+        # normalize_answer's substitute-list cut never ran.  The organisers deduct points for generating an
+        # answer to an unanswerable question (task description p7).  Once a value-domain violation is
+        # confirmed the answer is lowered to cannot-confirm regardless of its wording, so the cut always applies.
         if pre.invalid and status == "answered":
-            # 모델 텍스트는 버린다.  거절 문구를 앞에 붙이고 뒤를 남겨 두면 모델은 "존재하지 않습니다"
-            # 라고 쓴 다음 대체 상품을 나열한다 — 'AAAA 채권' 질문에 채권 2~5종목이 발행기관·표면
-            # 이자율·만기일까지 달려 나갔다.  절단 규칙(행 3개 이상)으로도 두 종목짜리는 못 잡는다.
-            # pre.invalid 는 위반 사실과 유효값 목록을 이미 담고 있어 잃는 정보도 없다.
-            answer = f"{CANNOT_PREFIX} {' '.join(pre.invalid)}"
+            # The model's text is discarded.  With the refusal prefixed and the rest kept, the model writes
+            # "존재하지 않습니다" and then lists substitute products — for the 'AAAA bond' question 2-5 bonds
+            # went out with issuer, coupon and maturity.  The cut rule (3+ rows) cannot catch two of them
+            # either.  pre.invalid already holds the violation and the list of valid values, so nothing is lost.
+            answer = f"{cannot_prefix(lang)} {pick(lang, ' '.join(pre.invalid), ' '.join(pre.invalid_ko))}"
             status = "cannot_confirm"
-            steps.append("온톨로지 위반 조건이 있어 답변을 확인불가로 보정")
-        # 존재하지 않는 상품명을 물었는데 모델이 유사 상품으로 그냥 답해버린 경우를 잡는다.
-        # 답변불가 문항은 배점이 걸려 있어 프롬프트 준수에만 맡기지 않는다.
-        if pre.unresolved and status == "answered" and not any(k in answer for k in _ACKNOWLEDGED):
+            steps.append("Ontology-violating condition → answer corrected to cannot_confirm")
+        # Catches the model answering with a similar product when the question named a product that does
+        # not exist.  Unanswerable questions carry points, so this is not left to prompt compliance alone.
+        if pre.unresolved and status == "answered" and not _acknowledged(answer):
             names = [m for m, _ in pre.unresolved]
             shown = [c for _, group in pre.unresolved for c in group[:2]]
-            asked = (
-                f"이름이 비슷한 상품으로는 {', '.join(shown)} 등이 있습니다. 이 중 찾으시는 상품이 있나요?"
-                if shown else "찾으시는 상품명을 다시 확인해 주시겠어요?"
-            )
-            answer = (
+            if shown:
+                asked = pick(
+                    lang,
+                    f"Products with similar names include {', '.join(shown)}. Is one of these the product you are looking for?",
+                    f"이름이 비슷한 상품으로는 {', '.join(shown)} 등이 있습니다. 이 중 찾으시는 상품이 있나요?",
+                )
+            else:
+                asked = pick(lang, "Could you check the product name you are looking for?",
+                             "찾으시는 상품명을 다시 확인해 주시겠어요?")
+            answer = pick(
+                lang,
+                f"A product exactly matching '{', '.join(names)}' cannot be confirmed in the provided data. {asked}"
+                f"\n\n(For reference, the following was looked up on the basis of a similar product)\n{answer}",
                 f"'{', '.join(names)}'와(과) 정확히 일치하는 상품은 제공된 데이터에서 확인할 수 없습니다. {asked}"
-                f"\n\n(참고: 아래는 유사 상품 기준으로 조회한 내용입니다)\n{answer}"
+                f"\n\n(참고: 아래는 유사 상품 기준으로 조회한 내용입니다)\n{answer}",
             )
             status = "clarify"
-            steps.append(f"존재하지 않는 상품({', '.join(names)})을 답변에 사용 → 역질문으로 보정")
-        # 미래 값을 묻는 질문에 과거 실적 컬럼을 그대로 붙여 답하는 사고를 막는다.
-        # 숫자 자체는 도구가 낸 진짜 값이라 숫자 교차검증은 통과한다. 틀린 것은 '라벨'이므로
-        # 여기서 상태와 문구를 고쳐 과거 실적임을 분명히 하고 예측으로 읽히지 않게 한다.
+            steps.append(f"Answer used a nonexistent product ({', '.join(names)}) → corrected to a clarifying question")
+        # Prevents the incident of answering a question about future values with a past-performance column
+        # as is.  The number itself is a real value the tool produced, so the numeric cross-check passes.
+        # What is wrong is the 'label', so status and wording are fixed here to make clear it is past
+        # performance and keep it from reading as a forecast.
         if status == "answered" and asks_forward_looking(question, self.base_year):
-            answer = (
-                f"{CANNOT_PREFIX} 제공된 데이터는 기준일 {self.base_date} 시점의 스냅샷이며, "
+            answer = pick(
+                lang,
+                f"{cannot_prefix(lang)} The provided data is a snapshot as of the base date {self.base_date} and has no "
+                "item holding a value to be realised in the future, such as an expected return or a target price. "
+                "Past returns do not guarantee future returns, so they cannot be presented as a forecast."
+                f"\n\n(For reference) The following is not a forecast but past and current results recorded in the data.\n{answer}",
+                f"{cannot_prefix(lang)} 제공된 데이터는 기준일 {self.base_date} 시점의 스냅샷이며, "
                 "예상 수익률·목표가처럼 미래에 실현될 값을 담은 항목이 없습니다. "
                 "과거 수익률은 미래 수익을 보장하지 않으므로 예측치로 제시할 수 없습니다."
-                f"\n\n(참고) 아래는 예측이 아니라 데이터에 기록된 과거·현재 실적입니다.\n{answer}"
+                f"\n\n(참고) 아래는 예측이 아니라 데이터에 기록된 과거·현재 실적입니다.\n{answer}",
             )
             status = "cannot_confirm"
-            steps.append("미래 예측을 요구하는 질문 → 데이터에 예측 컬럼이 없어 확인불가로 보정(과거 실적은 참고로 유지)")
-        # 보유/편입 관계는 국내 ETF 에만 있다. 해외ETF·펀드·ETN 으로 범위를 좁힌 편입 질문에
-        # 그럴듯한 답을 만들면 국내 ETF 목록을 해외 ETF 라고 내놓거나(G-040), 이름만 비슷한 펀드를
-        # '그 종목을 보유 중'이라고 단정하게 된다(G-041). 스키마의 사실을 그대로 말한다.
-        # 모델이 만든 답은 덧붙이지 않고 버린다.  "(참고)" 라는 머리말을 달아도 그 아래 문장은
-        # 여전히 단언이고, 실제로 틀린 단언이 나왔다: "SK하이닉스를 담고 있는 공모펀드 중 순자산이
-        # 가장 큰 상품은 KODEX 200 입니다" — KODEX 200 은 공모펀드가 아니라 ETF 다.  주최측은
-        # 답변 불가 문항에 답을 생성하면 감점한다고 명시했으므로, 주석 뒤에 숨긴 답도 위험은 같다.
-        # 위 거절 문장이 사실을 전부 담고 있어 잃는 정보도 없다.
+            steps.append("Question asks for a forecast → no forecast column in the data, corrected to cannot_confirm (past results kept for reference)")
+        # Holding relations exist only for domestic ETFs.  Building a plausible answer to a holdings
+        # question narrowed to foreign ETFs, funds or ETNs either presents a list of domestic ETFs as foreign
+        # ETFs (G-040) or asserts that a fund with a merely similar name 'holds that stock' (G-041).  State
+        # the schema's fact as it is.
+        # The model's answer is thrown away, not appended.  Even under a "(참고)" (for reference) heading the
+        # sentences below are still assertions, and a wrong one really came out: "SK하이닉스를 담고 있는
+        # 공모펀드 중 순자산이 가장 큰 상품은 KODEX 200 입니다" — KODEX 200 is an ETF, not a public fund.
+        # The organisers state that generating an answer to an unanswerable question costs points, so an
+        # answer hidden behind a note carries the same risk.  The refusal above holds all the facts, so
+        # nothing is lost.
         if status == "answered" and asks_holdings_without_data(question):
-            answer = (
-                f"{CANNOT_PREFIX} 편입 종목(구성종목) 데이터는 국내 ETF 1,162 종목(네이버금융 수집)"
+            answer = pick(
+                lang,
+                f"{cannot_prefix(lang)} Holdings (constituent) data exists only for 1,162 domestic ETFs (collected from "
+                "Naver Finance). The holdings of foreign ETFs, public funds, private funds and ETNs are not in the data "
+                "provided, so whether they hold a particular company, and how they rank, cannot be confirmed.",
+                f"{cannot_prefix(lang)} 편입 종목(구성종목) 데이터는 국내 ETF 1,162 종목(네이버금융 수집)"
                 "에만 있습니다. 해외 ETF·공모펀드·사모펀드·ETN 의 보유 종목은 전달받은 데이터에 "
-                "없으므로, 특정 기업을 편입했는지 여부와 그 순위는 확인할 수 없습니다."
+                "없으므로, 특정 기업을 편입했는지 여부와 그 순위는 확인할 수 없습니다.",
             )
             status = "cannot_confirm"
-            steps.append("편입 데이터가 없는 상품군(해외ETF·펀드·ETN)에 대한 편입 질문 → 확인불가로 보정")
+            steps.append("Holdings question on a product group without holdings data (foreign ETFs, funds, ETNs) → corrected to cannot_confirm")
         # A count question whose single COUNT result never appears in the answer means the model
         # mis-transcribed it.  Only fires when exactly one scalar was produced, so a multi-step
         # calculation is never "corrected" against an intermediate value.
-        if status == "answered" and _COUNT_QUESTION.search(question) and len(set(scalars)) == 1:
+        if status == "answered" and is_count_question(question) and len(set(scalars)) == 1:
             want = scalars[0]
             seen = {int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", answer)}
             if want not in seen:
-                answer = f"{answer}\n\n(조회 결과 확인: 해당 조건에 맞는 건수는 {want}건입니다.)"
-                steps.append(f"도구가 반환한 {want} 가 답변에 없어 조회 결과를 명시")
+                answer = pick(
+                    lang,
+                    f"{answer}\n\n(Checked against the query result: {want} items match the condition.)",
+                    f"{answer}\n\n(조회 결과 확인: 해당 조건에 맞는 건수는 {want}건입니다.)",
+                )
+                steps.append(f"The {want} returned by the tool is missing from the answer → query result stated")
         elapsed = time.monotonic() - t0
-        steps.append(f"최종: status={status}, 근거 {len(evidences)}건, 소요 {elapsed:.1f}s")
+        steps.append(f"Final: status={status}, {len(evidences)} evidence, {elapsed:.1f}s")
         resp = AnswerResponse(
             question_id=question_id,
             question=question,

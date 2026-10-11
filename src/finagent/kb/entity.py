@@ -4,16 +4,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..i18n import detect_lang
 from .lexicon import Company, Lexicon, Manager, Theme
 from .search import Hit, SearchIndex, _strip_generic, norm_title, tokenize
 
 
 def mention_resolves(mention: str, title: str) -> bool:
-    """언급과 후보 상품명이 사실상 같은 것을 가리키는지.
+    """Whether a mention and a candidate product name effectively refer to the same thing.
 
-    'KODEX AI로봇' vs 'KODEX 로봇액티브'는 서로 포함하지 않으므로 불일치(= 존재하지 않는 상품),
-    '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100', '국민성장펀드' vs
-    '미래에셋국민참여형국민성장혼합자산투자신탁…'은 일치로 본다(운용사 접두어·일반 접미사 차이일 뿐).
+    'KODEX AI로봇' vs 'KODEX 로봇액티브' do not contain each other, so they do not match (= a product
+    that does not exist); '미래에셋 TIGER 미국나스닥100' vs 'TIGER 미국나스닥100' and '국민성장펀드' vs
+    '미래에셋국민참여형국민성장혼합자산투자신탁…' count as matches (they differ only by a manager prefix / generic suffix).
     """
     m, t = norm_title(mention), norm_title(title)
     core = _strip_generic(m)
@@ -31,36 +32,36 @@ class Resolution:
 
     @property
     def resolved(self) -> bool:
-        """언급된 상품이 실재하는가. exact 보다 느슨하되, 이름이 비슷할 뿐인 다른 상품은 배제한다."""
+        """Does the mentioned product actually exist?  Looser than ``exact``, but rules out a different product that merely has a similar name."""
         return self.exact or any(mention_resolves(self.mention, h.title) for h in self.products[:3])
 
     def summary(self, max_products: int = 5) -> str:
         parts = []
         if self.products:
             parts.append(
-                ("정확히 일치하는 상품: " if self.exact else "유사 상품 후보(정확 일치 아님): ")
+                ("Exact product match: " if self.exact else "Similar product candidates (not an exact match): ")
                 + "; ".join(f"[{h.table}] {h.title} (id={h.id}, score={h.score:.1f})" for h in self.products[:max_products])
             )
             if not self.resolved:
                 parts.append(
-                    f"⚠ '{self.mention}' 이라는 상품은 데이터에 존재하지 않습니다. 위 후보는 이름이 비슷할 뿐 "
-                    "다른 상품이므로, 그중 하나를 질문의 상품인 것처럼 답하면 오답입니다. "
-                    "존재하지 않음을 밝히고 후보를 제시하며 되물으세요."
+                    f"⚠ No product named '{self.mention}' exists in the data. The candidates above only have similar "
+                    "names and are different products, so answering as if one of them were the product in the question is wrong. "
+                    "State that it does not exist, present the candidates and ask the user which one they meant."
                 )
         else:
-            parts.append("상품명 일치/유사 후보 없음")
+            parts.append("No exact or similar product-name candidates")
         if self.companies:
             parts.append(
-                "기업: "
+                "Companies: "
                 + ", ".join(
-                    f"{c.name_ko}({c.name_en}{', 비상장' if c.not_listed else ''}{', 모회사=' + c.parent if c.parent else ''})"
+                    f"{c.name_ko}({c.name_en}{', unlisted' if c.not_listed else ''}{', parent=' + c.parent if c.parent else ''})"
                     for c in self.companies
                 )
             )
         if self.managers:
-            parts.append("운용사: " + ", ".join(m.canonical for m in self.managers))
+            parts.append("Managers: " + ", ".join(m.canonical for m in self.managers))
         if self.themes:
-            parts.append("테마: " + ", ".join(f"{t.label_ko}/{t.label_en}" for t in self.themes))
+            parts.append("Themes: " + ", ".join(f"{t.label_ko}/{t.label_en}" for t in self.themes))
         return "\n".join(parts)
 
 
@@ -80,6 +81,16 @@ _FUND_MENTION = re.compile(r"[A-Za-z0-9가-힣&+\-.()]{2,}(?:펀드|투자신탁
 _EN_ETF_MENTION = re.compile(r"\b[A-Z][A-Za-z0-9&+\-.]*(?:\s+[A-Za-z0-9&+\-.]+){0,6}\s+ETF\b")
 _TRAIL = re.compile(r"(의|은|는|이|가|을|를|에|도|와|과|로|에서)$")
 _STOP_WORDS = {"etf", "etn", "정보", "알려줘", "알려", "주세요", "찾아서", "비교해줘", "추천해줘", "정리해줘", "구조와", "총보수는?", "총보수는"}
+# English questions: a mention never *starts* with a question/stop word ('Which domestic ETF' / 'Which
+# ETF' are the question asking about ETFs in general, not naming one), and it ends before the first
+# plain lower-case English word ('rise', 'next', 'year' in 'KODEX 200 rise next year') that is sentence
+# text rather than part of a product-name pattern (a brand, a number, an all-caps ticker, a mixed
+# Korean/English token such as '미국S&P500').  See src/finagent/i18n.py:detect_lang.
+_EN_QUESTION_STARTS = {
+    "which", "what", "how", "will", "does", "is", "are", "do", "show", "list", "tell", "give", "find",
+    "compare", "the", "a", "an",
+}
+_EN_PLAIN_WORD = re.compile(r"^[a-z]+$")
 
 # Category words, not product names.  "…펀드" matches the fund pattern, so "환헤지형 해외 채권형 공모펀드
 # 중 판매중인 상품은 몇 개?" used to extract 공모펀드, fail to resolve it, and get rewritten into a
@@ -100,17 +111,23 @@ def _is_generic_category(span: str) -> bool:
 def extract_product_mentions(question: str) -> list[str]:
     """Pull likely product-name spans out of a question (brand + name, ...펀드, English '... ETF')."""
     out: list[str] = []
+    is_en = detect_lang(question) == "en"
     for rx in (_EN_ETF_MENTION, _BRAND_MENTION, _FUND_MENTION):
         for m in rx.finditer(question):
             span = m.group(0).strip()
+            words = span.split()
+            if is_en and words and words[0].lower() in _EN_QUESTION_STARTS:
+                continue  # 'Which domestic ETF' / 'Which ETF' names the question, not a product
             cut: list[str] = []
-            for w in span.split():
+            for w in words:
                 if w.lower() in ("etf", "etn"):
                     if rx is _EN_ETF_MENTION:  # keep the trailing ETF of an English fund name
                         cut.append(w)
                     break
                 if w.lower() in _STOP_WORDS:
                     break
+                if is_en and _EN_PLAIN_WORD.fullmatch(w):
+                    break  # plain lower-case English word ('rise', 'next', 'year') → sentence text, not the name
                 stripped = _TRAIL.sub("", w) if re.search(r"[가-힣]$", w) and len(w) >= 3 else w
                 cut.append(stripped)
                 if stripped != w:  # a particle ended the product name

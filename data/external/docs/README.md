@@ -1,9 +1,80 @@
 ---
-title: 외부 문서 코퍼스 안내
+title: External document corpus guide (외부 문서 코퍼스 안내)
 source: 내부 정리
 as_of: 2026-09-03
 products: []
 ---
+
+English | [한국어](#한국어)
+
+# External document corpus (data/external/docs)
+
+The `*.md` files in this folder are unstructured documents that supply background knowledge missing from the organizer-provided master data (`data/raw/*.xlsx`). Government press releases, regulator advisories, glossaries and similar material are written up as Markdown; the agent searches them with the `search_documents` tool and cites them as evidence in its answers.
+
+# How it is used
+
+- At server startup, `finagent.kb.docs.DocStore.load()` reads every Markdown file in this folder.
+- Each document is split into chunks at headings that start with `#`. Keep sections short so that each chunk stays under roughly 1,200 characters.
+- Chunks go into the BM25 lexical index (`finagent.kb.search.SearchIndex`); when the LLM calls `search_documents(query, k)`, the top k chunks are returned together with `title`, `source`, `as_of` and `text`.
+- Answers cite the returned `source` and `as_of` as evidence. Citations written in the body as "(출처: 기관명, YYYY-MM-DD)" ("Source: institution, YYYY-MM-DD") may be quoted as-is.
+
+# Priority rule
+
+**Organizer-provided data takes precedence over external material.** For any value that exists in the master data (product name, code, reference price, net assets, fees, risk grade, sale status, etc.), always use the result of SQL (`sql_query`) or product search (`search_products`); if a figure in an external document differs, answer with the dataset value and only mention the discrepancy. Use external documents only for context the dataset lacks, such as structure, background, regulations and terminology. Do not guess facts that are not in the documents; answer "cannot be confirmed" instead.
+
+# Front-matter format
+
+Every document starts with the following YAML front matter.
+
+```
+---
+title: Document title
+source: Original URL or "내부 정리"
+as_of: YYYY-MM-DD   (base date of the document's content)
+products: ["product code or product name", ...]   ([] if there are no related products)
+---
+```
+
+(`내부 정리` = "internal compilation", the value used for documents written in-house.)
+
+- `title`: the name shown in search results. It may differ from the file name.
+- `source`: one representative source. If there are several, list them in a `# 출처` ("Sources") section at the end of the body.
+- `as_of`: the base date of the information. Update it whenever the document is updated.
+- `products`: `itm_no` (code) values or product names (family names) from the master data. Used to match the document first for questions about a specific product.
+
+# Writing guidelines
+
+- Write only facts whose sources you have checked. End sentences with "(출처: 기관명, YYYY-MM-DD)", and mark paragraphs that summarize general principles without an external source as "(내부 정리)" ("internal compilation").
+- Do not write return forecasts, investment solicitations, or judgments that one product is better than another.
+- Divide sections only with `#` (major topic) or `##` (term / subtopic) headings, and keep each section short, around 200 words.
+- Use Korean file names in the form `YYYY_주제.md` (`주제` = topic), e.g. `2025_국민성장펀드_개요.md` ("National Growth Fund overview").
+
+# Adding a document (scripts/parse_docs.py)
+
+Converts PDF, PPTX and text files into Markdown with front matter. PDFs are turned into one `## Page N` section per page with PyMuPDF (`fitz`); `.pptx` files are converted only when `python-pptx` is installed.
+
+```
+.venv/Scripts/python.exe scripts/parse_docs.py <input.pdf|.pptx|.txt|.md> data/external/docs/<YYYY_topic>.md \
+    --title "Document title" --source "https://..." --as-of 2026-08-21 --products "KR5153480100,KR5153480101"
+```
+
+- If `--title` is omitted, the file name (without extension) is used; if `--source` is omitted, the input file path; if `--as-of` is omitted, today's date.
+- If an `.md` input already has front matter, its values are used as defaults and the options override them.
+- After converting, always read the body: clean up text broken in tables and figures, replace the page headings with meaningful section headings, and add source citations. Do not commit the original PDF to the repository; keep only its URL.
+
+# Documents currently included
+
+| File | Content | products |
+|---|---|---|
+| `2025_국민성장펀드_개요.md` | National Growth Fund: background, structure, investment targets, sales, trends, cautions (based on Financial Services Commission press releases) | 미래에셋국민참여형국민성장혼합자산투자신탁 |
+| `2026_ETF_용어와_지표_해설.md` | ETF and bond glossary (internal compilation) | — |
+| `2026_ETF_위험요인_일반.md` | Risk factors by ETF/ETN type (based on materials from the Financial Services Commission, Financial Supervisory Service and Korea Council for Investor Education) | — |
+
+---
+
+## 한국어
+
+[English](#external-document-corpus-dataexternaldocs) | 한국어
 
 # 외부 문서 코퍼스 (data/external/docs)
 

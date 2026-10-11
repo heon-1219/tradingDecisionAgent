@@ -1,0 +1,61 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Apple (AAPL) closed at $178.42 on Friday, up about 1.2% for the week, as investors weighed strong iPhone demand against broader market caution."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "groundingMetadata": {
+        "searchEntryPoint": {
+          "renderedContent": "<style>.container{display:flex;}</style><div class=\"search-suggestions\"><a href=\"https://www.google.com/search?q=AAPL+stock+price\">AAPL stock price</a></div>"
+        },
+        "groundingChunks": [
+          {
+            "web": {
+              "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAPL-finance-yahoo",
+              "title": "finance.yahoo.com"
+            }
+          },
+          {
+            "web": {
+              "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAPL-marketwatch",
+              "title": "marketwatch.com"
+            }
+          }
+        ],
+        "groundingSupports": [
+          {
+            "segment": {
+              "startIndex": 0,
+              "endIndex": 46,
+              "text": "Apple (AAPL) closed at $178.42 on Friday"
+            },
+            "groundingChunkIndices": [0],
+            "confidenceScores": [0.97]
+          },
+          {
+            "segment": {
+              "startIndex": 47,
+              "endIndex": 138,
+              "text": "up about 1.2% for the week, as investors weighed strong iPhone demand against broader market caution."
+            },
+            "groundingChunkIndices": [0, 1],
+            "confidenceScores": [0.91, 0.88]
+          }
+        ],
+        "webSearchQueries": ["AAPL stock price today", "Apple stock news this week"]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 58
+  },
+  "modelVersion": "gemini-3.8-flash"
+}

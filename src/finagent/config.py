@@ -1,42 +1,60 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .paths import DATA_DIR, ONTOLOGY_DIR, ROOT
 
 
 class Settings(BaseSettings):
+    # An empty value ("GEMINI_API_KEY=") means "not set" in both `.env` and the environment.
     model_config = SettingsConfigDict(
-        env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore", env_ignore_empty=True
     )
 
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings,
+                                   file_secret_settings):
+        """`.env` wins over the process environment (pydantic-settings' default is the reverse).
+
+        The app writes `.env` itself (PUT /api/settings, the kill switch), so what it saved must be
+        what the next start reads: a stale `GEMINI_API_KEY` or a `TRADING_ENABLED=true` exported in
+        some shell must not undo it. The environment still supplies whatever `.env` leaves out,
+        which is how a container without a `.env` file is configured."""
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
+
     # LLM
-    # 주최측 공지: 답변 생성 파이프라인은 NCP HyperCLOVA X 필수.
-    llm_provider: Literal["clova", "anthropic", "openai", "stub"] = "clova"
-    llm_model: str = "HCX-005"
+    # English edition: Google Gemini through its OpenAI-compatible endpoint. The competition build had to
+    # use NCP HyperCLOVA X (organizer rule); Anthropic and OpenAI remain available as alternates.
+    llm_provider: Literal["gemini", "anthropic", "openai", "stub"] = "gemini"
+    llm_model: str = "gemini-3.8-flash"
+    # Sent to Gemini as reasoning_effort (xhigh/max map to high) and to Anthropic as output effort.
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
-    # 지연은 출력 생성에 지배된다. 느린 두 문항을 라운드별로 계측하니 도구 실행은 0.53초/0.11초였고,
-    # 105초·119초의 대부분이 마지막 LLM 호출 한 번이었다(각각 53초·92.9초). 92.9초짜리 응답이 만든 것은
-    # 답이 아니라 "…상위 10개를 찾기 위해서는 다음과 같은 접근 방법을 사용할 수 있습니다" 라는 방법론
-    # 서술이었다. 데이터는 이미 두 라운드 전에 확보돼 있었다. 4096 이라는 천장이 그 서술을 가능하게 했다.
-    #
-    # 상한의 근거(측정):
-    #   * 기록된 답변 54개의 길이: 중앙값 108자, 95백분위 497자, 최대 610자(G-026, 월배당 ETF 9개 나열).
-    #   * CLOVA 토크나이저 실측 한국어 비율은 1.85~1.90자/토큰 → 최대 610자 = 321토큰.
-    #   * 현실적 최악: 교차질의 10행 표 + 근거 + evidence_refs 를 final_answer 인자로 직렬화 = 1,508자 = 813토큰.
-    #   * 1536 은 그 최악 대비 723토큰(약 1,340자) 여유이면서, 수천 토큰짜리 서술은 불가능하게 만든다.
-    #   * 1024 로 더 내리면 최악 대비 여유가 211토큰뿐이라 표가 한 행만 길어져도 잘린다.
-    # CLOVA function calling 은 1024 이상이어야 동작하므로 그 아래로는 내릴 수 없다(llm.MIN_TOOL_TOKENS).
-    llm_max_tokens: int = 1536
-    clova_api_key: str | None = None
-    clova_base_url: str = "https://clovastudio.stream.ntruss.com/v1/openai"
-    # CLOVA 테스트앱은 요청 빈도 제한이 낮아 429 가 자주 난다. 재시도하지 않으면 그 문항은 통째로 실패한다.
+    # Output-token ceiling per call. Gemini's thinking models count thinking tokens against it, so it must
+    # leave room for thinking plus the answer; the visible answer itself is short (54 answers recorded in the
+    # competition: median 108 characters, longest 610 - G-026, a list of nine monthly-dividend ETFs).
+    # History: the competition build capped this at 1536 for HyperCLOVA X, which has no thinking tokens, after
+    # a 4096 ceiling let one 92.9 s call write a methodology essay instead of the answer (the data had been
+    # retrieved two rounds earlier). Here the prompt's answer rules and the per-question time budget guard
+    # against that instead; lower this if you see long, slow answers.
+    llm_max_tokens: int = 8192
+    # GEMINI_API_KEY (preferred) or GOOGLE_API_KEY; create one at https://aistudio.google.com/apikey
+    gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("gemini_api_key", "google_api_key"))
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    # The user's statement that the Gemini key is on a paid plan. A free and a paid Gemini key cannot
+    # be told apart reliably from the outside, so this is an explicit switch: false (the default)
+    # keeps the chat agent in shallow mode while the provider is gemini (see `chat_limits`).
+    gemini_paid: bool = False
+    # Free-tier keys have low per-minute limits, so 429s are common. Without retries the whole question fails.
     rate_limit_retries: int = 4
-    request_min_interval_sec: float = 0.0  # 필요 시 호출 간 최소 간격
+    request_min_interval_sec: float = 0.0  # optional minimum spacing between calls
     llm_timeout_sec: float = 40.0
     anthropic_api_key: str | None = None
     anthropic_fallbacks: bool = True
@@ -50,7 +68,8 @@ class Settings(BaseSettings):
     vector_embed_model: str = "text-embedding-3-small"
 
     # Agent budget
-    # 주최측 공지: 300초는 물리적 미응답 처리. 그 안이면 늦어도 채점되나 점수 차등.
+    # Competition rule, kept as the default: an answer after 300 s counts as no answer; within that, late
+    # answers are still scored but lose points.
     time_budget_sec: float = 120.0
     max_tool_rounds: int = 8
     sql_row_limit: int = 200
@@ -84,7 +103,135 @@ class Settings(BaseSettings):
     def vector_cache_path(self) -> Path:
         return self.data_dir / "store" / "vector_cache.npz"
 
+    # Paper-trading assistant (research + trading layers)
+    # Alpaca paper-trading credentials. The trading host itself is a hard-coded constant in
+    # trading/broker.py (never derived from settings, per the paper-only constraint) - these keys
+    # only authenticate against it.
+    alpaca_api_key_id: str | None = None
+    alpaca_api_secret_key: str | None = None
+    # Tavily web search API key (research/websearch.py); Jina Reader (r.jina.ai) needs no key.
+    tavily_api_key: str | None = None
+    # SEC EDGAR requires a descriptive User-Agent with contact info on every request, or it 403s.
+    sec_user_agent: str | None = None
+    # Gemini's native google_search grounding model (research/grounding.py). Kept separate from
+    # llm_model since grounding goes through a different SDK code path and its results are never
+    # cached (the whole point is a fresh search).
+    grounding_model: str = "gemini-3.8-flash"
+    # Kill switch: when False, the chat agent can still research but ticket confirmation is refused.
+    trading_enabled: bool = True
+
+    # App DB: sessions, messages, mandates, tickets, orders, ledger, evidence, http_cache.
+    app_db_path: Path = DATA_DIR / "store" / "app.db"
+
+    # Chat turn budget - separate from the QA agent's time_budget_sec/max_tool_rounds above, since
+    # the chat agent's tool loop (research + trading) has different latency characteristics.
+    # Two modes, resolved in exactly one place, `chat_limits()` below; nothing else reads these four.
+    # Deep (a paid key: OpenAI, Anthropic, or Gemini with GEMINI_PAID=true): room for real research.
+    chat_time_budget_sec: float = 300.0
+    chat_max_rounds: int = 12
+    # Shallow (Gemini without GEMINI_PAID): a free-tier key allows about 5 model calls a minute and
+    # 20 a day, so a turn gets few rounds. 150 s still leaves room for a 429 backoff or two: at
+    # 90 s both live evaluation scenarios ran out of time (2026-10-02) before they could propose.
+    shallow_time_budget_sec: float = 150.0
+    shallow_max_rounds: int = 4
+    # How long a proposed ticket stays confirmable before it expires and must be regenerated.
+    ticket_ttl_sec: int = 300
+    # /api/* (chat, tickets, settings, kill switch) answers loopback clients only. True lets any
+    # client address through (the Host allowlist and the anti-CSRF header still apply). UNSAFE
+    # unless you put your own authentication in front: /api/* can place paper orders and write keys.
+    api_allow_remote: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# --- research depth: shallow and deep ----------------------------------------------------------------
+
+ChatMode = Literal["shallow", "deep"]
+# Used only when a settings object lacks a field or holds something unusable (tests pass bare
+# namespaces); `Settings` carries the same numbers as its defaults.
+_DEEP_LIMITS = (12, 300.0)
+_SHALLOW_LIMITS = (4, 150.0)
+
+
+@dataclass(frozen=True)
+class ChatLimits:
+    """What one chat turn may use: the mode, the tool rounds and the seconds."""
+
+    mode: ChatMode
+    max_rounds: int
+    time_budget_sec: float
+
+
+def chat_mode(settings: object) -> ChatMode:
+    """`shallow` when the provider is gemini and the key is not declared paid (`gemini_paid`);
+    `deep` otherwise: OpenAI and Anthropic keys are always paid, and the `stub` provider (tests)
+    counts as deep."""
+    if getattr(settings, "llm_provider", None) == "gemini" and getattr(settings, "gemini_paid", False) is not True:
+        return "shallow"
+    return "deep"
+
+
+def chat_limits(settings: object) -> ChatLimits:
+    """The ONE place that resolves a chat turn's limits. `ChatAgent` (rounds, time budget), the
+    chat system prompt (its Budget section) and `GET /api/settings` all read through it."""
+    return _limits_for(settings, chat_mode(settings))
+
+
+def longest_turn_sec(settings: object) -> float:
+    """The longest time budget a chat turn can have under these settings, whatever the mode (a
+    turn keeps the limits it started with, so a client it holds must outlive either budget)."""
+    return max(_limits_for(settings, "shallow").time_budget_sec, _limits_for(settings, "deep").time_budget_sec)
+
+
+def _limits_for(settings: object, mode: ChatMode) -> ChatLimits:
+    prefix, (rounds, seconds) = ("shallow", _SHALLOW_LIMITS) if mode == "shallow" else ("chat", _DEEP_LIMITS)
+    try:
+        rounds = max(1, int(getattr(settings, f"{prefix}_max_rounds", rounds)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        seconds = float(getattr(settings, f"{prefix}_time_budget_sec", seconds))
+    except (TypeError, ValueError):
+        pass
+    return ChatLimits(mode, rounds, seconds)
+
+
+# Settings field -> .env name, for the fields the app itself writes (PUT /api/settings and the
+# kill switch).
+ENV_NAMES = {
+    "alpaca_api_key_id": "ALPACA_API_KEY_ID",
+    "alpaca_api_secret_key": "ALPACA_API_SECRET_KEY",
+    "tavily_api_key": "TAVILY_API_KEY",
+    "sec_user_agent": "SEC_USER_AGENT",
+    "trading_enabled": "TRADING_ENABLED",
+    "llm_provider": "LLM_PROVIDER",
+    "llm_model": "LLM_MODEL",
+    "llm_effort": "LLM_EFFORT",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "openai_api_key": "OPENAI_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "gemini_paid": "GEMINI_PAID",
+}
+
+
+# Settings the app reads but never writes, and that `env_fallbacks` reports all the same: one set
+# only in the process environment (a Compose file, a shell export) is easy to forget.
+ENV_READ_ONLY_NAMES = {
+    "api_allow_remote": "API_ALLOW_REMOTE",
+}
+
+
+def env_fallbacks(env_path: Path | str | None = None) -> list[str]:
+    """Names (never values) of the app-writable settings, and of `API_ALLOW_REMOTE` (which the app
+    only reads), that only the process environment provides: set there, and absent or empty in the
+    `.env` file (which wins when it has a value). Saving a writable setting from the app works,
+    since that writes it to `.env`; clearing it there does not survive a restart, because the
+    environment value comes back."""
+    path = Path(env_path) if env_path is not None else ROOT / ".env"
+    in_file = {name.upper() for name, value in dotenv_values(path).items() if value} if path.is_file() else set()
+    in_env = {name.upper() for name, value in os.environ.items() if value}
+    names = [*ENV_NAMES.values(), *ENV_READ_ONLY_NAMES.values()]
+    return sorted(name for name in names if name in in_env and name not in in_file)

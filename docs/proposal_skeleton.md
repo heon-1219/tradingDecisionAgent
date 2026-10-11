@@ -1,3 +1,212 @@
+English | [한국어](#한국어)
+
+*Note: This skeleton describes the competition build, for which the competition rules mandated NCP HyperCLOVA X. This English edition runs on Google Gemini (default model `gemini-3.8-flash`) instead.*
+
+# Technical Proposal Skeleton — 10th Mirae Asset Securities AI Festival 2026 · Financial Product Agent
+
+Submission deadline **2026-09-06 23:59** · free format (PDF recommended) · weight **40%**
+
+This document is not the proposal itself but **a frame for filling in the proposal**. For each section it records
+`claim / the measurement that backs the claim / figure to include / source file`.
+**A section whose measurement cell is empty must not be written yet.** Anything not measured is written up as not measured.
+
+---
+
+## Scoring map — which section earns which part of the score
+
+| Organizer's scoring item | Weight | Where the proposal answers it |
+|---|---|---|
+| ① Source code (implementation · environment definition · README · Ontology.ttl) | 20% | 06 Appendix + the repository itself |
+| ② **Technical proposal** (problem definition · proposed method · architecture diagram · expected impact) | **40%** | **All of 01 – 06** |
+| ③ API answers (accuracy · evidence display · response time) | 40% | Reflected as measured figures in 02-4 and 05-2 |
+
+The organizer's recommended outline has 6 sections. **Use the section numbers and titles exactly as given** — graders must be able to find things easily.
+
+---
+
+## 0. Cover + Proposal Summary (1p)
+
+- Team name / task name / submission date / repository URL / **API End-point URL**
+- 5-line summary: what we built · what is different · what we measured
+- **One-line claim**: "a federated retrieval agent that uses the ontology not as documentation but as a **runtime component**"
+
+> The API End-point URL is a **mandatory** item per p8. Put it in large type on the cover.
+
+---
+
+## 01. Overall Architecture and Specialized Features (2p)
+
+**Core claim** — one question splits into five paths — RDB · knowledge graph · lexical index · vector index · document store —
+and merges back into one answer (federated retrieval). And because those five paths
+reference **the same single ontology**, they can verify each other's answers.
+
+**3 differentiators — say only these (do not add more)**
+
+1. **The ontology is a runtime component.** 6 TTL files → schema cards + validators generated automatically at startup.
+   Adding a new product group = 1 view + 1 TTL. (Basis: `ontology/loader.py`)
+2. **SQL and the graph verify each other.** Constituents are moved into a single SQLite table and
+   the graph is generated from that table → both paths return the same counts. (Basis: 05-2 ⑤)
+3. **Recount after every change.** A procedure born from the experience of 11 defects passing with no exception, log or red test.
+   (Basis: 05-2 quality-control principle)
+
+| To include | Source |
+|---|---|
+| One-page architecture figure | Top diagram of `docs/anatomy.html` |
+| Scale numbers (1.08M triples · 75,089 indexed documents · 215 columns) | `/health` response |
+
+---
+
+## 02. Proposed Method (4p) — structured as answers to the three questions the organizer specified
+
+### 02-1. What specialized data did we collect, and how did we clean it?
+
+- **Principle first**: organizer-provided data is the reference, and external collection is used only for **items for which the provided data has no column at all**.
+  → Proven by the provenance of the knowledge graph: rooted in provided data **85.9%**, external collection **6.0%** (05-2 ④)
+- **3 cleaning cases** (all of them came out of failures, which makes them convincing):
+  - Redefining "available for purchase" — reflects the notice that `BUYABLE_QUANTITY` is invalid; bonds 634 → 21,866
+  - Manager name — derived by majority vote over the `or_co_xtn_itt_cd` code rather than from the fund-name string; coverage 74.6% → 91.2%,
+    source recorded in `manager_source`. Sentinel `99999999` excluded
+  - Constituent identifiers — reusing the alias matcher for bulk loading misattributed 677 rows (LG→Shinhan Financial Group, KT→SKT).
+    Fixed by restoring the source `itemCode` and removing the alias matcher
+- **Handling missing values**: they are intentional, so they are not counted as 0; they are excluded or stated as "not provided"
+
+| To include | Source |
+|---|---|
+| Table of row counts and base dates for the 4 masters | `/health` |
+| Before/after cleaning comparison table | The 3 cases above |
+
+### 02-2. What ontology engineering did we apply?
+
+- **6-file layout**: `common.ttl` (fp:Product superclass) + `bond_kr` `etf_kr` `etf_gl` `fund_pub` + `etf_constituent`
+  → meets the p9 mandatory submission criteria as-is
+- **2 design decisions — this is the core of this section**
+  - `rdfs:domain` is **an inference rule, not a constraint**. Where a constraint was needed, we used a SHACL NodeShape.
+    (Learned from an incident where using domain as a constraint wrongly covered several row types in one table)
+  - The TBox is merged into the ABox and inference is **materialized in advance** → zero inference cost at query time
+- **215 of 261 properties are linked to actual view columns**. Unlinked properties do not appear in the schema cards,
+  and a column that is not in the schema cards **effectively does not exist** for the model (the `has_buy_yield` case in 05-2 ③).
+
+| To include | Source |
+|---|---|
+| Class hierarchy diagram | Ontology section of `docs/anatomy.html` |
+| Mermaid ERD | `docs/anatomy.html` / `Mermaid ERD/` in the parent folder |
+
+### 02-3. Which retrieval methodology did we choose, and why?
+
+- **5 federated retrieval paths** and the question types each path answers
+- **Why we did not merge them into one**: SQL does aggregation and the graph does relations.
+  When the **same table is read in two ways**, as with constituents, errors are caught by comparing the two answers (05-2 ⑤)
+- **Design law — derived from measurement**:
+  > Facts supplied together at the point of use were followed (5/5); prompt rules given in advance were ignored (4/4).
+  → So instead of adding rules, **change the schema cards and example SQL themselves.**
+  (e.g. removing foreign ETFs from the UNION in the cross-product query example made the failures disappear — the warning text was ignored, but the example was copied)
+
+### 02-4. Answer-generation principles (addressing the organizer's p6 rules — as a separate subsection)
+
+| Organizer's requirement | Our implementation |
+|---|---|
+| Show evidence (referenced data) | Mandatory `retrieved_context` field + `(근거: 표 · 기준일)` ("(Evidence: table · base date)") at the end of the answer |
+| State explicitly or ask back for unconfirmable questions | The ontology decides "does this product group have that data?" → if not, decline definitively |
+| No unfounded return forecasts | Detect forecast-type questions and decline. The schema cards state that the masters are **base-date snapshots** |
+| No definitive investment recommendations | Caution notice only on recommendation/ranking answers, not on simple lookups |
+
+> ⚠ **Open issue**: whether to remove the evidence citation inside `answer`. "Evidence display" is explicitly part of the p7 scoring,
+> and the p11 example puts `(근거: 해외ETF마스터)` ("(Evidence: foreign ETF master)") inside the answer. **Decide before submission.**
+
+---
+
+## 03. System Architecture Diagram (1p) — Ingestion → Indexing → Retrieval → Generation
+
+A one-page pipeline figure. Stamp **measured numbers** on every stage.
+
+```
+Ingestion   4 masters + constituents → 5 SQLite views (53,974 rows)
+Indexing    BM25 lexical index + TF-IDF/LSA vector index (75,089 documents · 384 dimensions)
+Retrieval   ontology schema cards → tool selection → SQL / graph / documents (cross-verification)
+Generation  HCX-005 function calling → validators → output with a separate evidence field
+```
+
+- Startup breakdown: ontology 2,964 triples → index → vectors (15.2 s, cached) → graph 1.08M triples
+- **LLM**: NCP HyperCLOVA X `HCX-005`, OpenAI-compatible endpoint. Thanks to the adapter structure, the cost of switching providers ≈ 0
+
+---
+
+## 04. Main Feature Flow (1p) — Data Collection → Ontology Design → Graph Construction → Retrieval
+
+**A single figure that follows one question all the way through** shows all four stages.
+Pick the example question from the same family as the organizer's p12 [hard] example:
+
+> "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"
+> ("Show me the 3 domestic ETFs holding Samsung Electronics with the largest net assets")
+
+Draw it so that actual values appear at each stage (entity resolution → 229 graph neighbors → SQL sort → validation → answer).
+Screenshots of the trace in `docs/anatomy.html` and of the `/ui` console serve directly as evidence.
+
+---
+
+## 05. Expected Impact · Scalability (1p)
+
+- **Where it applies in the business**: advisory assistance · product discovery · compliance (evidence citation and the no-forecast rule are built into the structure)
+- **Extension**: a new product group = 1 view + 1 TTL + lexicon entries. The loader generates schema cards and validators automatically
+- **Audit trail**: the base date and evidence are always attached to the response
+
+---
+
+## 06. Appendix (2–3p)
+
+- Ontology schema summary table (6 files · 215 of 261 properties linked)
+- **API specification** — request/response JSON schema (`docs/api_spec.md`). Mandatory item per p8
+- Evaluation reproduction procedure (`README` section 7) — graders must be able to run it as-is
+- Test list (currently 80 pass)
+- **Data limitations** — writing these honestly here is what earns points
+  - Foreign ETFs have only one period return, `du_er_1d` (1 day) → excluded from 1-year comparisons
+  - Public funds include no fee information
+  - Public funds and foreign ETFs have no constituent data → such queries are declined
+  - Returns such as `fd_yr1_ern_r` contain outliers originating in the source (1-year >200% in 25/7,022 rows).
+    State explicitly that, as organizer-provided values, they are **used as-is without modification**
+- System anatomy (`docs/anatomy.html`)
+
+---
+
+## Blanks to fill before submission (after re-measurement)
+
+| Blank | Where it goes | Status |
+|---|---|---|
+| Accuracy __/54 (__%) | 05-2 | ⏳ measurement started 16:29 |
+| Average response time __ s / max __ s | 05-2, 03 | ⏳ |
+| Number of questions over 60 s | 05-2 | ⏳ |
+| Accuracy on unanswerable questions (penalty item) | 02-4 | ⏳ |
+| Container startup time | 03 | Not measured |
+| API End-point URL | Cover, 06 | After deployment |
+
+**Rule**: do not write an accuracy figure in 05-2 until the table above is complete.
+Earlier grading results were discarded because the answer key itself had errors.
+
+---
+
+## Page allocation (for a 12–14 page PDF)
+
+| Section | Pages |
+|---|---|
+| 0 Cover · summary | 1 |
+| 01 Architecture | 2 |
+| 02 Proposed method | 4 |
+| 03 Architecture diagram | 1 |
+| 04 Flow diagram | 1 |
+| 05 Expected impact | 1 |
+| 06 Appendix | 2–3 |
+
+**At least 7 figures must go in.** Graders look rather than read.
+They are all already in `docs/anatomy.html`, so they only need to be captured.
+
+---
+
+## 한국어
+
+[English](#technical-proposal-skeleton--10th-mirae-asset-securities-ai-festival-2026--financial-product-agent) | 한국어
+
+*참고: 이 뼈대는 대회 규정상 NCP HyperCLOVA X 사용이 필수였던 대회 제출본을 기준으로 합니다. 이 영어판은 대신 Google Gemini(기본 모델 `gemini-3.8-flash`)로 동작합니다.*
+
 # 기술제안서 뼈대 — 제10회 2026 미래에셋증권 AI Festival · 금융상품 Agent
 
 제출 마감 **2026-09-06 23:59** · 자유 양식(PDF 권장) · 배점 **40%**

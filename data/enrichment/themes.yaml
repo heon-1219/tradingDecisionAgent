@@ -1,7 +1,7 @@
-# 투자 테마 사전. synonyms 는 상품명·기초지수·운용전략 텍스트·질문에 등장하는 한/영 표기.
-# 한글 별칭은 공백을 지운 텍스트의 부분문자열로 매칭되므로, 더 긴 별칭(다른 테마 또는 운용사 브랜드)과
-# 구간이 겹치면 버려진다(span shadowing).  '미국채' 안의 '국채', '메리츠' 안의 '리츠'가 이렇게 사라진다.
-# implies 는 그 규칙의 예외 선언이다: 긴 별칭이 짧은 테마의 뜻을 그대로 품고 있을 때만 적는다.
+# Investment theme lexicon. synonyms are the Korean/English spellings found in product names, underlying indices, strategy text and questions.
+# Korean aliases match as substrings of the space-stripped text, so an occurrence is dropped when its span overlaps a longer
+# alias (another theme or a manager brand) — span shadowing.  That is how '국채' inside '미국채' and '리츠' inside '메리츠' disappear.
+# implies declares exceptions to that rule: list one only when the longer alias genuinely carries the shorter theme's meaning.
 - id: space_aero
   label_ko: 우주항공
   label_en: Space & Aerospace
@@ -94,15 +94,15 @@
 - id: us_treasury
   label_ko: 미국채
   label_en: US Treasury
-  # '국채'만으로는 어느 나라 국채인지 알 수 없다. 상품명에 실제로 쓰인 미국 국채 표기를 모두 별칭으로 둬야
-  # kr_treasury 의 '국채'가 이 구간에서 밀려난다.
+  # '국채' alone does not say whose government bonds. Every US-Treasury spelling actually used in product names must be an alias
+  # so that kr_treasury's '국채' gets shadowed on that span.
   synonyms: [미국채, 미국국채, 미국채30년, 미국채10년, 미국장기국채, 미국30년국채, 미국10년국채,
              인플레이션국채, UST, treasury, treasuries, US Treasury, T-bond]
   implies: [usa]
 - id: kr_treasury
   label_ko: 국고채
   label_en: Korea Treasury Bond
-  # 'KTB' 는 뺐다: 데이터의 KTB 는 전부 KTB자산운용(현 다올) 펀드명이고 국고채 지수 표기는 한 건도 없다.
+  # 'KTB' was removed: every KTB in the data is a KTB자산운용 (now 다올) fund name; not one is a treasury-index label.
   synonyms: [국고채, 국채, 국공채, 국고통안, 물가채]
 - id: short_term_bond
   label_ko: 단기채/머니마켓
@@ -245,8 +245,8 @@
 - id: factor
   label_ko: 팩터/스마트베타
   label_en: Factor / Smart Beta
-  # 한글 '모멘텀'·'퀄리티'는 뺐다: 상품명 60건을 얻는 대신 "모멘텀 좋은 ETF" 같은 평범한 질문에 팩터 테마가
-  # 붙는다. 영문 momentum/quality 는 지수명에만 나오므로 남겨 둔다.
+  # Korean '모멘텀'/'퀄리티' were removed: they gain 60 product names but attach the factor theme to ordinary questions like
+  # "모멘텀 좋은 ETF". English momentum/quality appear only in index names, so they stay.
   synonyms: [스마트베타, 멀티팩터, 로우볼, 최소변동성, 저변동, smart beta, multifactor, low volatility, minimum volatility, momentum, quality]
 - id: construction
   label_ko: 건설

@@ -16,7 +16,7 @@ def test_build_store(tmp_path):
     counts = build_store(ROOT / "data" / "raw", tmp_path / "p.db", Lexicon.load(ROOT / "data" / "enrichment"), log=lambda *a: None)
     assert counts["bond_kr"] == 21882 and counts["fund_pub"] == 23676
     con = sqlite3.connect(tmp_path / "p.db")
-    # 주최측 공지(2026-08-24): buyable_quantity 무효, 상환 미도래 종목은 모두 구매가능
+    # Organizers' notice (2026-08-24): buyable_quantity is invalid; every issue not yet redeemed is buyable
     assert con.execute("select count(*) from v_bond_kr where is_sellable=1").fetchone()[0] == 21866
     assert con.execute("select count(*) from v_bond_kr where has_buy_yield=1").fetchone()[0] == 634
     assert con.execute(

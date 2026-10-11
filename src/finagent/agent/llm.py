@@ -1,8 +1,17 @@
 """Provider-agnostic chat-with-tools adapters.
 
 `LLMClient.start()` returns a `Conversation` that owns the provider-specific message history
-(so Anthropic thinking blocks are echoed back untouched), exposes `step()` to get the next
-assistant turn, and `add_tool_results()` to feed tool outputs back in ONE message.
+(so Anthropic thinking blocks and Gemini thought signatures are echoed back untouched), exposes `step()`
+to get the next assistant turn, and `add_tool_results()` to feed tool outputs back in ONE message.
+
+`LLMHandle` is the one client object the app hands out: the QA orchestrator (`/answer`), the chat
+runtime and the chat agent all hold the same handle, and `swap()` changes the provider client behind
+it for all of them at once (PUT /api/settings). A conversation keeps the client that started it, so
+a turn already running finishes on the old one.
+
+A provider error is logged by its exception type and HTTP status only (`_describe`), never with
+its message: that is the provider's response text, which can quote the prompt, account details or
+a key.
 """
 from __future__ import annotations
 
@@ -12,6 +21,12 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 log = logging.getLogger("finagent.llm")
+
+
+def _describe(exc: BaseException) -> str:
+    """A provider error for the log: its type and HTTP status, never its message."""
+    status = getattr(exc, "status_code", None)
+    return f"{type(exc).__name__} (status {status})" if status is not None else type(exc).__name__
 
 
 @dataclass
@@ -40,6 +55,7 @@ class Conversation(Protocol):
     async def step(self) -> Turn: ...
     def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None: ...
     def add_user(self, text: str) -> None: ...
+    def add_assistant(self, text: str) -> None: ...
     def transcript(self) -> list[dict]: ...
 
 
@@ -47,6 +63,53 @@ class LLMClient(Protocol):
     name: str
 
     def start(self, system: str, tools: list[ToolSpec], user_text: str) -> Conversation: ...
+
+
+class LLMHandle:
+    """A forwarding handle around the current provider client (see the module docstring).
+
+    `name`, `model` and `start()` forward to the client in use, and so does any other attribute.
+    `swap(new_client)` puts another client in service and returns the old one, which the caller
+    retires (closing it only after a grace period: conversations started on it are still running).
+    `generation` changes with every swap, so a cache keyed on it knows its entries are stale."""
+
+    def __init__(self, client: LLMClient):
+        if isinstance(client, LLMHandle):
+            raise TypeError("an LLMHandle wraps a provider client, not another handle")
+        self._client = client
+        self.generation = 0
+
+    @classmethod
+    def wrap(cls, llm: "LLMClient | LLMHandle") -> "LLMHandle":
+        """`llm` itself when it already is a handle, else a new handle around it."""
+        return llm if isinstance(llm, cls) else cls(llm)
+
+    @property
+    def current(self) -> LLMClient:
+        return self._client
+
+    @property
+    def name(self) -> str:
+        return self._client.name
+
+    @property
+    def model(self) -> str | None:
+        return getattr(self._client, "model", None)
+
+    def start(self, system: str, tools: list[ToolSpec], user_text: str) -> Conversation:
+        return self._client.start(system, tools, user_text)
+
+    def swap(self, client: LLMClient) -> LLMClient:
+        if isinstance(client, LLMHandle):
+            raise TypeError("an LLMHandle wraps a provider client, not another handle")
+        old, self._client = self._client, client
+        self.generation += 1
+        return old
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):  # also keeps copy/pickle probes from recursing before __init__ ran
+            raise AttributeError(name)
+        return getattr(self._client, name)
 
 
 # --------------------------------------------------------------------------- stub
@@ -65,6 +128,11 @@ class StubConversation:
 
     def add_user(self, text: str):
         self._messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed."""
+        self._messages.append({"role": "assistant", "content": text})
 
     def transcript(self):
         return self._messages
@@ -117,19 +185,19 @@ class AnthropicConversation:
             except anthropic.BadRequestError as e:
                 msg = str(e).lower()
                 if self.fallbacks and ("fallback" in msg or "beta" in msg):
-                    log.warning("fallbacks unsupported here, retrying without: %s", e)
+                    log.warning("fallbacks unsupported here, retrying without: %s", _describe(e))
                     self.fallbacks = False
                     resp = await self.client.messages.create(**kwargs)
                 elif "effort" in msg or "thinking" in msg or "output_config" in msg:
-                    log.warning("effort/thinking unsupported for %s, retrying plain: %s", self.model, e)
+                    log.warning("effort/thinking unsupported for %s, retrying plain: %s", self.model, _describe(e))
                     kwargs.pop("thinking", None)
                     kwargs.pop("output_config", None)
                     resp = await self.client.messages.create(**kwargs)
                 else:
                     raise
         except (anthropic.APIStatusError, anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
-            log.error("anthropic error: %s", e)
-            return Turn(f"LLM 호출 오류: {type(e).__name__}: {e}", [], "error")
+            log.error("anthropic error: %s", _describe(e))
+            return Turn(f"LLM call error: {type(e).__name__}: {e}", [], "error")
 
         self.messages.append({"role": "assistant", "content": resp.content})
         if resp.stop_reason == "refusal":
@@ -152,6 +220,11 @@ class AnthropicConversation:
     def add_user(self, text: str):
         self.messages.append({"role": "user", "content": text})
 
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed."""
+        self.messages.append({"role": "assistant", "content": text})
+
     def transcript(self):
         return self.messages
 
@@ -171,10 +244,13 @@ class AnthropicLLM:
     def start(self, system, tools, user_text):
         return AnthropicConversation(self.client, self.model, self.effort, self.max_tokens, self.fallbacks, system, tools, user_text)
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
 
 # --------------------------------------------------------------------------- rate limits
 def retry_delay(attempt: int, retry_after: str | float | None = None, base: float = 2.0, cap: float = 30.0) -> float:
-    """429 재시도 대기 시간. 서버가 Retry-After 를 주면 그 값을 우선한다."""
+    """Wait before retrying a 429 or an overloaded server. A server-sent Retry-After takes precedence."""
     if retry_after is not None:
         try:
             return max(0.0, min(float(retry_after), cap))
@@ -184,13 +260,14 @@ def retry_delay(attempt: int, retry_after: str | float | None = None, base: floa
 
 
 _last_call_at = {"t": 0.0}
-# 마지막 응답의 x-ratelimit-* 헤더. CLOVA 는 QPM(요청)과 TPM(토큰)을 따로 재고 둘 중 하나만
-# 소진돼도 429 를 낸다. 헤더를 읽어두면 한도에 닿기 전에 스스로 멈출 수 있다.
+# x-ratelimit-* headers of the last response, for providers that send them. Some providers meter requests
+# and tokens per minute separately and return 429 when either runs out; reading the headers lets us pause
+# before hitting the limit.
 rate_state: dict[str, float | None] = {"requests": None, "tokens": None, "reset_s": None}
 
 
 def _num(v) -> float | None:
-    """'123', '1.5s', '2m' 같은 값을 초/개수로 관대하게 파싱한다."""
+    """Leniently parse values such as '123', '1.5s' or '2m' into seconds or counts."""
     if v is None:
         return None
     s = str(v).strip().lower()
@@ -208,7 +285,7 @@ def _num(v) -> float | None:
 
 
 def note_rate_headers(headers) -> dict[str, float | None]:
-    """응답 헤더에서 남은 한도를 기록한다."""
+    """Record the remaining quota from response headers."""
     if not headers:
         return rate_state
     get = headers.get if hasattr(headers, "get") else (lambda k: None)
@@ -221,7 +298,7 @@ def note_rate_headers(headers) -> dict[str, float | None]:
 
 
 async def wait_if_nearly_exhausted(min_tokens: float = 8000, min_requests: float = 1, sleep=None) -> float:
-    """남은 한도가 한 번의 호출도 못 버틸 만큼이면 리셋까지 미리 기다린다(429 예방)."""
+    """If the remaining quota could not survive even one more call, wait for the reset first (prevents a 429)."""
     import asyncio
 
     sleep = sleep or asyncio.sleep
@@ -233,15 +310,15 @@ async def wait_if_nearly_exhausted(min_tokens: float = 8000, min_requests: float
     if not short:
         return 0.0
     wait = min(reset, 60.0)
-    log.warning("한도 소진 임박(잔여 토큰 %s, 요청 %s) — %.1f초 대기", toks, reqs, wait)
+    log.warning("quota nearly exhausted (tokens left %s, requests left %s) - waiting %.1fs", toks, reqs, wait)
     await sleep(wait)
     rate_state["tokens"] = rate_state["requests"] = None
     return wait
 
 
 async def throttle(min_interval: float) -> None:
-    """호출 사이 최소 간격을 강제한다. CLOVA 는 QPM 뿐 아니라 TPM(분당 토큰)도 재므로,
-    프롬프트가 큰 요청을 몰아 보내면 서비스앱에서도 429 가 난다."""
+    """Enforce a minimum interval between calls. Providers that meter tokens per minute as well as requests
+    return 429 when large prompts are sent back to back, even on paid tiers."""
     import asyncio
     import time as _t
 
@@ -254,16 +331,19 @@ async def throttle(min_interval: float) -> None:
 
 
 async def call_with_rate_limit_retry(
-    make_call, *, retries: int = 4, sleep=None, min_interval: float = 0.0, timeout_retries: int = 2
+    make_call, *, retries: int = 4, sleep=None, min_interval: float = 0.0, timeout_retries: int = 2,
+    server_error_retries: int = 2,
 ):
-    """429(rate exceeded)는 지수 백오프로, 타임아웃·연결 오류는 짧게 재시도한다.
+    """Retry 429s (rate exceeded) and 5xx (e.g. Gemini's 503 "model is overloaded") with exponential backoff,
+    and timeouts/connection errors briefly.
 
-    CLOVA Studio 는 테스트앱 기준 요청 빈도 제한이 낮아, 평가처럼 질의를 연속으로 보내면 429 가 난다.
-    이때 즉시 오류로 끝내면 그 문항은 '모델이 답하지 못한' 상태가 되므로 반드시 기다렸다 다시 부른다.
+    Low-tier keys have low request limits, so sending questions back to back (as an evaluation run does)
+    triggers 429s. Failing at once would leave that question unanswered by the model, so we always wait and
+    call again.
 
-    타임아웃도 마찬가지다: 한 번의 40초 타임아웃으로 문항을 포기하면 300초 예산의 대부분을 쓰지 않고
-    버리는 셈이다(G-020 은 84.8초에 미응답으로 끝났다). 오케스트레이터가 예산을 따로 강제하므로
-    여기서는 짧게 두 번만 다시 시도한다.
+    The same goes for timeouts: abandoning a question after a single 40 s timeout throws away most of the
+    300 s budget (in the competition, G-020 ended unanswered at 84.8 s). The orchestrator enforces the budget
+    separately, so here we retry only twice, quickly.
     """
     import asyncio
 
@@ -271,7 +351,7 @@ async def call_with_rate_limit_retry(
 
     sleep = sleep or asyncio.sleep
     last: Exception | None = None
-    timeouts = 0
+    timeouts = server_errors = 0
     for attempt in range(retries + 1):
         try:
             await throttle(min_interval)
@@ -282,9 +362,18 @@ async def call_with_rate_limit_retry(
             timeouts += 1
             if timeouts > timeout_retries:
                 break
-            log.warning("%s; 2초 후 재시도 (%d/%d)", type(e).__name__, timeouts, timeout_retries)
+            log.warning("%s; retrying in 2s (%d/%d)", type(e).__name__, timeouts, timeout_retries)
             await sleep(2.0)
-        except openai.RateLimitError as e:  # 429 만 지수 백오프
+        except openai.InternalServerError as e:  # 5xx: overloaded or transient server fault
+            last = e
+            if server_errors >= server_error_retries or attempt >= retries:
+                break
+            wait = retry_delay(server_errors)
+            server_errors += 1
+            log.warning("%s (%s); retrying in %.1fs (%d/%d)", type(e).__name__, getattr(e, "status_code", "5xx"),
+                        wait, server_errors, server_error_retries)
+            await sleep(wait)
+        except openai.RateLimitError as e:  # exponential backoff for 429 only
             last = e
             if attempt >= retries:
                 break
@@ -294,38 +383,86 @@ async def call_with_rate_limit_retry(
                 after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
                 note_rate_headers(resp.headers)
             wait = retry_delay(attempt, after)
-            log.warning("429 rate limited; %.1f초 후 재시도 (%d/%d)", wait, attempt + 1, retries)
+            log.warning("429 rate limited; retrying in %.1fs (%d/%d)", wait, attempt + 1, retries)
             await sleep(wait)
     raise last  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- openai-compatible
+# The request field that caps the output. OpenAI's own API takes `max_completion_tokens` (its
+# reasoning models reject `max_tokens`); Gemini's endpoint and most other OpenAI-compatible servers
+# take `max_tokens`. A client starts with the likelier one and swaps once if it is rejected.
+TOKEN_PARAMS = ("max_tokens", "max_completion_tokens")
+_PARAM_REJECTED_WORDS = ("unsupported", "not supported", "unrecognized", "unknown", "extra inputs",
+                         "not permitted", "unexpected", "instead")
+
+
+def other_token_param(param: str) -> str:
+    return TOKEN_PARAMS[1] if param == TOKEN_PARAMS[0] else TOKEN_PARAMS[0]
+
+
+def rejects_token_param(exc: BaseException, param: str) -> bool:
+    """Whether a 400 says the output-cap field `param` itself is not accepted (as opposed to its
+    value being too large, which the other field would not fix)."""
+    text = str(exc).lower()
+    return param in text and any(word in text for word in _PARAM_REJECTED_WORDS)
+
+
 class OpenAIConversation:
     def __init__(self, client, model: str, max_tokens: int, system: str, tools: list[ToolSpec], user_text: str,
-                 rate_limit_retries: int = 4, min_interval: float = 0.0):
+                 rate_limit_retries: int = 4, min_interval: float = 0.0, owner=None):
         self.client, self.model, self.max_tokens = client, model, max_tokens
+        self.owner = owner  # the LLM client object: holds what was learned about the endpoint
         self.rate_limit_retries = rate_limit_retries
         self.min_interval = min_interval
         self.tools = [{"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.input_schema}} for t in tools]
         self.messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": user_text}]
 
+    # Hooks for providers that speak this protocol with extras (see GeminiConversation).
+    def _extra_kwargs(self) -> dict:
+        return {}
+
+    @staticmethod
+    def _tool_call_dict(tc) -> dict:
+        return {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+
+    def _token_param(self) -> str:
+        return getattr(self.owner, "token_param", TOKEN_PARAMS[0])
+
+    async def _create(self):
+        import openai
+
+        async def _call():
+            raw = await self.client.chat.completions.with_raw_response.create(
+                model=self.model, messages=self.messages, tools=self.tools or None,
+                **{self._token_param(): self.max_tokens}, **self._extra_kwargs(),
+            )
+            note_rate_headers(getattr(raw, "headers", None))
+            return raw.parse()
+
+        async def _send():
+            return await call_with_rate_limit_retry(_call, retries=self.rate_limit_retries,
+                                                    min_interval=self.min_interval)
+
+        try:
+            return await _send()
+        except openai.BadRequestError as e:
+            param = self._token_param()
+            if self.owner is None or getattr(self.owner, "token_param_swapped", False) \
+                    or not rejects_token_param(e, param):
+                raise
+            log.warning("%s rejected %s; using %s from now on", self.model, param, other_token_param(param))
+            self.owner.token_param, self.owner.token_param_swapped = other_token_param(param), True
+            return await _send()
+
     async def step(self) -> Turn:
         import openai
 
         try:
-            async def _call():
-                raw = await self.client.chat.completions.with_raw_response.create(
-                    model=self.model, messages=self.messages, tools=self.tools or None, max_tokens=self.max_tokens
-                )
-                note_rate_headers(getattr(raw, "headers", None))
-                return raw.parse()
-
-            resp = await call_with_rate_limit_retry(
-                _call, retries=self.rate_limit_retries, min_interval=self.min_interval
-            )
+            resp = await self._create()
         except (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError) as e:
-            log.error("openai error: %s", e)
-            return Turn(f"LLM 호출 오류: {type(e).__name__}: {e}", [], "error")
+            log.error("openai-compatible error: %s", _describe(e))
+            return Turn(f"LLM call error: {type(e).__name__}: {e}", [], "error")
         choice = resp.choices[0]
         msg = choice.message
         calls: list[ToolCall] = []
@@ -337,7 +474,7 @@ class OpenAIConversation:
             calls.append(ToolCall(tc.id, tc.function.name, args))
         self.messages.append(
             {"role": "assistant", "content": msg.content or "",
-             **({"tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in msg.tool_calls]} if msg.tool_calls else {})}
+             **({"tool_calls": [self._tool_call_dict(tc) for tc in msg.tool_calls]} if msg.tool_calls else {})}
         )
         fr = choice.finish_reason
         stop = "tool_use" if calls else ("max_tokens" if fr == "length" else "end_turn")
@@ -350,6 +487,13 @@ class OpenAIConversation:
 
     def add_user(self, text: str):
         self.messages.append({"role": "user", "content": text})
+
+    def add_assistant(self, text: str):
+        """Append a plain assistant message with no tool calls - used only when rebuilding a
+        conversation from stored text history, where no thought signature echoing is needed.
+        Inherited by `GeminiConversation` unchanged: a rebuilt-history message never carries a
+        thought signature (there is no tool call to attach one to)."""
+        self.messages.append({"role": "assistant", "content": text})
 
     def transcript(self):
         return self.messages
@@ -368,54 +512,108 @@ class OpenAILLM:
         self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
         self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
+        # See TOKEN_PARAMS: OpenAI itself, or another OpenAI-compatible server (OPENAI_BASE_URL).
+        self.token_param = TOKEN_PARAMS[0] if settings.openai_base_url else TOKEN_PARAMS[1]
+        self.token_param_swapped = False
 
     def start(self, system, tools, user_text):
         return OpenAIConversation(self.client, self.model, self.max_tokens, system, tools, user_text,
                                   rate_limit_retries=self.rate_limit_retries,
-                                  min_interval=getattr(self, "min_interval", 0.0))
+                                  min_interval=getattr(self, "min_interval", 0.0), owner=self)
+
+    async def aclose(self) -> None:
+        await self.client.close()
 
 
-class ClovaLLM(OpenAILLM):
-    """NCP HyperCLOVA X via CLOVA Studio's OpenAI-compatible endpoint.
+# --------------------------------------------------------------------------- gemini
+MISSING_GEMINI_KEY = (
+    "LLM call error: GEMINI_API_KEY is not set. Create a key at https://aistudio.google.com/apikey "
+    "and add GEMINI_API_KEY=... to .env (GOOGLE_API_KEY also works)."
+)
 
-    The competition mandates HyperCLOVA X for the answer pipeline, so this is the default provider.
-    CLOVA Studio exposes `https://clovastudio.stream.ntruss.com/v1/openai`, which accepts the OpenAI
-    SDK plus `tools` / `tool_choice` / `parallel_tool_calls`, so the OpenAI conversation shape is
-    reused verbatim.  Two CLOVA-specific rules are enforced here:
 
-    * function calling only works when `max_tokens` >= 1024 — a smaller value silently returns no
-      tool calls, which would look like the model refusing to use its tools;
-    * function calling cannot be combined with the thinking/structured-output modes, so nothing else
-      is switched on.
+class GeminiConversation(OpenAIConversation):
+    """OpenAI-shaped conversation with the two things Gemini adds on top of the protocol.
+
+    * Thought signatures: Gemini 3 models attach an encrypted signature to each function call
+      (``extra_content.google.thought_signature``) and reject the next request if it is missing from the
+      assistant message we send back, so tool calls are echoed with their ``extra_content`` intact.
+    * reasoning_effort: sent when configured; if a model rejects it, it is dropped once for the whole client.
     """
 
-    name = "clova"
-    MIN_TOOL_TOKENS = 1024
+    def __init__(self, owner: "GeminiLLM", *args, **kwargs):
+        super().__init__(*args, owner=owner, **kwargs)
+
+    def _extra_kwargs(self) -> dict:
+        effort = self.owner.reasoning_effort
+        return {"reasoning_effort": effort} if effort else {}
+
+    @staticmethod
+    def _tool_call_dict(tc) -> dict:
+        d = OpenAIConversation._tool_call_dict(tc)
+        extra = (getattr(tc, "model_extra", None) or {}).get("extra_content")
+        if extra:
+            d["extra_content"] = extra
+        return d
+
+    async def _create(self):
+        import openai
+
+        try:
+            return await super()._create()
+        except openai.BadRequestError as e:
+            msg = str(e).lower()
+            if self.owner.reasoning_effort and ("reasoning" in msg or "thinking" in msg):
+                log.warning("%s rejected reasoning_effort=%s; continuing without it: %s",
+                            self.model, self.owner.reasoning_effort, _describe(e))
+                self.owner.reasoning_effort = None
+                return await super()._create()
+            raise
+
+    async def step(self) -> Turn:
+        if self.owner.missing_key:
+            return Turn(MISSING_GEMINI_KEY, [], "error")
+        return await super().step()
+
+
+class GeminiLLM(OpenAILLM):
+    """Google Gemini through its OpenAI-compatible endpoint (``/v1beta/openai/``).
+
+    The endpoint accepts the OpenAI SDK with ``tools`` and ``reasoning_effort``, so the OpenAI conversation
+    shape is reused; `GeminiConversation` adds thought-signature echoing and the effort fallback.
+    """
+
+    name = "gemini"
+    # Gemini's reasoning_effort levels are low / medium / high; the higher settings map to high.
+    EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 
     def __init__(self, settings):
         import openai
 
-        key = settings.clova_api_key or settings.openai_api_key
+        key = settings.gemini_api_key
+        self.missing_key = not key
+        if self.missing_key:
+            log.error("GEMINI_API_KEY is not set - every question will fail until it is added to .env")
         self.client = openai.AsyncOpenAI(
-            api_key=key or None,
-            base_url=settings.clova_base_url,
+            api_key=key or "missing-GEMINI_API_KEY",  # the SDK refuses an empty key; step() short-circuits instead
+            base_url=settings.gemini_base_url,
             timeout=settings.llm_timeout_sec,
             max_retries=1,
         )
-        self.model = settings.llm_model
+        self.model, self.max_tokens = settings.llm_model, settings.llm_max_tokens
         self.rate_limit_retries = getattr(settings, "rate_limit_retries", 4)
         self.min_interval = getattr(settings, "request_min_interval_sec", 0.0)
-        self.max_tokens = max(int(settings.llm_max_tokens), self.MIN_TOOL_TOKENS)
-        if settings.llm_max_tokens < self.MIN_TOOL_TOKENS:
-            log.warning(
-                "CLOVA function calling needs max_tokens >= %d; raising %d -> %d",
-                self.MIN_TOOL_TOKENS, settings.llm_max_tokens, self.max_tokens,
-            )
+        self.token_param, self.token_param_swapped = TOKEN_PARAMS[0], False
+        self.reasoning_effort: str | None = self.EFFORT.get(settings.llm_effort)
+
+    def start(self, system, tools, user_text):
+        return GeminiConversation(self, self.client, self.model, self.max_tokens, system, tools, user_text,
+                                  rate_limit_retries=self.rate_limit_retries, min_interval=self.min_interval)
 
 
 def make_llm(settings) -> LLMClient:
-    if settings.llm_provider == "clova":
-        return ClovaLLM(settings)
+    if settings.llm_provider == "gemini":
+        return GeminiLLM(settings)
     if settings.llm_provider == "anthropic":
         return AnthropicLLM(settings)
     if settings.llm_provider == "openai":

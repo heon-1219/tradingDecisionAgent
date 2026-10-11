@@ -1,3 +1,239 @@
+English | [한국어](#한국어)
+
+*Note: This draft describes the competition build, for which the competition rules mandated NCP HyperCLOVA X. This English edition runs on Google Gemini (default model `gemini-3.8-flash`) instead.*
+
+# Technical Proposal Draft (Following the Recommended Outline) — Financial Product Agent
+
+> Skeleton for writing the PDF submission. The diagrams for each section are drawn in mermaid; export them as images when converting to PDF.
+
+## 01. Overall Architecture and Specialized Features
+
+**One-line summary**: a Federated Query Agent that uses the ontology as an "execution layer" rather than as "documentation". Structured masters are routed to SQL, relations (managers, themes, constituents, subsidiaries) to the graph, names and descriptive text to the lexical index, and background knowledge to external documents; value domains are validated before answering to reduce hallucinations and wrong answers on unanswerable questions.
+
+Differentiators
+1. **Pre-analysis → Round 0 retrieval execution plan (deterministic pre-analysis)** — before calling the LLM, the system extracts product-name spans, resolves entities, matches the theme/company lexicons and validates values against the ontology; based on the result it picks *only what that question needs* from graph, vector and documents, runs those lookups in advance and **injects the result rows into the first prompt as facts** (across the 54 questions, graph fires 6 times, vector 7 and documents 0, and nothing fires for 41 questions) → fewer rounds (lower latency) and early detection of unanswerable questions (AAAA, grade 7, non-existent products). It also passes along resolved identifiers (e.g. Cambricon → the store's spelling `한무기`) and the list of IDs to query, so SQL does not spin its wheels on names.
+2. **Ontology → auto-generated schema cards/validators** — the runtime reads the TTL's `fp:sourceColumn`, enumeration individuals and SHACL to build the prompt and the validators (the "runtime identification +20pp" perspective from the technical session).
+3. **Measurement-driven hybrid search — including the size of its gain** — when BM25 and vectors (TF-IDF+LSA, 384 dimensions) were combined as equals with RRF, we observed irrelevant documents that both retrievers ranked mid-list pushing out the top lexical match (the #1 result for "배터리 양극재" (battery cathode materials) was polluted). The final design gives the head to lexical results and the bottom 30% of slots to documents found only by semantic search. Measured on 1,313 queries, this structure **guarantees that the hybrid's recall@1 and @5 are identical to lexical-only down to the decimal** (vectors never change the top ranks), and the gain is limited to **recall@10 +3.5%p** on theme queries (87.0% → 90.5%). We do not hide this number — TF-IDF+LSA is based on lexical co-occurrence, not semantic embeddings, so this is the ceiling of the approach (05-2 ⑥).
+4. **Materialized ontology inference** — the TBox is merged into the runtime graph and superclass inheritance, inverse relations and domain/range are applied. Queries such as `?p a fp:Product` and `?am fp:manages ?p` work without separate loading (a working pipeline implementation of technical session 01-4's "put in 2, get 5"). The current graph has **1,082,874 triples** (965,823 asserted + 117,051 inferred) **· 73 predicates**.
+5. **Constituents in both the RDB and the graph** — the top holdings of 1,162 domestic ETFs, 22,599 rows, are collected and **loaded into the SQLite table `etf_constituent`**, and the knowledge graph's `hasConstituent` is generated from that table. Because both use the same source, SQL results and graph results cannot diverge (cross-checked: Samsung Electronics 229/229, EcoPro BM 42/42). Companies are identified only by the **ticker code** the source provides; name similarity is not used.
+   - However, `subsidiaryOf` (parent–subsidiary) has **only 4 edges**. The organizer's four masters have no ownership column at all, and we kept to the rule of computing from the provided data, so we did not extend it. We do not claim "multi-level subsidiary traversal" as a general feature; the range that actually works is the EcoPro group and SK Innovation, as explicitly listed in the lexicon.
+6. **Answer-policy state machine** — the three states `answered / cannot_confirm / clarify` are enforced through the tool schema, and the server corrects violations.
+7. **Never-fail contract** — always 200 + 5 fields; 120-second time budget, at most 8 rounds; when the budget is nearly used up, the loop is force-terminated and the answer is built from the evidence gathered.
+
+```mermaid
+flowchart TB
+    subgraph Ingest[Ingestion]
+      X[4 Excel masters] --> E[ETL: normalization · derived columns · 5 views]
+      C[Naver Finance constituents<br/>22,599 rows] --> E
+      E --> S[(SQLite<br/>5 tables · 5 views · 215 columns)]
+      Y[Lexicon YAML<br/>77 managers · 48 themes · 97 companies] --> K
+      T[ontology/*.ttl, 6 files] --> L[Loader: schema cards · validators]
+    end
+    subgraph Index[Indexing]
+      S --> B[BM25 index]
+      S --> VEC[Vector index TF-IDF+LSA]
+      S --> K[(Knowledge Graph)]
+      M[External docs MD] --> D[Document chunk index]
+    end
+    subgraph Serve[Retrieval · Generation]
+      Q[Question] --> P[Pre-analysis] --> A[LLM tool loop] --> F[final_answer] --> J[JSON response]
+      A --- S & K & B & VEC & D
+      L -.-> P & A
+    end
+```
+
+## 02. Proposed Method
+
+### What specialized data we collected and how we cleaned it
+- The organizer's four masters: code-like numeric columns pinned as strings (leading zeros preserved), yyyymmdd→ISO, derived `is_sellable` (bonds not yet redeemed, **21,866 rows**), `has_buy_yield` (634 rows with a purchase yield), `is_on_sale`, `fund_family` (23,676 fund class rows = **17,795 families**) and `manager_name`. Base dates are recorded in the `meta` table and shown automatically in the evidence. **All 215 provided columns** of the 5 views are exposed (no selection — see 05-2 for why).
+- Constituents: Naver Finance API (top holdings and weights); 1,162 of 1,235 ETFs succeeded, 22,599 rows. **Loaded as a SQLite table**, and the graph is generated from that table. The `itemCode` the source provides is preserved, so 79% of rows have a ticker code. Caching and re-fetch scripts are provided.
+- Lexicons: 77 managers (brand prefixes TIGER/KODEX/RISE…), 48 themes (Korean/English synonyms), 97 companies (aliases, tickers, parent companies, unlisted status, Chinese names such as 한무기 = Cambricon).
+- Unstructured: National Growth Fund (국민성장펀드) press releases and similar material converted PDF→Markdown (`parse_docs.py`), with source and base date in the front matter.
+
+### How we identified and filled missing values
+
+Premise: per the organizer's notice, **zeros and missing values in the provided data are intentional**. We therefore do not fill missing values in the original columns; they are excluded from calculations, and answers state "not provided". What we fill are *the derived columns we created*, and the basis for filling must always lie **within the provided data**.
+
+**How we identify them** — we checked the NULL ratio of every column in every view, and for derived columns we also recorded their derivation basis (which original column they come from). One derived column stood out in this check.
+
+**Worked example: recovering the fund manager (`manager_name`)**
+
+| Step | Details |
+|---|---|
+| Symptom | Of 23,676 public-fund rows, **25.4% (6,016 rows)** had no manager |
+| Cause | The manager was being **guessed from the prefix of the fund name**. Funds whose names do not reveal a brand could not be filled |
+| Better basis | The organizer provides `or_co_xtn_itt_cd` (manager institution code) **100% populated**. The manager can be derived from the code instead of guessed |
+| Filling | Collect the manager spellings observed for each institution code, take the majority spelling as the representative name, and fill the rows the name prefix could not with the code |
+| Result | 17,660 rows (74.6%) → **21,592 rows (91.2%)**. 2,084 NULL rows remain |
+| Traceability | The basis used for filling is kept in a new column **`manager_source`** — `name` 17,660 / `code` 3,932 / NULL 2,084 |
+
+**What we decided not to fill**
+
+- **Manager rename mapping**: sometimes both an old brand and a new brand are observed under one institution code. But the provided data **has no fund inception date**, so there is no basis for deciding which spelling is the current name. Pulling in an external table would step outside the rule ("compute from the provided data"), so we use the majority spelling as-is — even if it is the old brand.
+- **Domestic ETF total expense ratio (only 18% populated) · fund returns (only about 30% populated) · the unit of the fund fee columns**: these are values the source does not provide. We do not estimate them; we answer "no data". Fund fees have an undisclosed unit, so **only relative comparison between classes** is allowed.
+- **`subsidiaryOf` (parent–subsidiary)**: the organizer's four masters have no ownership column. The **4 edges** written by hand in the lexicon are all there is, and we do not claim this as a general feature.
+
+**One more identification method** — this one catches *silent errors* rather than missing values. One filling step in the pipeline was **reporting success without filling any rows**, because `pandas`'s `Series.map` turns a returned `None` into `NaN`, and `NaN` is truthy. There was no exception, no log, and the tests were green. So this project made it a procedure, for every filling step, to **recount the number of filled rows before and after and compare them**. We look at counts, not at success flags.
+
+### Data model (5 views)
+
+```mermaid
+erDiagram
+    v_etf_kr ||--o{ v_etf_constituent : "pd_itm_no = etf_itm_no"
+
+    v_etf_kr {
+        text pd_itm_no PK "item number (1,780 rows)"
+        text pd_ticker "ticker"
+        text pd_nm "product name"
+        text product_type "domestic ETF 1,235 / domestic ETN 545"
+        text manager_name "manager"
+        real pd_net_tamt "total net assets"
+        int risk_grade "risk grade 1-6"
+    }
+    v_etf_constituent {
+        text etf_itm_no FK "v_etf_kr.pd_itm_no (22,599 rows / 1,162 ETFs)"
+        text etf_ticker "ticker"
+        text company_code "source ticker code - 79% filled"
+        text company_name "constituent name"
+        real weight_pct "weight %"
+        int is_cash "cash-equivalent flag"
+        text as_of "2026-09-05"
+    }
+    v_etf_gl {
+        text pd_itm_no PK "item number (6,037 rows)"
+        text ticker "ticker"
+        text product_type "foreign ETF 5,972 / foreign ETN 65"
+        text manager_name "manager"
+        real expense_ratio_pct "total expense ratio %"
+        real du_last_aum "net assets (AUM)"
+    }
+    v_fund_pub {
+        text itm_no PK "class item number (23,676 rows)"
+        text fund_family "fund family key - 17,795 funds"
+        text manager_name "manager - 91.2% filled"
+        text manager_source "fill source name/code/NULL"
+        text or_co_xtn_itt_cd "manager institution code - 100% provided"
+        text product_type "public 14,716 / private 8,960"
+        real fd_yr1_ern_r "1-year return"
+    }
+    v_bond_kr {
+        text pd_no "item number - not a standalone PK (21,882 rows / 20,497 issues)"
+        text info_seq "OTC LOT serial number"
+        text pd_nm "product name"
+        text pd_exg_mkt "exchange 17,746 / OTC 4,136"
+        text crd_grd "credit grade AAA-D"
+        int is_sellable "available for purchase: 21,866 rows"
+        int has_buy_yield "purchase yield recorded: 634 rows"
+    }
+```
+
+- **There is only one real foreign key.** `v_etf_constituent.etf_itm_no` → `v_etf_kr.pd_itm_no`. The other four views cover different product groups and share no common key, so cross-product queries are solved with `UNION ALL` rather than joins.
+- 1 row of `v_fund_pub` = 1 fund **class**. "How many funds" is `COUNT(DISTINCT fund_family)`.
+- `v_bond_kr` has several rows per `pd_no` (exchange/OTC; OTC rows are per LOT, `info_seq`). The number of issues is `COUNT(DISTINCT pd_no)`.
+- There is no constituent data for foreign ETFs or public funds.
+- The diagram above shows only the join and identifier columns; in reality the 5 views have **215 columns**, all exposed through the schema cards.
+
+### What ontology engineering we applied
+- TBox of **6 files** (`common` · `bond_kr` · `etf_kr` · `etf_gl` · `fund_pub` · `etf_constituent`): `fp:Product` superclass, subclasses per product group, enumeration individuals (20-step ordered credit grades, 6 risk grades, asset class, region, distribution cycle), relation properties (managed by, issued by, holds, subsidiary, theme, index) and SHACL constraints. Of 261 property definitions, **215 are linked to actual view columns** (`fp:sourceTable`/`fp:sourceColumn`).
+- **Class domains matched to how the tables are actually composed**: `v_etf_kr` holds 1,235 domestic ETFs and 545 domestic ETNs in the same columns, and `v_etf_gl` holds 5,972 foreign ETFs and 65 foreign ETNs. If a property's `domain` pointed only at the ETF class, ETN rows would be misclassified, so we added two classes, `fp:DomesticListedProduct` / `fp:ForeignListedProduct`, so the domain covers every row type in the table.
+- Runtime binding: a property's `fp:sourceTable/sourceColumn/unit` → schema card; enumerations → value validators (`AA- 이상` ("AA- or higher") = automatically generated list of grades with rank ≤ 4).
+- Automatic ABox construction: SQLite → **1,082,874** triples (products, managers, indices, themes, companies, families, holdings, affiliates). 73 predicates — the holding weights, previously written as a separate predicate per company (`weight_<company name>`, 5,082 predicates), were folded into a column.
+
+### Which retrieval methodology we chose and why
+- Routing by query element: numeric filter/sort/aggregation → SQL; relation traversal → graph; name and description matching → BM25 (+ Korean bigrams, exact-name boost); background knowledge → documents.
+- Given the limits of any single retriever (technical-session benchmark), the LLM combines several tools to merge sources, and the evidence is structured and returned as `retrieved_context`.
+  - In practice, however (05-2 ③), the tools the model actually used were heavily skewed toward `sql_query`, and five tools were never called. So rather than leaving routing to "the model will choose", we moved the design toward **loading the needed information into the prompt up front** (exposing all 215 columns, injecting pre-analysis hints).
+- Vectors default to TF-IDF+LSA, reproducible without an external embedding key; commercial embeddings are available through an environment-variable switch (`VECTOR_BACKEND=openai`).
+- **We measured the vector leg's actual contribution (05-2 ⑥).** For name, code and typo queries, lexical dominates and vectors cannot win. The only thing vectors retrieve on their own is theme/descriptive queries (`space exploration satellite` → Procure Space ETF, absent from the lexical top 5), which is why the current structure that gives vectors only the bottom slots is the design the data supports. Anyone can reproduce this with the audit script (`scripts/audit_vector.py`, no LLM calls, fixed seed).
+
+## 03. System Architecture Diagram (Ingestion → Indexing → Retrieval → Generation)
+(Reuse the 01 diagram + a container deployment diagram: NCP VPC/Public Subnet · Ubuntu VM · Docker Compose · public IP, port 80)
+- Configured to match the organizer's notice (evaluation call method): plain HTTP · standard port 80 · no auth header · sequential calls (no concurrent requests) · 300-second timeout per question. Store loading and vector-cache warming are finished at image build time to shorten container startup, and `restart: unless-stopped` recovers automatically from failures.
+
+## 04. Main Feature Flow (Data Collection → Ontology Design → Graph Construction → Retrieval)
+
+```mermaid
+sequenceDiagram
+    participant U as Evaluator
+    participant API as /answer
+    participant P as Pre-analysis
+    participant L as LLM
+    participant T as Tools (RDB/KG/index/docs)
+    U->>API: question_id, question
+    API->>P: product-name extraction · entity resolution · ontology validation
+    P-->>L: question + pre-analysis hints
+    loop up to 8 rounds / 120 s
+      L->>T: sql_query · graph_neighbors · search_products …(parallel)
+      T-->>L: results + evidence (table · base date · codes)
+    end
+    L->>API: final_answer(status, answer)
+    API-->>U: retrieved_context · think_trace · answer
+```
+
+Three example scenarios (hard/medium/easy) and two unanswerable scenarios are attached as actual response JSON (`data/eval/results.jsonl` · `data/eval/truth_results.jsonl`). The answer key has 54 questions (10 easy · 16 medium · 9 hard · 19 unanswerable).
+
+## 05. Expected Impact and Scalability
+- In the business: built-in support for advisory assistance, product discovery and compliance (evidence citation, no forecasts). Base dates and evidence are always attached, enabling audit trails.
+- Extension: a new product group = 1 view + 1 TTL + lexicon entries, and that's it (the loader generates schema cards and validators automatically). The graph grows by adding pipelines for constituents and disclosure documents. Switching the LLM provider takes one environment variable.
+
+## 05-1. Reflecting the Organizer's Notice (2026-08-24)
+- **LLM**: NCP HyperCLOVA X is mandatory for the answer-generation pipeline → function calling through the CLOVA Studio OpenAI-compatible endpoint (`HCX-005`). Thanks to the adapter structure, the cost of switching providers was close to zero.
+- **Changed definition of "available for purchase"**: following the notice that `BUYABLE_QUANTITY` is invalid, redefined as "not yet redeemed = available for purchase" (bonds 634 → 21,866). Because this item changes evaluation answers substantially, the ETL, tests and prompts were revised together.
+- **Handling missing values / zeros**: they are intentional, so they are not counted as 0; they are excluded or explicitly stated as "not provided".
+- **Cross-product queries**: a product-group UNION pattern is built into the prompt. Foreign ETFs have no 1-year return, so the prompt instructs the model to exclude them from comparisons and say so in the answer.
+- **Response time**: to fit the 300-second no-response rule, the internal budget was raised to 120 seconds and 8 rounds (accuracy first, with margin before 300 seconds). Measurements showed that what causes latency is not prompt size but **the number of round-trips** (05-2).
+
+## 05-2. What We Confirmed by Measurement (2026-09-06)
+
+Below we list only the design claims that are backed by measurement. Anything we did not measure, we say we did not measure.
+
+**① Prompt size does not cause latency.** For prompts of 599 / 5,591 / 8,789 / 13,495 tokens, the median first-call latency was 2.90 / 3.65 / 2.94 / 3.82 seconds. Practically flat while the prompt grew 22-fold. The 35-second call observed earlier was not due to size but **waiting on the rate limit of the test-app tier**.
+→ So putting all 215 columns into the schema cards costs nothing in response time.
+
+**② What causes latency is the number of round-trips.** The marginal cost of one more round is 1→2 **+11.2 s**, 2→3 +1.8 s, 3→4 +3.7 s. The first round-trip is the most expensive. Yet **17 of 22 questions** spend one round, right before submitting, emitting only text without calling a tool — a round-trip that adds nothing to the answer. The correlation between answer length and elapsed time was **0.00** (writing longer is not what makes it slow).
+
+**③ The model does not ask about the schema.** Tool calls over 22 questions: `sql_query` 24, `final_answer` 20, `graph_neighbors` 2, and `table_info` · `search_products` · `resolve_entity` · `graph_query` · `search_documents` **0 each**.
+→ A column that is not in the prompt from the start effectively does not exist for the model. In fact, `has_buy_yield` was in the prompt's column list but had no ontology definition, so it never appeared in the schema card, and the model never used that column. This is why we decided **not to select among the provided columns but to expose all 215**.
+
+**④ Provenance of the knowledge graph.** The current graph has **1,082,874 triples** (965,823 asserted + 117,051 inferred · 73 predicates). Provenance was measured at 1,074,824 triples: organizer masters **58.9%**, ontology/inference **27.0%**, our lexicons **8.1%**, external collection (domestic ETF constituents) **6.0%** — 85.9% is rooted in the provided data, and external collection covers only one item for which the provided data has no column at all. The affiliate relations added afterwards (608 edges) are 0.7% of the total and move each share by less than 1%p.
+
+**⑤ SQL and the graph give the same answer.** After moving constituents into a SQLite table and generating the graph from that table, we cross-checked the two paths on five companies: Samsung Electronics 229/229 · Samsung Electronics preferred 19/19 · EcoPro BM 42/42 · LG 26/26 · KT 48/48.
+
+**⑥ How much the vector index adds on top of lexical search.** Using **1,313 queries** generated automatically from the data (4 product groups · 7 types: official name/code/abbreviation/constituent name/theme word/typo/synonym), we measured the lexical, vector and combined modes separately.
+
+| Type | Lexical recall@10 | Vector recall@10 | Combined recall@10 |
+|---|---|---|---|
+| Official name | 100.0% | 60.0% | 100.0% |
+| Code · ticker | 49.4% | 1.9% | 49.4% |
+| Typo | 93.1% | 45.0% | 93.1% |
+| Theme word | 87.0% | 55.8% | **90.5%** |
+
+The combined mode's recall@1 and @5 are **exactly identical to lexical-only for every type** — because, by construction, vectors do not touch the top slots, which also means the design goal "hybrid is never worse than lexical" holds. Of the 1,313 queries, vectors alone rescued 22 (1.7%) and the combination lost 6 (0.5%), **all in the tail slots, ranks 8–10**.
+→ So we do not write that "semantic search absorbs typos and synonyms". **Typo tolerance comes from BM25's Korean bigrams** (lexical 93.1% vs. vector 45.0%). The only area where vectors win is queries where the user knows the product's character but not its name.
+
+**⑦ Answer accuracy (2026-09-06 · `HCX-005`).** On our own 54-question answer key: **47/54 (87%)**. By difficulty: easy 8/10 · medium 14/16 · hard 6/9 · **unanswerable 19/19** — zero cases of answering a question that cannot be answered. Average response **20.6 s**, longest 87.4 s, **0 over 300 s**. Per-question verdicts, elapsed times, evidence and full traces are in `data/eval/truth_results.jsonl`.
+Because we fixed errors in the key itself while expanding it from 20 to 54 questions (counting ETNs in a question about ETFs; pinning a single correct answer when 4 products tied at the lowest total expense ratio of 0.01%; allowing rounded integers so that 0.65 also passed as "1"; a grader that did not recognize "…상품은 없습니다" ("there is no such product") as a refusal), the figures above are **based on the corrected new set**, and earlier grading results were discarded.
+We also measured separately on the 8 sample questions on p12 of the organizer's task description — **7/8** (4 of the 5 difficulty-rated questions correct, all 3 unanswerable questions correct). All **194 unit tests pass**.
+
+**Not yet measured (we do not give numbers)**
+
+- Container startup time (needs re-measurement after adding the constituent table and rebuilding the graph).
+- Concurrent-request throughput — the organizer announced sequential calls, so we did not load-test.
+- Change in retrieval quality when switching to commercial embeddings (`VECTOR_BACKEND=openai`).
+
+**Our quality-control principle** — all 11 defects found in this review passed with no exception, no log and no red test. Relation counts were inflated twofold and still "correct" (because the answer key was computed with the same code), counts cut at a cap were reported under the name of totals, and a step that filled no rows reported success. So this project makes it a procedure to **recount results after every change** — counting a value obtained by SQL once more through the graph, and a value obtained through the graph once more by SQL, and comparing them.
+
+## 06. Appendix
+- Ontology schema summary table (classes/properties/enumerations: 6 files · 215 of 261 properties linked to view columns), API specification (`docs/api_spec.md`), evaluation reproduction procedure (README section 7), test list, data limitations, system anatomy (`docs/anatomy.html` — including charts and ERD).
+
+---
+
+## 한국어
+
+[English](#technical-proposal-draft-following-the-recommended-outline--financial-product-agent) | 한국어
+
+*참고: 이 초안은 대회 규정상 NCP HyperCLOVA X 사용이 필수였던 대회 제출본을 기준으로 합니다. 이 영어판은 대신 Google Gemini(기본 모델 `gemini-3.8-flash`)로 동작합니다.*
+
 # 기술제안서 초안 (권장 목차 기준) — 금융상품 Agent
 
 > 제출용 PDF 작성을 위한 뼈대. 각 절의 다이어그램은 mermaid 로 그려 두었으니 PDF 변환 시 이미지로 내보내면 됩니다.

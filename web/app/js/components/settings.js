@@ -1,0 +1,329 @@
+/* The Settings panel: connection status with key entry, the trading switch, the kill switch, the
+ * model section (settings-model.js) and the activity-log download. It replaces the shell's
+ * read-only view. Each section is built by its own function (or module) and listed once in
+ * `build()`; `update()` passes every settings body to all of them. `settings:focus` with a section
+ * name ('model') scrolls to that section and moves the focus to its heading.
+ *
+ * Keys. The server never sends a key back, only status words, and this panel never keeps one: the
+ * entry fields are password inputs (`autocomplete="new-password"`, so the browser neither fills a
+ * saved password in nor stores one on its own), they are never pre-filled, and they are
+ * emptied as soon as a save is answered, whatever the answer. A value goes from the input straight
+ * into the PUT body: not into localStorage, not onto the bus, not into a log line or an error text.
+ * The SEC contact (a name and an e-mail address, not a secret) uses a plain text input, with the
+ * same rules.
+ *
+ * The panel is built once and then updated in place, so a field being typed in is never replaced.
+ */
+import { request } from '../api.js';
+import { bindText, t } from '../i18n.js';
+import { announce } from '../notify.js';
+import { registerPanel } from '../registry.js';
+import { emit, on, setState, state } from '../state.js';
+import { actionButton, el, iconButton, iconSpan, label, str, uid } from './dom.js';
+import { setMessage, textOf } from './form-fields.js';
+import { createKillSwitch } from './settings-kill.js';
+import { createModelSection } from './settings-model.js';
+
+// status word from the API -> [i18n key, tone]
+const STATUS = {
+  connected: ['status_connected', 'ok'],
+  set: ['status_set', 'ok'],
+  missing: ['status_missing', 'muted'],
+  invalid: ['status_invalid', 'bad'],
+  unreachable: ['status_unreachable', 'warn'],
+  not_paper: ['status_not_paper', 'bad'], // keys of a live account: the server keeps no broker for them
+};
+// error code from PUT /api/settings -> i18n key
+const ERRORS = {
+  alpaca_invalid: 'settings_err_alpaca_invalid',
+  alpaca_unreachable: 'settings_err_alpaca_unreachable',
+  alpaca_pair_required: 'settings_err_alpaca_pair',
+  alpaca_not_paper: 'settings_err_alpaca_not_paper',
+  kill_switch_pressed: 'settings_err_kill_pressed',
+  invalid_value: 'settings_err_invalid_value',
+};
+const FIELD_LABEL = {
+  alpaca_key_id: 'settings_alpaca_key_id',
+  alpaca_secret: 'settings_alpaca_secret',
+  tavily_key: 'settings_tavily_key',
+  sec_user_agent: 'settings_sec_value',
+};
+
+// Each editable connection: the status field it reports, and the request fields it sends.
+// `warn` maps a status word to a warning shown under the row while the status says so.
+const CONNECTIONS = [
+  { status: 'alpaca', key: 'settings_alpaca', fields: [['alpaca_key_id', true], ['alpaca_secret', true]],
+    warn: { not_paper: 'settings_alpaca_not_paper_note' } },
+  { status: 'tavily', key: 'settings_tavily', fields: [['tavily_key', true]] },
+  { status: 'sec_user_agent', key: 'settings_sec', fields: [['sec_user_agent', false]] },
+];
+
+let container = null;
+let view = null;
+
+/* Apply a settings body the server just returned, the same way the shell's own refresh does. */
+function adopt(settings) {
+  setState({ settings, settingsError: null });
+  emit('settings', settings);
+}
+
+function statusNode() {
+  const node = el('span', 'status');
+  node.appendChild(el('span'));
+  return node;
+}
+
+function setStatus(node, word) {
+  const [key, tone] = STATUS[word] || ['status_unknown', 'muted'];
+  node.setAttribute('data-tone', tone);
+  bindText(node.firstChild, key);
+}
+
+/* What to say for a failed settings write, as a message for form-fields.js (so it follows a language
+ * switch). Never includes anything that was typed. */
+export function settingsErrorMessage(err) {
+  const key = ERRORS[err?.error];
+  if (!key) return err?.message ? { raw: err.message } : { key: 'err_generic' };
+  const field = FIELD_LABEL[err?.body?.field];
+  return key === 'settings_err_invalid_value' && field ? { prefix: field, key } : { key };
+}
+
+/* The same, as text in the current language. */
+export function settingsErrorText(err) {
+  return textOf(settingsErrorMessage(err));
+}
+
+function connectionRow(spec) {
+  const row = el('div', 'conn');
+  const head = el('div', 'conn-head');
+  const status = statusNode();
+  const edit = actionButton('btn-link', 'settings_edit');
+  edit.setAttribute('aria-expanded', 'false');
+  head.append(label('span', 'conn-name', spec.key), status, edit);
+
+  const form = el('div', 'conn-form');
+  form.hidden = true;
+  form.id = uid('conn');
+  edit.setAttribute('aria-controls', form.id);
+  const inputs = spec.fields.map(([name, secret]) => {
+    const id = uid('setting');
+    const caption = label('label', 'field-label', FIELD_LABEL[name]);
+    caption.setAttribute('for', id);
+    const input = el('input', 'field-input');
+    input.id = id;
+    input.type = secret ? 'password' : 'text';
+    input.autocomplete = secret ? 'new-password' : 'off';
+    input.spellcheck = false;
+    input.autocapitalize = 'off';
+    input.maxLength = 256;
+    input.setAttribute('data-field', name);
+    const wrap = el('div', 'field');
+    wrap.append(caption, input);
+    form.appendChild(wrap);
+    return input;
+  });
+  const message = el('p', 'conn-message');
+  message.hidden = true;
+  // The keyless demo server: keys typed here are neither used nor kept.
+  const demoNote = label('p', 'panel-note demo-note', 'settings_demo_keys');
+  demoNote.hidden = true;
+  form.prepend(demoNote);
+  const warning = el('div', 'notice conn-warning');
+  warning.setAttribute('data-tone', 'bad');
+  warning.hidden = true;
+  const actions = el('div', 'conn-actions');
+  const save = actionButton('btn btn-primary btn-small', 'settings_save');
+  const clear = actionButton('btn btn-quiet btn-small', 'settings_clear');
+  actions.append(save, clear);
+  form.append(message, actions);
+  row.append(head, warning, form);
+
+  /* The row's message line: {key} | {prefix, key} | {raw} (form-fields.js), or null to hide it. */
+  function say(text, tone) {
+    message.hidden = !text;
+    setMessage(message, text);
+    message.setAttribute('data-tone', tone || 'muted');
+  }
+
+  async function send(body, doneKey) {
+    save.disabled = true;
+    clear.disabled = true;
+    say({ key: 'settings_saving' });
+    try {
+      adopt(await request('PUT', '/api/settings', body));
+      say({ key: doneKey }, 'ok');
+      announce(t(doneKey));
+      emit('portfolio:refresh');
+    } catch (err) {
+      const text = settingsErrorMessage(err);
+      say(text, 'bad');
+      announce(textOf(text));
+    } finally {
+      for (const input of inputs) input.value = ''; // never keep what was typed, whatever the answer
+      save.disabled = false;
+      clear.disabled = false;
+    }
+  }
+
+  edit.addEventListener('click', () => {
+    form.hidden = !form.hidden;
+    edit.setAttribute('aria-expanded', String(!form.hidden));
+    if (form.hidden) for (const input of inputs) input.value = '';
+    else inputs[0].focus();
+  });
+  save.addEventListener('click', () => {
+    if (inputs.some((input) => input.value.trim() === '')) {
+      say({ key: inputs.length > 1 ? 'settings_err_alpaca_pair' : 'settings_err_empty' }, 'bad');
+      return;
+    }
+    send(Object.fromEntries(inputs.map((input) => [input.getAttribute('data-field'), input.value])), 'settings_saved');
+  });
+  clear.addEventListener('click', () => {
+    // "" removes a key from the server's settings and its .env file.
+    send(Object.fromEntries(inputs.map((input) => [input.getAttribute('data-field'), ''])), 'settings_cleared');
+  });
+  form.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.isComposing && event.target.tagName === 'INPUT') {
+      event.preventDefault();
+      save.click();
+    }
+  });
+  function setRowStatus(word) {
+    setStatus(status, word);
+    const key = spec.warn && spec.warn[word];
+    warning.hidden = !key;
+    if (key) warning.replaceChildren(iconSpan('alert', 18), label('p', 'notice-text', key));
+    else warning.replaceChildren();
+  }
+  return { el: row, setStatus: setRowStatus, setDemo: (demo) => { demoNote.hidden = !demo; } };
+}
+
+function build() {
+  const head = el('div', 'panel-section-head');
+  const refresh = iconButton('refresh', 'settings_refresh');
+  refresh.addEventListener('click', () => emit('settings:refresh'));
+  head.append(label('h2', 'panel-h', 'settings_heading'), refresh);
+  const problem = el('p', 'panel-note');
+  problem.hidden = true;
+
+  // The model keys are in the model section, with the provider they belong to.
+  const connections = CONNECTIONS.map((spec) => ({ spec, row: connectionRow(spec) }));
+  const fallbacks = el('p', 'panel-note');
+  fallbacks.hidden = true;
+  const connSection = el('section', 'panel-section');
+  connSection.append(head, problem, ...connections.map((c) => c.row.el), fallbacks,
+    label('p', 'panel-note', 'settings_keys_note'));
+
+  // Trading: the switch, then the kill switch.
+  const toggle = el('button', 'switch');
+  toggle.type = 'button';
+  toggle.setAttribute('role', 'switch');
+  toggle.id = uid('switch');
+  const toggleLabel = label('label', 'switch-label', 'settings_trading');
+  toggleLabel.setAttribute('for', toggle.id);
+  const toggleState = el('span', 'switch-state');
+  const thumb = el('span', 'switch-thumb');
+  thumb.setAttribute('aria-hidden', 'true');
+  toggle.appendChild(thumb);
+  const toggleRow = el('div', 'switch-row');
+  toggleRow.append(toggleLabel, toggleState, toggle);
+  const toggleMessage = el('p', 'conn-message');
+  toggleMessage.hidden = true;
+  // Trading is on again here, but the kill switch's suspension at the broker could not be lifted
+  // (`broker_resumed: false`): this stays until trading is off again or a later re-enable resumes it.
+  const brokerNote = el('div', 'notice broker-note');
+  brokerNote.setAttribute('data-tone', 'warn');
+  brokerNote.hidden = true;
+  brokerNote.append(iconSpan('alert', 18), label('p', 'notice-text', 'settings_broker_still_suspended'));
+  toggle.addEventListener('click', async () => {
+    const next = toggle.getAttribute('aria-checked') !== 'true';
+    toggle.disabled = true;
+    toggleMessage.hidden = true;
+    try {
+      const answer = await request('PUT', '/api/settings', { trading_enabled: next });
+      const { broker_resumed: resumed, warning, ...fresh } = answer && typeof answer === 'object' ? answer : {};
+      if (next) brokerNote.hidden = resumed !== false;
+      adopt(fresh);
+      announce(t(next ? 'settings_trading_on' : 'settings_trading_off'));
+      if (next && resumed === false) announce(t('settings_broker_still_suspended'));
+    } catch (err) {
+      const text = settingsErrorMessage(err);
+      toggleMessage.hidden = false;
+      toggleMessage.setAttribute('data-tone', 'bad');
+      setMessage(toggleMessage, text);
+      announce(textOf(text));
+      // The kill switch won (409): trading stays off; show what the server has now.
+      if (err?.error === 'kill_switch_pressed') emit('settings:refresh');
+    }
+    toggle.disabled = false;
+  });
+  const kill = createKillSwitch({ adopt });
+  const tradingSection = el('section', 'panel-section');
+  tradingSection.append(label('h2', 'panel-h', 'settings_trade_heading'), toggleRow, toggleMessage, brokerNote, kill.el);
+
+  const model = createModelSection({ adopt });
+
+  const log = el('a', 'btn btn-quiet log-link');
+  log.append(iconSpan('download', 16), label('span', 'btn-label', 'settings_log_download'));
+  const logNote = label('p', 'panel-note', 'settings_log_note');
+  const logSection = el('section', 'panel-section');
+  logSection.append(label('h2', 'panel-h', 'settings_log_heading'), log, logNote);
+
+  container.replaceChildren(model.el, connSection, tradingSection, logSection);
+  view = { connections, fallbacks, problem, toggle, toggleState, brokerNote, kill, model, log, logNote };
+}
+
+function update() {
+  if (!view) return;
+  const settings = state.settings;
+  view.problem.hidden = Boolean(settings) || !state.settingsError;
+  view.problem.textContent = settings ? '' : str(state.settingsError);
+  for (const { spec, row } of view.connections) {
+    row.setStatus(settings ? settings[spec.status] : undefined);
+    row.setDemo(Boolean(settings && settings.demo === true));
+  }
+  view.model.update(settings);
+
+  const names = settings && Array.isArray(settings.env_fallbacks)
+    ? settings.env_fallbacks.filter((name) => typeof name === 'string' && /^[A-Z0-9_]{1,64}$/.test(name)) : [];
+  view.fallbacks.hidden = names.length === 0;
+  if (names.length) bindText(view.fallbacks, 'settings_env_fallbacks', { names: names.join(', ') });
+
+  const enabled = Boolean(settings && settings.trading_enabled);
+  if (settings && !enabled) view.brokerNote.hidden = true; // trading is off again: nothing to resume here
+  view.toggle.setAttribute('aria-checked', String(enabled));
+  view.toggle.disabled = !settings;
+  bindText(view.toggleState, enabled ? 'status_enabled' : 'status_disabled');
+  view.kill.update(settings);
+
+  const sessionId = state.sessionId;
+  view.log.hidden = !sessionId;
+  bindText(view.logNote, sessionId ? 'settings_log_note' : 'settings_log_none');
+  if (sessionId) {
+    view.log.setAttribute('href', `/api/ledger/${encodeURIComponent(sessionId)}.jsonl`);
+    view.log.setAttribute('download', `ledger-${sessionId}.jsonl`);
+  } else {
+    view.log.removeAttribute('href');
+  }
+}
+
+registerPanel('settings', {
+  mount(target) {
+    container = target;
+    build();
+    update();
+  },
+  show() {
+    emit('settings:refresh');
+    if (view) view.model.opened(); // the model list, once per opening
+  },
+});
+
+on('change', (patch) => {
+  if ('settings' in patch || 'settingsError' in patch || 'sessionId' in patch) update();
+});
+
+// "Open settings" from the mode chip and the shallow-mode notices: the panel is open by now.
+on('settings:focus', (section) => {
+  if (view && section === 'model') view.model.focus();
+});

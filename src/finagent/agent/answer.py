@@ -4,7 +4,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-CANNOT_PREFIX = "제공된 데이터로는 확인할 수 없습니다."
+from ..i18n import pick
+
+# The sentence a cannot-confirm answer starts with, in each answer language.
+CANNOT_PREFIX_EN = "This cannot be confirmed with the provided data."
+CANNOT_PREFIX_KO = "제공된 데이터로는 확인할 수 없습니다."
+
+
+def cannot_prefix(lang: str = "en") -> str:
+    return pick(lang, CANNOT_PREFIX_EN, CANNOT_PREFIX_KO)
+
 
 FINAL_ANSWER_SCHEMA = {
     "type": "object",
@@ -12,13 +21,13 @@ FINAL_ANSWER_SCHEMA = {
         "status": {
             "type": "string",
             "enum": ["answered", "cannot_confirm", "clarify"],
-            "description": "answered=근거 데이터로 답변함, cannot_confirm=제공 데이터로 확인 불가, clarify=조건이 모호하여 역질문",
+            "description": "answered = answered from the supporting data, cannot_confirm = cannot be confirmed with the provided data, clarify = the condition is ambiguous, so ask back",
         },
-        "answer": {"type": "string", "description": "사용자에게 보여줄 최종 답변(한국어). 근거 수치·상품코드·기준일 포함"},
+        "answer": {"type": "string", "description": "The final answer shown to the user, in the answer language stated in the user message. Include the supporting numbers, product codes and base date"},
         "evidence_refs": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "답변에 사용한 핵심 근거(테이블명, 상품코드/명, 문서 제목)",
+            "description": "The key evidence used in the answer (table names, product codes/names, document titles)",
         },
     },
     "required": ["status", "answer"],
@@ -38,26 +47,27 @@ class Evidence:
 
 def format_evidence(evs: list[Evidence], extra_refs: list[str] | None = None) -> str:
     if not evs and not extra_refs:
-        return "참조한 데이터 없음"
+        return "No data referenced"
     blocks = []
     for i, e in enumerate(evs, 1):
-        head = f"[근거 {i}] "
+        head = f"[Evidence {i}] "
         if e.table:
             head += f"{e.korean_name or ''}({e.table})".strip()
         else:
-            head += {"docs": "외부 문서", "graph": "지식그래프", "search": "상품 검색", "entity": "엔티티 해석", "schema": "스키마"}.get(e.kind, e.kind)
+            head += {"docs": "External documents", "graph": "Knowledge graph", "search": "Product search",
+                     "entity": "Entity resolution", "schema": "Schema"}.get(e.kind, e.kind)
         if e.base_date:
-            head += f" · 기준일 {e.base_date}"
+            head += f" · base date {e.base_date}"
         if e.row_count is not None:
-            head += f" · {e.row_count}건"
+            head += f" · {e.row_count} rows"
         lines = [head, f"  {e.kind}: {e.detail}"]
         if e.refs:
             uniq = list(dict.fromkeys(r for r in e.refs if r))
             shown = uniq[:20]
-            lines.append("  참조: " + " | ".join(shown) + (f" | ... 외 {len(uniq) - 20}건" if len(uniq) > 20 else ""))
+            lines.append("  Refs: " + " | ".join(shown) + (f" | ... and {len(uniq) - 20} more" if len(uniq) > 20 else ""))
         blocks.append("\n".join(lines))
     if extra_refs:
-        blocks.append("[답변 근거 요약] " + " | ".join(extra_refs))
+        blocks.append("[Answer evidence summary] " + " | ".join(extra_refs))
     return "\n".join(blocks)
 
 
@@ -65,23 +75,27 @@ def format_trace(steps: list[str]) -> str:
     return "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1)) if steps else "-"
 
 
-def fallback_answer(reason: str) -> str:
-    return (
-        f"{CANNOT_PREFIX} 시스템 처리 중 문제가 발생하여 답변을 생성하지 못했습니다({reason}). "
-        "질문을 조금 더 구체적으로 바꾸어 다시 시도해 주세요."
+def fallback_answer(reason: str, lang: str = "en") -> str:
+    return pick(
+        lang,
+        f"{CANNOT_PREFIX_EN} A system problem prevented an answer from being generated ({reason}). "
+        "Please rephrase the question more specifically and try again.",
+        f"{CANNOT_PREFIX_KO} 시스템 처리 중 문제가 발생하여 답변을 생성하지 못했습니다({reason}). "
+        "질문을 조금 더 구체적으로 바꾸어 다시 시도해 주세요.",
     )
 
 
-# --------------------------------------------------------- 도구 호출 구문이 답변 본문에 새는 것
-# 모델이 final_answer 를 '호출'하는 대신 그 호출 구문을 글자로 써서 보내는 일이 실제로 있었다.
-# 기록된 54개 답변 중 6개가 그랬고, 사용자에게 그대로 노출됐다:
+# --------------------------------------------------------- tool-call syntax leaking into the answer
+# The model really did write out the final_answer call as text instead of *calling* it.  6 of the 54
+# recorded answers did, and the user saw it as is:
 #     final_answer(status="completed", answer="… 총 22개입니다.")
 #     제공된 데이터로는 확인할 수 없습니다. final_answer(status="cannot_confirm", answer="…")
 #     final_answer 도구를 사용하여 답변을 제출하겠습니다:\n```plaintext\nfinal_answer(…)\n```
 #
-# 지우기만 하면 답이 통째로 사라진다 — 진짜 답변 문장은 answer="…" 안에 들어 있다. 그래서
-# 껍데기만 벗기고 안의 본문을 꺼내 올린다(unwrap). 출력 상한을 낮추면 이 구문이 닫히기 전에
-# 잘릴 수 있으므로, 닫는 괄호·따옴표가 없는 미완성 조각도 같은 방식으로 처리한다.
+# Deleting it would lose the whole answer — the real answer text sits inside answer="…".  So only the
+# shell is peeled off and the body inside is lifted out (unwrap).  With a lower output cap the call can
+# be cut off before it closes, so unfinished fragments with no closing paren or quote are handled the
+# same way.
 _LEAK_CALL = re.compile(r"final_answer\s*\(", re.I)
 _LEAK_ANSWER_KW = re.compile(r"\banswer\s*=\s*(\"|')", re.I)
 _LEAK_STATUS_KW = re.compile(r"""^\W*\bstatus\s*=\s*["']?\w*["']?\s*,?\s*""", re.I)
@@ -90,7 +104,7 @@ _ESCAPES = {"n": "\n", "t": "\t", "r": "", "\\": "\\", '"': '"', "'": "'"}
 
 
 def _unescape(s: str) -> str:
-    """\\n·\\" 같은 소스 수준 이스케이프를 실제 문자로. 모르는 이스케이프는 원문 그대로 둔다."""
+    """Source-level escapes such as \\n and \\" become real characters.  Unknown escapes are left as written."""
     out, i = [], 0
     while i < len(s):
         if s[i] == "\\" and i + 1 < len(s):
@@ -104,9 +118,9 @@ def _unescape(s: str) -> str:
 
 
 def _call_span(text: str, open_paren: int) -> tuple[int, str]:
-    """여는 괄호에 대응하는 닫는 괄호를 찾는다(따옴표 안의 괄호는 세지 않는다).
+    """Find the closing paren matching the opening one (parens inside quotes do not count).
 
-    반환: (호출이 끝나는 위치[배타적], 인자 문자열). 닫히지 않았으면 문자열 끝까지가 인자다.
+    Returns (end of the call [exclusive], argument string).  If it never closes, the arguments run to the end.
     """
     i, depth, quote = open_paren + 1, 1, None
     while i < len(text):
@@ -130,7 +144,7 @@ def _call_span(text: str, open_paren: int) -> tuple[int, str]:
 
 
 def _quoted_value(src: str, at: int, quote: str) -> str:
-    """at 위치부터 닫는 따옴표(없으면 끝)까지의 문자열 리터럴 본문."""
+    """The body of a string literal from position at up to the closing quote (or the end)."""
     buf, i = [], at
     while i < len(src):
         if src[i] == "\\" and i + 1 < len(src):
@@ -145,11 +159,11 @@ def _quoted_value(src: str, at: int, quote: str) -> str:
 
 
 def strip_tool_call_syntax(text: str) -> str:
-    """답변 본문에 새어 나온 final_answer 호출 구문을 벗기고 안의 본문만 남긴다."""
+    """Peel a final_answer call that leaked into the answer text and keep only the body inside."""
     if not text or not any(m in text for m in _LEAK_MARKERS):
         return text
     out = text
-    for _ in range(4):  # 중첩·반복 누출도 있으나 무한 루프는 만들지 않는다
+    for _ in range(4):  # nested and repeated leaks happen, but never an infinite loop
         m = _LEAK_CALL.search(out)
         if not m:
             break
@@ -157,13 +171,13 @@ def strip_tool_call_syntax(text: str) -> str:
         am = _LEAK_ANSWER_KW.search(args)
         inner = _quoted_value(args, am.end(), am.group(1)) if am else ""
         out = out[:m.start()] + inner + out[end:]
-    # 괄호 없이 인자 조각만 남은 경우(잘린 출력): status=… 를 떼고 answer="…" 를 벗긴다.
+    # Only argument fragments left, without the paren (truncated output): drop status=… and unwrap answer="…".
     if any(m in out for m in _LEAK_MARKERS[1:]):
         stripped = _LEAK_STATUS_KW.sub("", out.lstrip(), count=1)
         am = _LEAK_ANSWER_KW.search(stripped)
         if am and stripped[:am.start()].strip(" \t\r\n,\"'") == "":
             out = _quoted_value(stripped, am.end(), am.group(1))
-    # 남은 껍데기 — 도구 이름만 언급하는 안내 줄과, 그 호출을 감싸고 있던 코드펜스.
+    # What shell remains — lines that merely mention the tool name, and the code fence around the call.
     lines = [ln for ln in out.splitlines() if "final_answer" not in ln]
     if any(ln.strip() for ln in lines):
         out = "\n".join(lines)
@@ -173,29 +187,56 @@ def strip_tool_call_syntax(text: str) -> str:
         if inner_lines:
             out = "\n".join(inner_lines)
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    dup = f"{CANNOT_PREFIX} {CANNOT_PREFIX}"
-    while dup in out:
-        out = out.replace(dup, CANNOT_PREFIX)
+    for prefix in (CANNOT_PREFIX_KO, CANNOT_PREFIX_EN):
+        dup = f"{prefix} {prefix}"
+        while dup in out:
+            out = out.replace(dup, prefix)
     return out
 
 
-# ------------------------------------------------------- 정보가 0인 맺음말
-# 기록된 54개 답변 중 8개가 "추가적인 정보가 필요하시면 …" 류의 문장으로 끝났다. 그 문장은 답에
-# 아무것도 더하지 않으면서 생성 시간을 쓴다(측정: 고정 2.7초 + 63토큰/초).
+# ------------------------------------------------------- closing lines that carry no information
+# 8 of the 54 recorded answers ended with a sentence like "추가적인 정보가 필요하시면 …" ("if you need
+# more information …").  That sentence adds nothing to the answer and costs generation time (measured:
+# a fixed 2.7 seconds + 63 tokens/second).
 #
-# 무엇을 지우면 안 되는가가 더 중요하다. 다음 중 하나라도 걸리면 남긴다:
-#   * 숫자·% 가 있는 문장 — 수치는 답의 본체다.
-#   * "투자 판단은 본인 책임" 류의 유의사항 — 지우면 고지가 사라진다(그 문구를 줄이는 일은
-#     프롬프트 규칙 4가 맡는다. 이미 나온 문장을 여기서 잘라내지는 않는다).
-#   * "…없습니다/않습니다/제외" 처럼 확인 불가·제외 사실을 말하는 문장.
-# 남는 것은 순수한 "더 필요하면 물어보세요"뿐이고, 그때만 지운다. 맨 뒤 문장만 최대 2개까지 본다.
+# What must not be deleted matters more.  A sentence is kept if any of these hits:
+#   * a sentence with a number or % — numbers are the body of the answer.
+#   * a caveat such as "투자 판단은 본인 책임" (investment decisions are your own responsibility) —
+#     deleting it deletes the disclosure (trimming that wording is prompt rule 4's job; a sentence
+#     already produced is not cut here).
+#   * a sentence stating a cannot-confirm or exclusion fact, such as "…없습니다/않습니다/제외".
+# What remains is a pure "ask if you need more", and only then is it deleted.  At most the last 2
+# sentences are examined.  The English patterns apply the same three tests to English sentences.
 _OFFER_TRIGGER = re.compile(r"추가(?:적인)?\s*(?:정보|문의|사항|질문)|더\s*궁금|도움이\s*필요")
 _OFFER_CLOSE = re.compile(r"문의|말씀|연락|알려\s*주|권장|바랍니다|주세요|주십시오|드립니다")
 _OFFER_KEEP = re.compile(r"[0-9%]|책임|제외|없습니다|않습니다|아닙니다|못했습니다")
+_OFFER_TRIGGER_EN = re.compile(
+    r"\b(?:let\s+me\s+know|feel\s+free|(?:if|should)\s+you\s+(?:have|need|want|would\s+like)"
+    r"|(?:any\s+)?(?:further|more|other|additional)\s+(?:questions?|information|info|details|help|assistance)"
+    r"|anything\s+else|happy\s+to\s+help|glad\s+to\s+help|do\s+not\s+hesitate|don't\s+hesitate)\b",
+    re.I,
+)
+_OFFER_CLOSE_EN = re.compile(
+    r"\b(?:let\s+me\s+know|feel\s+free|ask|contact|reach\s+out|hesitate|happy\s+to|glad\s+to"
+    r"|recommend(?:ed)?|please|help|assist)\b",
+    re.I,
+)
+_OFFER_KEEP_EN = re.compile(
+    r"\b(?:responsib\w*|exclud\w*|cannot|(?:is|are|was|were|does|did|could|can|has|have)\s*n(?:o|')t"
+    r"|not\s+(?:available|provided|found|included|listed|recorded|confirmed))\b"
+    r"|\bno\s+(?:data|value|such|matching|records?)\b",
+    re.I,
+)
+
+
+def _is_closing_offer(sent: str) -> bool:
+    ko = _OFFER_TRIGGER.search(sent) and _OFFER_CLOSE.search(sent)
+    en = _OFFER_TRIGGER_EN.search(sent) and _OFFER_CLOSE_EN.search(sent)
+    return bool(ko or en) and not (_OFFER_KEEP.search(sent) or _OFFER_KEEP_EN.search(sent))
 
 
 def _last_sentence(text: str) -> tuple[int, str]:
-    """(문장 시작 위치, 문장). 뒤에서부터 가장 가까운 . ! ? 줄바꿈 을 경계로 삼는다."""
+    """(start of the sentence, the sentence).  The nearest . ! ? or newline from the end is the boundary."""
     body = text.rstrip()
     i = len(body) - 1
     while i >= 0 and body[i] in ".!?\"')]”’":
@@ -207,28 +248,29 @@ def _last_sentence(text: str) -> tuple[int, str]:
 
 
 def strip_closing_offer(text: str) -> str:
-    """맨 끝의 '추가 문의 바랍니다' 류 문장을 지운다. 사실·유의사항이 섞인 문장은 건드리지 않는다."""
+    """Delete a trailing 'feel free to ask' sentence.  Sentences mixed with facts or caveats are not touched."""
     for _ in range(2):
         if not text.strip():
             break
         start, sent = _last_sentence(text)
-        if not (_OFFER_TRIGGER.search(sent) and _OFFER_CLOSE.search(sent)) or _OFFER_KEEP.search(sent):
+        if not _is_closing_offer(sent):
             break
         text = text[:start].rstrip()
     return text
 
 
-# ----------------------------------------------------------------- 마크다운 → 줄글
-# 주최측 응답 예시의 answer 는 평문 한 줄이다("총보수 0.03%인 A …"). 우리 답변은 굵게·번호 목록이
-# 섞여 나왔다(기록된 54개 중 13개). 프롬프트에 규칙을 넣되, 그것만 믿지 않는다 —
-# 이 프로젝트에서 '미리 준 프롬프트 규칙'은 지켜지지 않은 전례가 있다.
+# ----------------------------------------------------------------- markdown → prose
+# The answer in the organisers' sample response is one line of plain text ("총보수 0.03%인 A …").  Our
+# answers came out with bold and numbered lists mixed in (13 of the 54 recorded).  The rule is in the
+# prompt, but it is not trusted alone — in this project, prompt rules given in advance have a record of
+# being ignored.
 #
-# 벗기는 것은 **문법**뿐이고 내용은 건드리지 않는다. 0.03%·1,436.24 같은 숫자, du_er_1y 같은
-# 컬럼명, 문장 중간의 별표는 마크다운이 아니므로 그대로 둔다. 목록은 지우는 것이 아니라
-# 마커만 떼고 쉼표로 이어 한 문장으로 만든다(항목 자체가 사라지면 답이 사라진다).
+# Only the **syntax** is stripped; the content is not touched.  Numbers like 0.03% and 1,436.24, column
+# names like du_er_1y and an asterisk mid-sentence are not markdown and stay.  Lists are not deleted: the
+# markers are removed and the items joined with commas into one sentence (losing an item loses answer).
 _MD_FENCE = re.compile(r"^\s*(?:```|~~~)")
 _MD_HEADER = re.compile(r"^\s*#{1,6}\s+")
-_MD_RULE = re.compile(r"^[\s\-*_=|:]{3,}$")            # ---, ***, |---|:--:| (표 구분선)
+_MD_RULE = re.compile(r"^[\s\-*_=|:]{3,}$")            # ---, ***, |---|:--:| (table separator)
 _MD_ITEM = re.compile(r"^\s*(?:[-*•·]|\(?\d{1,3}[.)])\s+")
 _MD_TABLE_ROW = re.compile(r"^\s*\|.+\|\s*$")
 _MD_BOLD = re.compile(r"\*\*(\S(?:[^*\n]*\S)?)\*\*")
@@ -240,7 +282,7 @@ _CLOSERS = ")]}”’\"'』」"
 
 
 def _ends_sentence(s: str) -> bool:
-    """문장이 끝났는가. 닫는 괄호·따옴표는 넘겨보고 판정한다("…(11조)" 는 끝나지 않았다)."""
+    """Has the sentence ended?  Closing parens and quotes are skipped first ("…(11조)" has not ended)."""
     t = s.rstrip()
     while t and t[-1] in _CLOSERS:
         t = t[:-1]
@@ -248,13 +290,13 @@ def _ends_sentence(s: str) -> bool:
 
 
 def _item_body(line: str) -> str:
-    """목록 항목에서 마커를 뗀 본문. 항목이 아니면 원문 그대로."""
+    """A list item's body without the marker.  The line as is if it is not an item."""
     m = _MD_ITEM.match(line)
     return line[m.end():].strip() if m else line.strip()
 
 
 def _joined_item(s: str) -> str:
-    """쉼표로 이어 붙일 항목 하나. 끝의 마침표만 떼어 'A입니다., B' 가 되지 않게 한다."""
+    """One item to join with commas.  Only the final period is dropped, so it never reads 'A입니다., B'."""
     s = s.strip()
     if s.endswith(".") and not s.endswith(".."):
         s = s[:-1].rstrip()
@@ -262,19 +304,19 @@ def _joined_item(s: str) -> str:
 
 
 def strip_markdown(text: str) -> str:
-    """마크다운 문법을 벗기고, 줄 단위 목록을 쉼표로 이은 줄글로 만든다."""
+    """Strip markdown syntax and turn line-by-line lists into comma-joined prose."""
     if not text or not text.strip():
         return text
     kinds: list[tuple[str, str]] = []
     for raw in text.split("\n"):
         line = raw.rstrip()
         if _MD_FENCE.match(line):
-            continue                                   # 코드펜스 자체만 제거하고 안의 본문은 남긴다
+            continue                                   # drop only the fence itself; the body inside stays
         if not line.strip():
             kinds.append(("blank", ""))
             continue
         if _MD_RULE.match(line.strip()):
-            continue                                   # 수평선·표 구분선은 내용이 없다
+            continue                                   # horizontal rules and table separators carry nothing
         if _MD_TABLE_ROW.match(line):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             kinds.append(("item", " ".join(c for c in cells if c)))
@@ -283,7 +325,7 @@ def strip_markdown(text: str) -> str:
             kinds.append(("item", _item_body(line)))
             continue
         kinds.append(("text", _MD_HEADER.sub("", line).strip()))
-    # 항목과 항목 사이의 빈 줄은 목록의 일부다(모델이 항목 사이를 띄우는 일이 잦다).
+    # A blank line between items belongs to the list (the model often spaces items apart).
     cleaned: list[tuple[str, str]] = []
     for i, (k, c) in enumerate(kinds):
         if k == "blank":
@@ -303,10 +345,10 @@ def strip_markdown(text: str) -> str:
         if body and not _ends_sentence(body):
             body += "."
         while out and not out[-1].strip():
-            out.pop()                                  # 목록 바로 앞의 빈 줄은 흡수한다
+            out.pop()                                  # absorb the blank line right before the list
         if out:
             prev = out[-1].rstrip()
-            if prev.endswith((":", "：")):              # "…다음과 같습니다:" → "…다음과 같습니다."
+            if prev.endswith((":", "：")):              # "…다음과 같습니다:" / "…as follows:" → ends with "."
                 prev = prev[:-1].rstrip()
                 if prev and not _ends_sentence(prev):
                     prev += "."
@@ -329,48 +371,74 @@ def strip_markdown(text: str) -> str:
     res = _MD_BOLD_U.sub(r"\1", res)
     res = _MD_ITALIC.sub(r"\1", res)
     res = _MD_CODE.sub(r"\1", res)
-    res = res.replace("**", "")                        # 짝이 맞지 않는 강조(잘린 출력)
+    res = res.replace("**", "")                        # unpaired emphasis (truncated output)
     return re.sub(r"\n{3,}", "\n\n", res).strip()
 
 
-# ------------------------------------------------- 거절한 뒤에 붙는 '대체 상품 목록'
-# 실제 사고: "한화 에어로스페이스의 **자회사를 편입한** ETF 중 …" 에 대해 "찾을 수 없습니다" 라고
-# 해놓고, 그 뒤에 "그러나 한화 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다" 하며 40개를
-# 나열했다. 묻지 않은 개체(자회사 → 회사 본체)로 갈아탄 대체 답변이다. 기록된 54개 중 G-020 이
-# 같은 모양이다(공모펀드 → 국내 ETF).
+# ------------------------------------------------- the 'substitute product list' after a refusal
+# Real incident: for "한화 에어로스페이스의 **자회사를 편입한** ETF 중 …" ("ETFs holding Hanwha Aerospace's
+# subsidiaries") the model said "찾을 수 없습니다" (cannot be found), then went on "그러나 한화
+# 에어로스페이스를 편입한 ETF 목록을 제공할 수 있습니다" ("but I can list ETFs holding Hanwha Aerospace")
+# and listed 40.  A substitute answer that switched to an entity nobody asked about (subsidiary → the
+# company itself).  Of the 54 recorded, G-020 has the same shape (public fund → domestic ETFs).
 #
-# 지우면 안 되는 쪽과의 차이가 이 함수의 전부다:
-#   살린다 — "…유효한 신용등급은 AAA, AA+, AA0, … 입니다."  조건의 유효값을 한 문장 안에 인라인으로.
-#   지운다 — "…목록은 다음과 같습니다:\n1. 아이엠에셋 200 (KR70007N0000)\n2. …"  상품을 행 단위로.
-# 그래서 판정은 (1) 줄 단위로 끊긴 항목이 3개 이상 연속하고, (2) 그 항목들이 상품처럼 생겼을 때
-# — 코드·티커, 단위 붙은 수치, 상품군 낱말 — 에만 걸린다. 인라인 나열은 몇 개가 나열되든 손대지
-# 않는다. 마크다운 제거보다 **먼저** 돌려서 줄 구조가 남아 있을 때 본다.
+# The difference from what must not be deleted is the whole of this function:
+#   keep   — "…유효한 신용등급은 AAA, AA+, AA0, … 입니다."  the condition's valid values, inline, in one sentence.
+#   delete — "…목록은 다음과 같습니다:\n1. 아이엠에셋 200 (KR70007N0000)\n2. …"  products, one per line.
+# So it fires only when (1) at least 3 line-broken items run consecutively and (2) those items look like
+# products — a code or ticker, a number with a unit, a product-family word.  An inline enumeration is never
+# touched, however many items it lists.  It runs **before** markdown stripping, while the line structure
+# is still there.  The English patterns mirror the Korean ones for English answers.
 _ALT_CODE = re.compile(r"\b(?:KR[0-9A-Z]{9,11}|[0-9]{6})\b")
 _ALT_NUM_UNIT = re.compile(r"\d[\d,.]*\s*(?:조|억|만원|원|%|퍼센트|개|건|USD|달러)")
+_ALT_NUM_UNIT_EN = re.compile(r"\d[\d,.]*\s*(?:trillion|billion|million|won|KRW)\b", re.I)
 _ALT_PRODUCT = re.compile(
     r"KODEX|TIGER|RISE|ACE|PLUS|SOL|KIWOOM|HANARO|ARIRANG|KoAct|FOCUS|SPDR|iShares|Vanguard|Invesco"
     r"|ETF|ETN|펀드|투자신탁|채권|Fund|Trust|Shares|Index"
 )
 _ALT_PIVOT = re.compile(r"그러나|하지만|다만|대신|참고로|아래|다음은|덧붙|한편")
+_ALT_PIVOT_EN = re.compile(
+    r"\b(?:however|but|instead|alternatively|for\s+reference|below|in\s+addition|additionally|meanwhile"
+    r"|that\s+said|note\s+that)\b",
+    re.I,
+)
 _ALT_OFFER = re.compile(r"다음과 같|목록|나열|제공(할 수 있|해 ?드리|드릴)|알려\s*드리|소개|참고하")
+_ALT_OFFER_EN = re.compile(
+    r"\b(?:here\s+(?:is|are)|as\s+follows|the\s+following|list(?:ed|ing)?|can\s+(?:provide|offer|show|share)"
+    r"|(?:would|could)\s+(?:provide|show)|let\s+me\s+(?:show|list)|see\s+below)\b",
+    re.I,
+)
 _REFUSAL = re.compile(r"확인할 수 없|확인되지 않|찾을 수 없|제공되지 않|존재하지 않|알 수 없|없습니다|않습니다")
+_REFUSAL_EN = re.compile(
+    r"\b(?:cannot|can't|can\s+not|could\s+not|couldn't|unable\s+to)\s+(?:be\s+)?"
+    r"(?:confirm(?:ed)?|find|found|verif(?:y|ied)|determin(?:e|ed)|identif(?:y|ied)|know|known)\b"
+    r"|\b(?:is|are|was|were)\s+not\s+(?:available|provided|included|found|listed|recorded|known)\b"
+    r"|\b(?:does|do)\s+not\s+exist\b|\bthere\s+(?:is|are)\s+no\b|\bno\s+(?:such|matching)\b"
+    r"|\bnot\s+in\s+the\s+(?:provided\s+)?data\b",
+    re.I,
+)
+
+
+def _refuses(s: str) -> bool:
+    return bool(_REFUSAL.search(s) or _REFUSAL_EN.search(s))
 
 
 def _looks_like_product_row(line: str) -> bool:
-    """이 줄 하나가 '상품 한 건'으로 보이는가. 거절 문장은 아무리 짧아도 항목이 아니다."""
+    """Does this one line look like 'one product'?  A refusal sentence is never an item, however short."""
     s = line.strip()
     if not (3 <= len(s) <= 160):
         return False
     body = _item_body(s)
-    if len(body) < 3 or _REFUSAL.search(body):
+    if len(body) < 3 or _refuses(body):
         return False
-    if not (_ALT_CODE.search(body) or _ALT_NUM_UNIT.search(body) or _ALT_PRODUCT.search(body)):
+    if not (_ALT_CODE.search(body) or _ALT_NUM_UNIT.search(body) or _ALT_NUM_UNIT_EN.search(body)
+            or _ALT_PRODUCT.search(body)):
         return False
-    return bool(_MD_ITEM.match(s)) or len(body) <= 60   # 마커가 없으면 '짧은 행'일 때만 항목으로 본다
+    return bool(_MD_ITEM.match(s)) or len(body) <= 60   # without a marker, only a 'short line' counts as an item
 
 
 def _drop_offer_tail(head: str) -> str:
-    """목록을 소개하던 문장("…목록은 다음과 같습니다:")까지 함께 떼어낸다."""
+    """Also cut the sentence that introduced the list ("…목록은 다음과 같습니다:" / "…are as follows:")."""
     for _ in range(3):
         body = head.rstrip()
         if not body:
@@ -380,16 +448,18 @@ def _drop_offer_tail(head: str) -> str:
         if not s:
             break
         colon = s.endswith((":", "："))
-        if not (colon or (_ALT_PIVOT.search(s) and _ALT_OFFER.search(s))):
+        pivot = _ALT_PIVOT.search(s) or _ALT_PIVOT_EN.search(s)
+        offer = _ALT_OFFER.search(s) or _ALT_OFFER_EN.search(s)
+        if not (colon or (pivot and offer)):
             break
-        if _REFUSAL.search(s) and not colon:
-            break                                      # 거절 문장 자체는 절대 떼지 않는다
+        if _refuses(s) and not colon:
+            break                                      # never cut the refusal sentence itself
         head = body[:start].rstrip()
     return head
 
 
 def strip_alternative_listing(text: str) -> str:
-    """확인 불가로 답한 뒤 이어 붙인 대체 상품 목록을 잘라낸다(cannot_confirm 전용)."""
+    """Cut the substitute product list appended after a cannot-confirm (cannot_confirm only)."""
     if not text or not text.strip():
         return text
     lines = text.split("\n")
@@ -410,22 +480,32 @@ def strip_alternative_listing(text: str) -> str:
     if start is None:
         return text
     head = _drop_offer_tail("\n".join(lines[:start]).rstrip())
-    # 잘라낸 뒤에도 거절이 남아 있어야 한다. 남지 않으면 목록이 답의 전부였다는 뜻이고,
-    # 그때는 손대지 않는다(여기서 답을 통째로 날리는 것이 더 큰 손해다).
-    if len(head.strip()) < 10 or not _REFUSAL.search(head):
+    # A refusal must survive the cut.  If none does, the list was the whole answer, and then it is left
+    # alone (dropping the entire answer here would be the bigger loss).
+    if len(head.strip()) < 10 or not _refuses(head):
         return text
     return head
 
 
-def normalize_answer(status: str, text: str) -> str:
+# Does the text already say it cannot be confirmed?  Then no prefix is added.  The Korean check matches
+# only '확인할 수 없'/'확인되지 않' (cannot be / is not confirmed), and the English one the same family.
+_CONFIRM_NEG_EN = re.compile(
+    r"\b(?:cannot|can't|can\s+not|could\s+not|couldn't|unable\s+to)\s+(?:be\s+)?confirm(?:ed)?\b"
+    r"|\bnot\s+(?:been\s+)?confirmed\b",
+    re.I,
+)
+
+
+def normalize_answer(status: str, text: str, lang: str = "en") -> str:
     text = strip_closing_offer(strip_tool_call_syntax((text or "").strip()).strip()).strip()
     if status == "cannot_confirm":
         text = strip_alternative_listing(text)
     text = strip_markdown(text)
     if status == "cannot_confirm":
-        if "확인할 수 없" not in text and "확인되지 않" not in text:
-            text = f"{CANNOT_PREFIX} {text}".strip()
+        if "확인할 수 없" not in text and "확인되지 않" not in text and not _CONFIRM_NEG_EN.search(text):
+            text = f"{cannot_prefix(lang)} {text}".strip()
     elif status == "clarify":
         if not text.rstrip().endswith(("?", "？")):
-            text = text.rstrip() + " 어떤 조건을 말씀하시는지 알려주시겠어요?"
-    return text or CANNOT_PREFIX
+            text = text.rstrip() + pick(lang, " Could you tell me which condition you mean?",
+                                        " 어떤 조건을 말씀하시는지 알려주시겠어요?")
+    return text or cannot_prefix(lang)

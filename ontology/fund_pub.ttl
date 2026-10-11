@@ -1,28 +1,28 @@
 # ============================================================================
-# fund_pub.ttl — 공모펀드 마스터 (v_fund_pub / PRFD01N001) TBox
+# fund_pub.ttl — public fund master (v_fund_pub / PRFD01N001) TBox
 #
-# 목적
-#   공모펀드마스터 뷰의 59개 컬럼을 fp:Fund (공모+사모 공통 상위) 의 속성으로 문서화하고
-#   운용속성(fp:ManagementAttribute), 판매수수료유형(fp:FeeType), 판매채널(fp:SalesChannel),
-#   위험등급(fp:fundRiskGrade → fp:RiskGrade) 열거형을 연결한다.
+# Purpose
+#   Documents the 59 columns of the public-fund master view as properties of fp:Fund (common parent of public+private)
+#   and links the management-attribute (fp:ManagementAttribute), sales-fee-type (fp:FeeType), sales-channel (fp:SalesChannel)
+#   and risk-grade (fp:fundRiskGrade → fp:RiskGrade) enumerations.
 #
 # TBox / ABox
-#   펀드 인스턴스는 런타임에 SQLite v_fund_pub 로부터 생성된다 (d:fund/<itm_no>).
-#   각 행은 fp:ShareClass 이기도 하며 (한 펀드의 여러 클래스가 각각 행), fund_family 로
-#   fp:FundFamily 개체에 묶인다. product_type '사모펀드' 는 fp:PrivateFund.
-#   fp:sourceTable "v_fund_pub" 은 fp:PublicFund / fp:PrivateFund 가 함께 보유하지만 fp:sourceId
-#   는 fp:PublicFund 만 가진다. loader._table_infos 가 sourceId 보유 클래스를 우선하므로 스키마
-#   카드 헤더는 '공모펀드' 로 유지된다.
+#   Fund instances are generated at runtime from SQLite v_fund_pub (d:fund/<itm_no>).
+#   Each row is also an fp:ShareClass (each class of a fund is its own row) and is grouped by fund_family
+#   into an fp:FundFamily individual. product_type '사모펀드' is fp:PrivateFund.
+#   fp:sourceTable "v_fund_pub" is carried by fp:PublicFund / fp:PrivateFund alike, but only fp:PublicFund
+#   has fp:sourceId. loader._table_infos prefers the class that has a sourceId, so the schema-card
+#   header stays '공모펀드'.
 #
-# 데이터 특성 (2026-08-21 기준)
-#   - 보수 컬럼(or_co_rwrd_r, sale_co_rwrd_r, trusc_rwrd_r, ofwk_trus_rwrd_r)은 원천 단위가
-#     공개되지 않았다. 절대 수치 해석 금지, 동일 펀드 클래스 간 상대 비교만 허용.
-#   - 기간 수익률(fd_mm1_ern_r ~ fd_yr5_ern_r)은 약 30% 만 수록, fd_wk1_ern_r 은 전부 NULL.
-#   - base_date 는 약 60% NULL.
-#   - 원천에 운용사 이름 컬럼은 없지만 운용사 기관코드 or_co_xtn_itt_cd 는 23,676행 전부에
-#     채워져 있다 (275개 코드). manager_name 은 상품명 접두어로 풀고, 이름이 아무것도 주지
-#     않는 행은 그 코드별 최빈 이름으로 채운다 (name 17,660행 + code 3,932행 = 21,592행).
-#     출처는 manager_source 에 남는다.
+# Data characteristics (as of 2026-08-21)
+#   - The unit of the fee columns (or_co_rwrd_r, sale_co_rwrd_r, trusc_rwrd_r, ofwk_trus_rwrd_r) was not
+#     published by the source. Never read them as absolute values; only compare classes of the same fund.
+#   - Period returns (fd_mm1_ern_r ~ fd_yr5_ern_r) are present for only ~30%; fd_wk1_ern_r is entirely NULL.
+#   - base_date is ~60% NULL.
+#   - The source has no manager-name column, but the manager institution code or_co_xtn_itt_cd is filled on all
+#     23,676 rows (275 codes). manager_name is resolved from the product-name prefix, and rows where the name
+#     yields nothing get the most frequent name for their code (name 17,660 rows + code 3,932 rows = 21,592 rows).
+#     The origin is recorded in manager_source.
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -33,7 +33,7 @@
 @prefix sh:   <http://www.w3.org/ns/shacl#> .
 
 # ----------------------------------------------------------------------------
-# 1. 테이블 클래스
+# 1. Table classes
 # ----------------------------------------------------------------------------
 
 fp:PublicFund a owl:Class ;
@@ -49,12 +49,12 @@ fp:PrivateFund a owl:Class ;
     rdfs:comment "49인 이하 사모 집합투자기구. v_fund_pub 에서 product_type='사모펀드' (prvo_pbff_desc='사모') 인 행. 일반 투자자 추천 대상이 아님."@ko ;
     fp:sourceTable "v_fund_pub" .
 
-# fp:ShareClass 는 common.ttl 에 선언. 여기서는 펀드 뷰와의 관계를 보강한다.
+# fp:ShareClass is declared in common.ttl; here its relation to the fund view is filled in.
 fp:ShareClass rdfs:comment "v_fund_pub 의 한 행 = 한 클래스. 한 펀드의 여러 클래스(A, C, C-e, S, P 등)가 각각 행으로 존재하며 itm_nm 에 클래스 접미가 붙는다. fund_family 컬럼이 접미를 제거한 묶음 키이므로 '같은 펀드' 판단과 클래스 간 보수 비교는 fund_family 로 GROUP BY."@ko ;
     fp:sourceTable "v_fund_pub" .
 
 # ----------------------------------------------------------------------------
-# 2. 열거형: 운용속성
+# 2. Enumeration: management attribute
 # ----------------------------------------------------------------------------
 
 fp:ManagementAttribute a owl:Class ;
@@ -77,7 +77,7 @@ fp:ManagementAttribute_개발형     a fp:ManagementAttribute ; fp:code "개발�
 fp:ManagementAttribute_해당없음   a fp:ManagementAttribute ; fp:code "해당없음"   ; rdfs:label "해당없음"@ko .
 
 # ----------------------------------------------------------------------------
-# 3. 열거형: 판매수수료 유형 / 판매채널
+# 3. Enumerations: sales-fee type / sales channel
 # ----------------------------------------------------------------------------
 
 fp:FeeType a owl:Class ;
@@ -97,7 +97,7 @@ fp:SalesChannel_오프라인 a fp:SalesChannel ; fp:code "오프라인" ; rdfs:l
 fp:SalesChannel_직판     a fp:SalesChannel ; fp:code "직판"     ; rdfs:label "직판"@ko ; rdfs:comment "운용사 직접 판매 (S 클래스 등)."@ko .
 
 # ----------------------------------------------------------------------------
-# 4. 컬럼 속성 — 식별 / 명칭 / 패밀리
+# 4. Column properties — identification / naming / family
 # ----------------------------------------------------------------------------
 
 fp:fundCode a owl:DatatypeProperty ;
@@ -135,7 +135,7 @@ fp:fundFamilyKey a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fund_family" .
 
 # ----------------------------------------------------------------------------
-# 5. 유형 / 판매 상태
+# 5. Type / sale status
 # ----------------------------------------------------------------------------
 
 fp:fundProductType a owl:DatatypeProperty ;
@@ -188,7 +188,7 @@ fp:fundManagerInstitutionCode a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "or_co_xtn_itt_cd" .
 
 # ----------------------------------------------------------------------------
-# 6. 분류 (운용속성 / 제로인 / 지역)
+# 6. Classification (management attribute / Zeroin / region)
 # ----------------------------------------------------------------------------
 
 fp:hasManagementAttribute a owl:ObjectProperty ;
@@ -229,7 +229,7 @@ fp:fundDomesticOverseas a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "ovrs_fd_desc" .
 
 # ----------------------------------------------------------------------------
-# 7. 벤치마크 / 통화 / 헤지 / 구조
+# 7. Benchmark / currency / hedge / structure
 # ----------------------------------------------------------------------------
 
 fp:fundBenchmarkName a owl:DatatypeProperty ;
@@ -289,7 +289,7 @@ fp:fundInvestorType a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "pers_corp_desc" .
 
 # ----------------------------------------------------------------------------
-# 8. 위험등급
+# 8. Risk grade
 # ----------------------------------------------------------------------------
 
 fp:fundRiskGradeName a owl:DatatypeProperty ;
@@ -306,7 +306,7 @@ fp:fundRiskGrade a owl:ObjectProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "risk_grade" .
 
 # ----------------------------------------------------------------------------
-# 9. 클래스 정보
+# 9. Share-class info
 # ----------------------------------------------------------------------------
 
 fp:fundShareClassName a owl:DatatypeProperty ;
@@ -334,7 +334,7 @@ fp:fundShareClassPolicies a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "han_clas_policies" .
 
 # ----------------------------------------------------------------------------
-# 10. 보수 — 원천 단위 미공개: 절대 수치 해석 금지
+# 10. Fees — source unit unpublished: never read as absolute values
 # ----------------------------------------------------------------------------
 
 fp:fundManagerFee a owl:DatatypeProperty ;
@@ -362,7 +362,7 @@ fp:fundAdminFee a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "ofwk_trus_rwrd_r" .
 
 # ----------------------------------------------------------------------------
-# 11. 규모 / 기준가 / 수익률
+# 11. Size / NAV / returns
 # ----------------------------------------------------------------------------
 
 fp:fundNetAssets a owl:DatatypeProperty ;
@@ -439,7 +439,7 @@ fp:fundLastDistributionRate a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "fd_last_dstb_r" .
 
 # ----------------------------------------------------------------------------
-# 12. 자산구성비율 (제로인)
+# 12. Asset composition ratios (Zeroin)
 # ----------------------------------------------------------------------------
 
 fp:fundDomesticStockPct a owl:DatatypeProperty ;
@@ -485,7 +485,7 @@ fp:fundOtherAssetPct a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "zrin_etc_ast_cmst_rt" .
 
 # ----------------------------------------------------------------------------
-# 13. 검색 텍스트 / 기준일
+# 13. Search text / base date
 # ----------------------------------------------------------------------------
 
 fp:fundAttributeSearchText a owl:DatatypeProperty ;
@@ -502,7 +502,7 @@ fp:fundBaseDate a owl:DatatypeProperty ;
     fp:sourceTable "v_fund_pub" ; fp:sourceColumn "base_date" .
 
 # ----------------------------------------------------------------------------
-# 14. SHACL 제약
+# 14. SHACL constraints
 # ----------------------------------------------------------------------------
 
 fp:PublicFundShape a sh:NodeShape ;

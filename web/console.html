@@ -1,6 +1,7 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8">
-<title>금융상품 Agent 테스트 콘솔</title>
+<title>Financial Product Agent — Test Console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
@@ -34,15 +35,17 @@
   button:disabled { opacity:.5; cursor:default; }
   .pills { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   .pill { font-size:12px; padding:5px 10px; border:1px solid var(--line); border-radius:99px;
-          background:transparent; color:var(--ink); cursor:pointer; font-weight:400; }
+          background:transparent; color:var(--ink); cursor:pointer; font-weight:400; text-align:left; }
   .pill:hover { border-color:var(--accent); color:var(--accent); }
 
-  /* header + language toggle */
-  .head { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-  .head > .headtext { flex:1 1 320px; min-width:0; }
-  .lang { display:flex; border:1px solid var(--line); border-radius:99px; overflow:hidden; flex:0 0 auto; }
+  /* header + language toggle: the toggle shares the title row, so it stays top-right on a phone */
+  .head { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; }
+  .head h1 { flex:1 1 auto; min-width:0; }
+  .lang { display:flex; border:1px solid var(--line); border-radius:99px; overflow:hidden; flex:0 0 auto;
+          margin-top:1px; }
   .lang button { background:transparent; color:var(--muted); border:0; border-radius:0;
-                 padding:5px 13px; font-size:12px; font-weight:700; letter-spacing:.03em; }
+                 padding:3px 12px; font-size:12px; font-weight:700; letter-spacing:.02em; line-height:1.6; }
+  .lang button + button { border-left:1px solid var(--line); }
   .lang button[aria-pressed="true"] { background:var(--accent); color:#fff; }
   .langnote { font-size:12px; color:var(--muted); border-left:3px solid var(--line);
               padding:2px 0 2px 10px; margin:0 0 14px; }
@@ -106,7 +109,7 @@
   .stats { display:flex; flex-wrap:wrap; gap:8px; margin-top:2px; }
   .stat { border:1px solid var(--line); border-radius:8px; padding:8px 12px; min-width:96px; background:var(--bg); }
   .stat b { display:block; font-size:17px; font-variant-numeric:tabular-nums; }
-  .stat span { font-size:11px; color:var(--muted); }
+  .stat > span { font-size:11px; color:var(--muted); }
   .stat.alarm b { color:var(--bad); }
   .tscroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:4px; }
   table.res { border-collapse:collapse; width:100%; min-width:760px; font-size:13px; }
@@ -130,38 +133,38 @@
   .runline .now { color:var(--muted); }
 </style>
 
+<!-- Interface text: the English below is what shows before the script runs; the script then fills
+     every data-i18n* element from the I18N dictionary (English first, then Korean). -->
 <div class="wrap">
   <div class="head">
-    <div class="headtext">
-      <h1 data-i18n="title">금융상품 Agent 테스트 콘솔</h1>
-      <p class="sub" data-i18n="sub">질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며, 화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.</p>
-    </div>
-    <div class="lang" role="group" aria-label="Language">
-      <button id="lang-ko" aria-pressed="true">KO</button>
-      <button id="lang-en" aria-pressed="false">EN</button>
+    <h1 data-i18n="title">Financial Product Agent — Test Console</h1>
+    <div class="lang" role="group" data-i18n-aria="lang_group" aria-label="Interface language">
+      <button id="lang-en" lang="en" aria-pressed="true" data-i18n-title="lang_en_title" title="Show the interface in English">EN</button>
+      <button id="lang-ko" lang="ko" aria-pressed="false" data-i18n-title="lang_ko_title" title="Show the interface in Korean">한국어</button>
     </div>
   </div>
+  <p class="sub" data-i18n="sub">Shows every step a question takes on its way to an answer. Same pipeline as the graded <code>/answer</code>; the display is observed only through <code>/answer/stream</code> — nothing reaching the model changes.</p>
 
-  <p class="langnote hide" id="langnote">Answers are generated in Korean by design — this API is judged on Korean queries. Only the interface is translated.</p>
+  <p class="langnote" data-i18n="lang_note">Answers follow the language of the question: English by default, Korean when you ask in Korean. Product and company names stay in Korean, as they appear in the data.</p>
 
   <div class="tabs" role="tablist">
-    <button id="tab-single" role="tab" aria-selected="true" data-i18n="tab_single">단건 실행</button>
-    <button id="tab-batch" role="tab" aria-selected="false" data-i18n="tab_batch">일괄 검사</button>
+    <button id="tab-single" role="tab" aria-selected="true" data-i18n="tab_single">Single run</button>
+    <button id="tab-batch" role="tab" aria-selected="false" data-i18n="tab_batch">Batch run</button>
   </div>
 
   <!-- ───────────────────────── single ───────────────────────── -->
   <div id="panel-single">
     <div class="card">
-      <label for="q" data-i18n="lbl_question">질문</label>
-      <textarea id="q" data-i18n-ph="ph_question" placeholder="예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"></textarea>
+      <label for="q" data-i18n="lbl_question">Question</label>
+      <textarea id="q" data-i18n-ph="ph_question" placeholder="e.g. How many domestic ETFs have risk grade 1 and net assets of at least KRW 1 trillion?"></textarea>
       <div class="row">
         <div style="max-width:150px">
-          <label for="qid">question_id</label>
+          <label for="qid" data-i18n="lbl_qid">question_id</label>
           <input type="text" id="qid" value="T-001">
         </div>
-        <button id="go" data-i18n="btn_go">질문 보내기</button>
-        <button class="ghost" id="stop" disabled data-i18n="btn_stop">중단</button>
-        <button class="ghost" id="clear" data-i18n="btn_clear">지우기</button>
+        <button id="go" data-i18n="btn_go" data-i18n-title="btn_go_title" title="Ctrl+Enter (⌘+Enter on a Mac) also sends">Send question</button>
+        <button class="ghost" id="stop" disabled data-i18n="btn_stop">Stop</button>
+        <button class="ghost" id="clear" data-i18n="btn_clear">Clear</button>
       </div>
       <div class="pills" id="samples"></div>
     </div>
@@ -169,14 +172,14 @@
     <div class="card hide" id="livecard">
       <div class="live">
         <span class="dot run" id="dot"></span>
-        <strong id="phase">시작</strong>
-        <span class="clock" id="clock">0.0초</span>
+        <strong id="phase" data-i18n="phase_start">Starting</strong>
+        <span class="clock" id="clock" data-i18n="sec" data-i18n-args="[0]">0.0s</span>
         <span class="badge" id="counts"></span>
       </div>
     </div>
 
     <div class="card hide" id="tlcard">
-      <h2 data-i18n="h_progress">진행 과정</h2>
+      <h2 data-i18n="h_progress">Progress</h2>
       <ul class="tl" id="tl"></ul>
     </div>
 
@@ -186,19 +189,19 @@
   <!-- ───────────────────────── batch ───────────────────────── -->
   <div id="panel-batch" class="hide">
     <div class="card">
-      <label for="bq" data-i18n="lbl_batch_input">질문 목록 — 한 줄에 하나. <code>ID | 질문</code> 형식이면 그 ID를 씁니다.</label>
-      <textarea id="bq" rows="7" data-i18n-ph="ph_batch" placeholder="G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"></textarea>
+      <label for="bq" data-i18n="lbl_batch_input">Questions — one per line. Use <code>ID | question</code> to set the id.</label>
+      <textarea id="bq" rows="7" data-i18n-ph="ph_batch" placeholder="G-001 | How many KRW bonds currently available for purchase have a credit rating of AA- or higher?"></textarea>
       <div class="row">
-        <button class="ghost" id="load-gt" data-i18n="btn_load_gt">평가셋 54문항 불러오기</button>
-        <button class="ghost" id="load-p12" data-i18n="btn_load_p12">주최측 예시 8문항 불러오기</button>
-        <button class="ghost" id="clear-list" data-i18n="btn_clear_list">목록 비우기</button>
+        <button class="ghost" id="load-gt" data-i18n="btn_load_gt" data-i18n-title="btn_load_gt_title" title="Loads the English version of the 54 eval questions, with the same IDs as data/eval/groundtruth.jsonl. Switch the page to Korean to load the original questions.">Load eval set (54)</button>
+        <button class="ghost" id="load-p12" data-i18n="btn_load_p12" data-i18n-title="btn_load_p12_title" title="Loads the English version of the 8 examples on p.12 of the organizer's task description. Switch the page to Korean to load the originals.">Load organizer examples (8)</button>
+        <button class="ghost" id="clear-list" data-i18n="btn_clear_list">Clear list</button>
       </div>
       <div class="row">
-        <button id="brun" data-i18n="btn_run_batch">일괄 실행</button>
-        <button class="ghost" id="bstop" disabled data-i18n="btn_stop_batch">중단</button>
+        <button id="brun" data-i18n="btn_run_batch">Run batch</button>
+        <button class="ghost" id="bstop" disabled data-i18n="btn_stop_batch">Stop</button>
         <span class="clock" id="bcount"></span>
       </div>
-      <p class="meta2" data-i18n="batch_help">문항은 채점 조건과 같게 <b>하나씩 순차로</b> 실행합니다. 한 문항이 실패해도 나머지는 계속 실행됩니다.</p>
+      <p class="meta2" data-i18n="batch_help">Questions run <b>strictly one at a time</b>, matching the grading conditions. A failing question does not stop the rest.</p>
     </div>
 
     <div class="card hide" id="bprogcard">
@@ -212,32 +215,32 @@
     </div>
 
     <div class="card hide" id="bstatcard">
-      <h2 data-i18n="h_summary">요약 통계</h2>
+      <h2 data-i18n="h_summary">Summary</h2>
       <div class="stats" id="bstats"></div>
     </div>
 
     <div class="card hide" id="brescard">
       <div class="row" style="margin:0 0 8px; justify-content:space-between">
-        <h2 style="margin:0" data-i18n="h_results">결과</h2>
+        <h2 style="margin:0" data-i18n="h_results">Results</h2>
         <div style="display:flex; gap:8px">
-          <button class="ghost" id="exp-json" data-i18n="btn_export_json">JSON 내려받기</button>
-          <button class="ghost" id="exp-csv" data-i18n="btn_export_csv">CSV 내려받기</button>
+          <button class="ghost" id="exp-json" data-i18n="btn_export_json">Download JSON</button>
+          <button class="ghost" id="exp-csv" data-i18n="btn_export_csv">Download CSV</button>
         </div>
       </div>
       <div class="tscroll">
         <table class="res">
           <thead><tr>
-            <th data-i18n="th_id">문항ID</th>
-            <th data-i18n="th_question">질문</th>
-            <th data-i18n="th_time">소요</th>
-            <th data-i18n="th_status">status</th>
-            <th data-i18n="th_tools">도구</th>
-            <th data-i18n="th_answer">답변 요약</th>
+            <th data-i18n="th_id">ID</th>
+            <th data-i18n="th_question">Question</th>
+            <th data-i18n="th_time">Time</th>
+            <th data-i18n="th_status">Status</th>
+            <th data-i18n="th_tools">Tools</th>
+            <th data-i18n="th_answer">Answer summary</th>
           </tr></thead>
           <tbody id="btbody"></tbody>
         </table>
       </div>
-      <p class="meta2" data-i18n="row_hint">행을 클릭하면 answer · retrieved_context · think_trace 전문이 펼쳐집니다.</p>
+      <p class="meta2" data-i18n="row_hint">Click a row to expand the full answer, retrieved_context and think_trace.</p>
     </div>
   </div>
 </div>
@@ -245,61 +248,40 @@
 <script>
 "use strict";
 
-/* ─────────────────────────── i18n ─────────────────────────── */
+/* ─────────────────────────── i18n ───────────────────────────
+   Every piece of interface text lives here: English first, then Korean, and both carry every key.
+   String entries may hold trusted markup (<code>, <b>); function entries build text from values
+   such as counts, seconds and tool names and are always inserted as plain text.
+   Server content — answer, think_trace, retrieved_context, tool output, step lines, status values —
+   is never translated.
+
+   Markup opts in with data-i18n (content), data-i18n-ph (placeholder), data-i18n-title (tooltip) and
+   data-i18n-aria (aria-label).  Function entries keep their arguments in data-i18n-args, so switching
+   language re-renders text that is already on screen — timeline, stats, table — without touching the
+   question, the answer or anything the server sent. */
 const I18N = {
-  ko: {
-    title: "금융상품 Agent 테스트 콘솔",
-    sub: '질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며, 화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.',
-    tab_single: "단건 실행", tab_batch: "일괄 검사",
-    lbl_question: "질문",
-    ph_question: "예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
-    btn_go: "질문 보내기", btn_stop: "중단", btn_clear: "지우기",
-    h_progress: "진행 과정", h_answer: "답변", h_context: "근거 (retrieved_context)",
-    h_raw: "채점 서버가 받는 원본 JSON", sum_expand: "펼치기",
-    sum_prompt: "프롬프트에 주입된 블록 보기",
-    lbl_batch_input: '질문 목록 — 한 줄에 하나. <code>ID | 질문</code> 형식이면 그 ID를 씁니다.',
-    ph_batch: "G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
-    btn_load_gt: "평가셋 54문항 불러오기", btn_load_p12: "주최측 예시 8문항 불러오기",
-    btn_clear_list: "목록 비우기", btn_run_batch: "일괄 실행", btn_stop_batch: "중단",
-    batch_help: "문항은 채점 조건과 같게 <b>하나씩 순차로</b> 실행합니다. 한 문항이 실패해도 나머지는 계속 실행됩니다.",
-    h_summary: "요약 통계", h_results: "결과",
-    btn_export_json: "JSON 내려받기", btn_export_csv: "CSV 내려받기",
-    th_id: "문항ID", th_question: "질문", th_time: "소요", th_status: "status",
-    th_tools: "도구", th_answer: "답변 요약",
-    row_hint: "행을 클릭하면 answer · retrieved_context · think_trace 전문이 펼쳐집니다.",
-    st_total: "전체", st_done: "완료", st_avg: "평균 소요", st_max: "최대 소요", st_over60: "60초 초과",
-    n_items: n => `${n}개 문항`,
-    running: "실행 중", finished: "완료", stopped: "중단됨", waiting: "대기",
-    of: (i, n) => `${i} / ${n}`,
-    sec: t => t.toFixed(1) + "초",
-    phase_start: "시작", phase_conn: "연결 중", phase_pre: "사전 분석", phase_llm: "LLM 추론",
-    phase_tool: n => `도구 실행 · ${n}`,
-    tools_n: (t, e) => `도구 ${t}회` + (e ? ` · 오류 ${e}` : ""),
-    pre_title: "사전 분석", pre_desc: "LLM 호출 전에 결정적으로 계산한 것",
-    pre_none: "특별한 신호 없음",
-    pre_mentions: "상품명 후보", pre_unresolved: "미해결", pre_invalid: "온톨로지 위반",
-    b_called: "호출", b_result: "결과", b_error: "오류",
-    evidence: "근거",
-    stream_lost: "스트림 연결이 끊어졌습니다. 서버가 떠 있는지 확인하세요.",
-    no_context: "(없음)",
-    tag_easy: "쉬움", tag_med: "보통", tag_hard: "어려움", tag_no: "답변불가",
-    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace",
-    empty_list: "실행할 질문이 없습니다.",
-    round: r => `라운드 ${r}`,
-  },
   en: {
     title: "Financial Product Agent — Test Console",
     sub: 'Shows every step a question takes on its way to an answer. Same pipeline as the graded <code>/answer</code>; the display is observed only through <code>/answer/stream</code> — nothing reaching the model changes.',
+    lang_group: "Interface language",
+    lang_en_title: "Show the interface in English",
+    lang_ko_title: "Show the interface in Korean",
+    lang_note: "Answers follow the language of the question: English by default, Korean when you ask in Korean. Product and company names stay in Korean, as they appear in the data.",
     tab_single: "Single run", tab_batch: "Batch run",
     lbl_question: "Question",
-    ph_question: "e.g. Which 3 domestic ETFs holding Samsung Electronics have the largest net assets?",
-    btn_go: "Send question", btn_stop: "Stop", btn_clear: "Clear",
+    ph_question: "e.g. How many domestic ETFs have risk grade 1 and net assets of at least KRW 1 trillion?",
+    lbl_qid: "question_id",
+    btn_go: "Send question", btn_go_title: "Ctrl+Enter (⌘+Enter on a Mac) also sends",
+    btn_stop: "Stop", btn_clear: "Clear",
     h_progress: "Progress", h_answer: "Answer", h_context: "Evidence (retrieved_context)",
     h_raw: "Raw JSON the grading server receives", sum_expand: "Expand",
     sum_prompt: "Show the block injected into the prompt",
     lbl_batch_input: 'Questions — one per line. Use <code>ID | question</code> to set the id.',
-    ph_batch: "G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
-    btn_load_gt: "Load eval set (54)", btn_load_p12: "Load organizer examples (8)",
+    ph_batch: "G-001 | How many KRW bonds currently available for purchase have a credit rating of AA- or higher?",
+    btn_load_gt: "Load eval set (54)",
+    btn_load_gt_title: "Loads the English version of the 54 eval questions, with the same IDs as data/eval/groundtruth.jsonl. Switch the page to Korean to load the original questions.",
+    btn_load_p12: "Load organizer examples (8)",
+    btn_load_p12_title: "Loads the English version of the 8 examples on p.12 of the organizer's task description. Switch the page to Korean to load the originals.",
     btn_clear_list: "Clear list", btn_run_batch: "Run batch", btn_stop_batch: "Stop",
     batch_help: "Questions run <b>strictly one at a time</b>, matching the grading conditions. A failing question does not stop the rest.",
     h_summary: "Summary", h_results: "Results",
@@ -309,150 +291,356 @@ const I18N = {
     row_hint: "Click a row to expand the full answer, retrieved_context and think_trace.",
     st_total: "Total", st_done: "Done", st_avg: "Avg time", st_max: "Max time", st_over60: "Over 60s",
     n_items: n => `${n} question${n === 1 ? "" : "s"}`,
-    running: "Running", finished: "Finished", stopped: "Stopped", waiting: "Waiting",
+    running: "Running", finished: "Finished", stopped: "Stopped",
     of: (i, n) => `${i} / ${n}`,
-    sec: t => t.toFixed(1) + "s",
+    sec: t => (Number(t) || 0).toFixed(1) + "s",
+    sec2: t => (Number(t) || 0).toFixed(2) + "s",
     phase_start: "Starting", phase_conn: "Connecting", phase_pre: "Pre-analysis", phase_llm: "LLM reasoning",
     phase_tool: n => `Running tool · ${n}`,
     tools_n: (t, e) => `${t} tool call${t === 1 ? "" : "s"}` + (e ? ` · ${e} error${e === 1 ? "" : "s"}` : ""),
     pre_title: "Pre-analysis", pre_desc: "computed deterministically before the LLM is called",
     pre_none: "no notable signal",
     pre_mentions: "product-name candidates", pre_unresolved: "unresolved", pre_invalid: "ontology violation",
+    round: r => `Round ${r}`,
     b_called: "call", b_result: "result", b_error: "error",
+    intent: "intent",
     evidence: "evidence",
+    ev_asof: d => `as of ${d}`,
+    ev_rows: n => `${n} row${n === 1 ? "" : "s"}`,
     stream_lost: "The stream was dropped. Check that the server is still running.",
     no_context: "(none)",
     tag_easy: "Easy", tag_med: "Medium", tag_hard: "Hard", tag_no: "Unanswerable",
-    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace",
+    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace", d_error: "error",
     empty_list: "No questions to run.",
-    round: r => `Round ${r}`,
+    err_no_done: "no done event",
+    err_stream: "stream error",
+    err_http: s => `HTTP ${s}`,
+  },
+  ko: {
+    title: "금융상품 Agent 테스트 콘솔",
+    sub: '질문이 답까지 가는 과정을 단계별로 그대로 보여줍니다. 채점용 <code>/answer</code> 와 같은 파이프라인이며, 화면 표시는 <code>/answer/stream</code> 으로만 관찰합니다 — 모델에게 가는 내용은 바뀌지 않습니다.',
+    lang_group: "화면 언어",
+    lang_en_title: "화면을 영어로 표시",
+    lang_ko_title: "화면을 한국어로 표시",
+    lang_note: "답변 언어는 질문 언어를 따릅니다. 기본은 영어이며, 한국어로 물으면 한국어로 답합니다. 상품명과 회사명은 데이터에 있는 그대로 한국어로 표시됩니다.",
+    tab_single: "단건 실행", tab_batch: "일괄 검사",
+    lbl_question: "질문",
+    ph_question: "예) 삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘",
+    lbl_qid: "question_id",
+    btn_go: "질문 보내기", btn_go_title: "Ctrl+Enter(Mac은 ⌘+Enter)로도 보낼 수 있습니다",
+    btn_stop: "중단", btn_clear: "지우기",
+    h_progress: "진행 과정", h_answer: "답변", h_context: "근거 (retrieved_context)",
+    h_raw: "채점 서버가 받는 원본 JSON", sum_expand: "펼치기",
+    sum_prompt: "프롬프트에 주입된 블록 보기",
+    lbl_batch_input: '질문 목록 — 한 줄에 하나. <code>ID | 질문</code> 형식이면 그 ID를 씁니다.',
+    ph_batch: "G-001 | 현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?",
+    btn_load_gt: "평가셋 54문항 불러오기",
+    btn_load_gt_title: "data/eval/groundtruth.jsonl 의 원문 질문 54개를 불러옵니다. 영어 화면에서는 같은 ID의 영어 번역본을 불러옵니다.",
+    btn_load_p12: "주최측 예시 8문항 불러오기",
+    btn_load_p12_title: "주최측 과제설명서 12쪽의 예시 8문항 원문을 불러옵니다. 영어 화면에서는 영어 번역본을 불러옵니다.",
+    btn_clear_list: "목록 비우기", btn_run_batch: "일괄 실행", btn_stop_batch: "중단",
+    batch_help: "문항은 채점 조건과 같게 <b>하나씩 순차로</b> 실행합니다. 한 문항이 실패해도 나머지는 계속 실행됩니다.",
+    h_summary: "요약 통계", h_results: "결과",
+    btn_export_json: "JSON 내려받기", btn_export_csv: "CSV 내려받기",
+    th_id: "문항ID", th_question: "질문", th_time: "소요", th_status: "status",
+    th_tools: "도구", th_answer: "답변 요약",
+    row_hint: "행을 클릭하면 answer · retrieved_context · think_trace 전문이 펼쳐집니다.",
+    st_total: "전체", st_done: "완료", st_avg: "평균 소요", st_max: "최대 소요", st_over60: "60초 초과",
+    n_items: n => `${n}개 문항`,
+    running: "실행 중", finished: "완료", stopped: "중단됨",
+    of: (i, n) => `${i} / ${n}`,
+    sec: t => (Number(t) || 0).toFixed(1) + "초",
+    sec2: t => (Number(t) || 0).toFixed(2) + "초",
+    phase_start: "시작", phase_conn: "연결 중", phase_pre: "사전 분석", phase_llm: "LLM 추론",
+    phase_tool: n => `도구 실행 · ${n}`,
+    tools_n: (t, e) => `도구 ${t}회` + (e ? ` · 오류 ${e}` : ""),
+    pre_title: "사전 분석", pre_desc: "LLM 호출 전에 결정적으로 계산한 것",
+    pre_none: "특별한 신호 없음",
+    pre_mentions: "상품명 후보", pre_unresolved: "미해결", pre_invalid: "온톨로지 위반",
+    round: r => `라운드 ${r}`,
+    b_called: "호출", b_result: "결과", b_error: "오류",
+    intent: "의도",
+    evidence: "근거",
+    ev_asof: d => `기준일 ${d}`,
+    ev_rows: n => `${n}건`,
+    stream_lost: "스트림 연결이 끊어졌습니다. 서버가 떠 있는지 확인하세요.",
+    no_context: "(없음)",
+    tag_easy: "쉬움", tag_med: "보통", tag_hard: "어려움", tag_no: "답변불가",
+    d_answer: "answer", d_context: "retrieved_context", d_trace: "think_trace", d_error: "오류",
+    empty_list: "실행할 질문이 없습니다.",
+    err_no_done: "done 이벤트 없음",
+    err_stream: "스트림 오류",
+    err_http: s => `HTTP ${s}`,
   },
 };
 
-let LANG = "ko";
-const T = k => (I18N[LANG][k] !== undefined ? I18N[LANG][k] : I18N.ko[k]);
+const DEFAULT_LANG = "en";
+// Own key for the English edition: the Korean console on the same origin (localhost:8000) used
+// "finagent.lang" and wrote "ko" on every visit, which would override the English default here.
+const LANG_KEY = "finagent-en.lang";
+let LANG = DEFAULT_LANG;
 
 function lsGet(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } }
-function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* private mode */ } }
+function lsSet(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* storage blocked or full */ } }
 
 const $ = s => document.querySelector(s);
 const $$ = s => Array.prototype.slice.call(document.querySelectorAll(s));
 const esc = s => String(s === null || s === undefined ? "" : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-const fmt = t => T("sec")(Number(t) || 0);
+const escAttr = s => esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-function applyLang(lang) {
-  LANG = (lang === "en") ? "en" : "ko";
-  lsSet("finagent.lang", LANG);
-  document.documentElement.lang = LANG;
-  document.title = I18N[LANG].title;
-  $$("[data-i18n]").forEach(el => {
-    const v = I18N[LANG][el.getAttribute("data-i18n")];
-    if (typeof v === "string") el.innerHTML = v;
-  });
-  $$("[data-i18n-ph]").forEach(el => {
-    const v = I18N[LANG][el.getAttribute("data-i18n-ph")];
-    if (typeof v === "string") el.placeholder = v;
-  });
-  $("#lang-ko").setAttribute("aria-pressed", String(LANG === "ko"));
-  $("#lang-en").setAttribute("aria-pressed", String(LANG === "en"));
-  $("#langnote").classList.toggle("hide", LANG !== "en");
-  renderSamples();
-  renderBatchCount();
-  renderStats();
-  renderTable();
+/* Plain text for a key in the current language (function entries get the arguments). */
+function T(key, ...args) {
+  let v = I18N[LANG][key];
+  if (v === undefined) v = I18N[DEFAULT_LANG][key];
+  if (v === undefined) return key;
+  return typeof v === "function" ? String(v.apply(null, args)) : v;
 }
 
-/* ─────────────────────────── question sets ─────────────────────────── */
-const SAMPLES = [
-  ["tag_easy", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
-  ["tag_easy", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
-  ["tag_med", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
-  ["tag_med", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
-  ["tag_hard", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
-  ["tag_hard", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
-  ["tag_hard", "에코프로 자회사를 편입한 ETF를 알려줘"],
-  ["tag_no", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
-  ["tag_no", "KODEX AI로봇 ETF의 총보수는?"],
-];
+/* Markup for a key that follows later language switches: <span data-i18n="key">…</span>. */
+function tspan(key, ...args) {
+  const v = I18N[LANG][key];
+  const body = typeof v === "function" ? esc(T(key, ...args)) : (typeof v === "string" ? v : esc(key));
+  const a = args.length ? ` data-i18n-args="${escAttr(JSON.stringify(args))}"` : "";
+  return `<span data-i18n="${escAttr(key)}"${a}>${body}</span>`;
+}
+
+function argsOf(el) {
+  try { return JSON.parse(el.getAttribute("data-i18n-args") || "[]"); } catch (e) { return []; }
+}
+
+/* (Re)fills one tagged element from the dictionary. */
+function fill(el) {
+  const key = el.getAttribute("data-i18n");
+  const v = I18N[LANG][key];
+  if (typeof v === "function") el.textContent = T(key, ...argsOf(el));
+  else if (typeof v === "string") el.innerHTML = v;
+}
+
+/* Tags an element with a key (and arguments) and fills it now. */
+function setT(el, key, ...args) {
+  el.setAttribute("data-i18n", key);
+  if (args.length) el.setAttribute("data-i18n-args", JSON.stringify(args));
+  else el.removeAttribute("data-i18n-args");
+  fill(el);
+}
+
+/* Empties a tagged element and untags it, so a later language switch leaves it empty. */
+function clearT(el) {
+  el.removeAttribute("data-i18n");
+  el.removeAttribute("data-i18n-args");
+  el.textContent = "";
+}
+
+/* Messages the page itself stores as a batch row's error; shown in the current language. */
+const PAGE_ERRORS = ["stopped", "err_no_done", "err_stream"];
+function errHtml(s, n) {
+  for (const key of PAGE_ERRORS) {
+    if (Object.keys(I18N).some(l => I18N[l][key] === s)) return tspan(key);
+  }
+  return esc(n ? clip(s, n) : s);
+}
+
+function applyLang(lang) {
+  LANG = I18N[lang] ? lang : DEFAULT_LANG;
+  document.documentElement.lang = LANG;
+  document.title = T("title");
+  $$("[data-i18n]").forEach(fill);
+  $$("[data-i18n-ph]").forEach(el => { el.placeholder = T(el.getAttribute("data-i18n-ph")); });
+  $$("[data-i18n-title]").forEach(el => { el.title = T(el.getAttribute("data-i18n-title")); });
+  $$("[data-i18n-aria]").forEach(el => { el.setAttribute("aria-label", T(el.getAttribute("data-i18n-aria"))); });
+  $("#lang-en").setAttribute("aria-pressed", String(LANG === "en"));
+  $("#lang-ko").setAttribute("aria-pressed", String(LANG === "ko"));
+  renderSamples();
+  renderBatchCount();
+}
+
+/* ─────────────────────────── question sets ───────────────────────────
+   Each set has an English and a Korean version; the one matching the interface language is shown
+   or loaded.  The English questions mirror the Korean ones' intent.  Product, company and fund
+   names stay in Korean where the answer depends on them — the data stores them that way — with an
+   English gloss in parentheses where one helps. */
+const SAMPLES = {
+  en: [
+    ["tag_easy", "How many KRW bonds currently available for purchase have a credit rating of AA- or higher?"],
+    ["tag_easy", "How many domestically listed ETFs are managed by 삼성자산운용 (Samsung Asset Management)?"],
+    ["tag_med", "How many domestic ETFs have risk grade 1 and net assets of at least KRW 1 trillion?"],
+    ["tag_med", "How many currency-hedged overseas bond public funds are currently on sale?"],
+    ["tag_hard", "Which domestic ETFs hold 삼성전자 (Samsung Electronics)? Top 3 by net assets."],
+    ["tag_hard", "Across domestic ETFs and public funds combined, which 3 products have the highest 1-year return?"],
+    ["tag_hard", "Which ETFs hold subsidiaries of 에코프로 (EcoPro)?"],
+    ["tag_no", "What is the expected return of the TIGER 반도체 ETF next year?"],
+    ["tag_no", "What is the total expense ratio of the KODEX AI로봇 ETF?"],
+  ],
+  ko: [
+    ["tag_easy", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
+    ["tag_easy", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
+    ["tag_med", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
+    ["tag_med", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
+    ["tag_hard", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
+    ["tag_hard", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
+    ["tag_hard", "에코프로 자회사를 편입한 ETF를 알려줘"],
+    ["tag_no", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
+    ["tag_no", "KODEX AI로봇 ETF의 총보수는?"],
+  ],
+};
+const PILL_MAX = { en: 60, ko: 32 };   // characters shown on a pill; the full question is its tooltip
 
 /* Organizer's task description, p12 — 5 difficulty examples + 3 unanswerable examples. */
-const SET_P12 = [
-  ["P-001", "현재 판매 가능한 원화채권 중 AA- 이상 종목 알려줘"],
-  ["P-002", "국민성장펀드의 구조와 투자전략 동향 등 찾아서 알려줘"],
-  ["P-003", "캠브리콘이 편입된 중국 반도체 ETF를 알려줘"],
-  ["P-004", "최근 6개월 동안 우주항공 테마와 연결 이력이 있는 관련 ETF를 정리해줘"],
-  ["P-005", "에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘"],
-  ["P-006", "신용등급 AAAA인 채권 찾아줘"],
-  ["P-007", "Kimi 관련 투자 상품 있어?"],
-  ["P-008", "KODEX AI로봇 ETF 정보 알려줘"],
-];
+const SET_P12 = {
+  en: [
+    ["P-001", "List the KRW bonds currently available for purchase that are rated AA- or higher"],
+    ["P-002", "Look up 국민성장펀드 (National Growth Fund) and tell me about its structure and investment-strategy trends"],
+    ["P-003", "Which China semiconductor ETFs hold 캠브리콘 (Cambricon)?"],
+    ["P-004", "Summarize the ETFs that have been linked to the 우주항공 (aerospace) theme over the last 6 months"],
+    ["P-005", "Among the ETFs holding subsidiaries of 에코프로 (EcoPro), what are the risk factors of the ones with the largest net assets?"],
+    ["P-006", "Find bonds with a credit rating of AAAA"],
+    ["P-007", "Are there any investment products related to Kimi?"],
+    ["P-008", "Tell me about the KODEX AI로봇 ETF"],
+  ],
+  ko: [
+    ["P-001", "현재 판매 가능한 원화채권 중 AA- 이상 종목 알려줘"],
+    ["P-002", "국민성장펀드의 구조와 투자전략 동향 등 찾아서 알려줘"],
+    ["P-003", "캠브리콘이 편입된 중국 반도체 ETF를 알려줘"],
+    ["P-004", "최근 6개월 동안 우주항공 테마와 연결 이력이 있는 관련 ETF를 정리해줘"],
+    ["P-005", "에코프로의 자회사를 편입한 ETF 중 순자산이 큰 상품의 위험요인 알려줘"],
+    ["P-006", "신용등급 AAAA인 채권 찾아줘"],
+    ["P-007", "Kimi 관련 투자 상품 있어?"],
+    ["P-008", "KODEX AI로봇 ETF 정보 알려줘"],
+  ],
+};
 
-/* Snapshot of data/eval/groundtruth.jsonl (question_id + question), embedded on purpose:
-   the grading server must not grow a route that reads evaluation files at runtime. */
-const SET_GT = [
-  ["G-001", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
-  ["G-002", "구매 가능한 원화채권 중 신용등급 AAA이고 만기가 2027년인 종목 수를 알려줘"],
-  ["G-003", "매수수익률이 실제로 수록된 채권 중 세후 운용수익률이 가장 높은 종목의 이름과 수익률은?"],
-  ["G-004", "국내 상장 ETF 중 순자산이 가장 큰 상품 3개의 이름을 알려줘"],
-  ["G-005", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
-  ["G-006", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
-  ["G-007", "미국 증시에 상장된 주식형 ETF 중 총보수가 가장 낮은 상품을 모두 알려줘"],
-  ["G-008", "VanEck China Semiconductor ETF의 총보수는 몇 퍼센트인가요?"],
-  ["G-009", "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"],
-  ["G-010", "판매중인 공모 주식형 펀드 중 1년 수익률이 가장 높은 펀드의 이름은?"],
-  ["G-011", "국민성장펀드는 몇 개의 클래스로 판매되고 있나요?"],
-  ["G-012", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
-  ["G-013", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
-  ["G-014", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?"],
-  ["G-015", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
-  ["G-016", "신용등급 AAAA인 채권을 찾아줘"],
-  ["G-017", "위험등급 8등급인 국내 ETF를 알려줘"],
-  ["G-018", "Kimi 관련 투자상품이 있나요?"],
-  ["G-019", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
-  ["G-020", "삼성전자를 보유한 공모펀드를 알려줘"],
-  ["G-021", "KODEX AI로봇 ETF 정보 알려줘"],
-  ["G-022", "TIGER 양자컴퓨팅커버드콜 ETF의 순자산을 알려줘"],
-  ["G-023", "해외 ETF 중 인버스나 숏 전략을 사용하는 상품은 몇 개인가요?"],
-  ["G-024", "구매 가능한 원화채권 가운데 신용등급이 A0인 채권은 서로 다른 종목(종목코드) 기준으로 몇 개인가요?"],
-  ["G-025", "미래에셋미국배당커버드콜액티브증권자투자신탁(주식)은 환헤지형(H)과 환노출형(UH)을 합쳐 몇 개 클래스가 판매되고 있나요?"],
-  ["G-026", "국내 ETF 중 분배금을 매월 지급하는 월배당 상품은 몇 개인가요?"],
-  ["G-027", "판매중인 공모펀드 중 위험등급이 1등급인 상품은 몇 개인가요?"],
-  ["G-028", "구매 가능한 원화채권 중 표면금리가 가장 낮은 종목의 이름은 무엇인가요? 표면금리가 0%로 기재된 종목은 금리 근거가 없는 것이므로 제외하고 알려주세요."],
-  ["G-029", "국내 ETF 중 총보수가 가장 낮은 상품 3개를 알려줘. 총보수가 0이거나 기재되지 않은 상품은 제외해줘."],
-  ["G-030", "국내 ETF 중 분배금 수익률(분배율)이 가장 높은 상품 3개의 이름을 알려줘"],
-  ["G-031", "판매중인 공모펀드 중 순자산 규모가 가장 큰 상품 3개의 이름을 알려줘"],
-  ["G-032", "해외 ETF 중 채권형 상품만 놓고 볼 때 운용규모(AUM)가 가장 큰 3개는 무엇인가요?"],
-  ["G-033", "TIGER 미국나스닥100을 운용하는 자산운용사는 어디인가요?"],
-  ["G-034", "Invesco QQQ Trust, Series 1의 운용사 이름을 알려줘"],
-  ["G-035", "한국도로공사고속도로건설채권 634(변)의 신용등급은 무엇인가요?"],
-  ["G-036", "신한글로벌탄소중립솔루션증권투자신탁(H)[주식](종류A-e)의 벤치마크 지수는 무엇인가요?"],
-  ["G-037", "SK하이닉스를 편입하고 있는 국내 ETF는 몇 개인가요?"],
-  ["G-038", "두산에너빌리티를 보유한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
-  ["G-039", "국내 ETF 가운데 삼성전자 비중이 가장 높은 상품은 무엇인가요?"],
-  ["G-040", "엔비디아를 편입한 해외 ETF를 알려줘"],
-  ["G-041", "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?"],
-  ["G-042", "판매중인 국내 ETF와 판매중인 공모펀드는 각각 몇 개인가요?"],
-  ["G-043", "판매중인 국내 ETF와 공모펀드를 통틀어 위험등급 1등급으로 분류된 상품은 모두 몇 개인가요?"],
-  ["G-044", "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?"],
-  ["G-045", "KODEX 200의 2027년 말 예상 순자산 규모는 얼마인가요?"],
-  ["G-046", "판매중인 공모펀드 중 내년에 수익률이 가장 높을 것으로 예상되는 펀드는 무엇인가요?"],
-  ["G-047", "구매 가능한 원화채권의 6개월 뒤 예상 매수수익률을 알려줘"],
-  ["G-048", "KODEX 우주항공레버리지 ETF의 순자산을 알려줘"],
-  ["G-049", "미래에셋탄소중립그린뉴딜증권자투자신탁의 최근 1년 수익률을 알려줘"],
-  ["G-050", "신용등급이 A1인 원화채권은 몇 개인가요?"],
-  ["G-051", "위험등급 0등급인 공모펀드를 알려줘"],
-  ["G-052", "쿠팡을 편입한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
-  ["G-053", "야놀자를 보유한 국내 ETF가 있나요?"],
-  ["G-054", "TIGER 미국양자컴퓨팅TOP10의 총보수를 알려줘"],
-];
+/* Eval set.  `ko` is a snapshot of data/eval/groundtruth.jsonl (question_id + question), embedded on
+   purpose: the grading server must not grow a route that reads evaluation files at runtime.
+   `en` mirrors each question with the same ID, so results still line up with that ground truth. */
+const SET_GT = {
+  en: [
+    ["G-001", "How many KRW bonds currently available for purchase have a credit rating of AA- or higher?"],
+    ["G-002", "How many KRW bonds available for purchase are rated AAA and mature in 2027?"],
+    ["G-003", "Among bonds that actually have a purchase yield on record, which one has the highest after-tax yield? Give its name and yield."],
+    ["G-004", "Name the 3 domestically listed ETFs with the largest net assets."],
+    ["G-005", "How many domestically listed ETFs are managed by 삼성자산운용 (Samsung Asset Management)?"],
+    ["G-006", "How many domestic ETFs have risk grade 1 and net assets of at least KRW 1 trillion?"],
+    ["G-007", "Which equity ETFs listed on US exchanges have the lowest total expense ratio? List all of them."],
+    ["G-008", "What is the total expense ratio of the VanEck China Semiconductor ETF, in percent?"],
+    ["G-009", "Name the 3 overseas ETFs with the largest assets under management (AUM)."],
+    ["G-010", "Which public equity fund currently on sale has the highest 1-year return?"],
+    ["G-011", "In how many share classes is 국민성장펀드 (National Growth Fund) sold?"],
+    ["G-012", "How many currency-hedged overseas bond public funds are currently on sale?"],
+    ["G-013", "Across domestic ETFs and public funds combined, which 3 products have the highest 1-year return?"],
+    ["G-014", "How many domestic ETFs hold 에코프로비엠 (EcoPro BM)?"],
+    ["G-015", "Which domestic ETFs hold 삼성전자 (Samsung Electronics)? Top 3 by net assets."],
+    ["G-016", "Find bonds with a credit rating of AAAA."],
+    ["G-017", "Show me the domestic ETFs with risk grade 8."],
+    ["G-018", "Are there any investment products related to Kimi?"],
+    ["G-019", "What is the expected return of the TIGER 반도체 ETF next year?"],
+    ["G-020", "Which public funds hold 삼성전자 (Samsung Electronics)?"],
+    ["G-021", "Tell me about the KODEX AI로봇 ETF."],
+    ["G-022", "What are the net assets of the TIGER 양자컴퓨팅커버드콜 ETF?"],
+    ["G-023", "How many overseas ETFs use an inverse or short strategy?"],
+    ["G-024", "Among KRW bonds available for purchase, how many are rated A0, counted as distinct issues (by issue code)?"],
+    ["G-025", "How many share classes of 미래에셋미국배당커버드콜액티브증권자투자신탁(주식) are on sale, counting the currency-hedged (H) and unhedged (UH) versions together?"],
+    ["G-026", "How many domestic ETFs pay distributions every month?"],
+    ["G-027", "How many public funds currently on sale have risk grade 1?"],
+    ["G-028", "Which KRW bond available for purchase has the lowest coupon rate? Leave out bonds listed with a 0% coupon, since that figure has no rate behind it."],
+    ["G-029", "Which 3 domestic ETFs have the lowest total expense ratio? Leave out ETFs whose expense ratio is 0 or missing."],
+    ["G-030", "Name the 3 domestic ETFs with the highest distribution yield."],
+    ["G-031", "Name the 3 public funds currently on sale with the largest net assets."],
+    ["G-032", "Looking only at bond ETFs among overseas ETFs, which 3 have the largest AUM?"],
+    ["G-033", "Which asset manager runs TIGER 미국나스닥100?"],
+    ["G-034", "Who is the manager of Invesco QQQ Trust, Series 1?"],
+    ["G-035", "What is the credit rating of the bond 한국도로공사고속도로건설채권 634(변)?"],
+    ["G-036", "What is the benchmark index of 신한글로벌탄소중립솔루션증권투자신탁(H)[주식](종류A-e)?"],
+    ["G-037", "How many domestic ETFs hold SK하이닉스 (SK hynix)?"],
+    ["G-038", "Which 3 domestic ETFs holding 두산에너빌리티 (Doosan Enerbility) have the largest net assets?"],
+    ["G-039", "Which domestic ETF has the highest weight in 삼성전자 (Samsung Electronics)?"],
+    ["G-040", "Which overseas ETFs hold 엔비디아 (NVIDIA)?"],
+    ["G-041", "Among public funds holding SK하이닉스 (SK hynix), which one has the largest net assets?"],
+    ["G-042", "How many domestic ETFs and how many public funds are currently on sale?"],
+    ["G-043", "Across domestic ETFs and public funds currently on sale, how many products in total are classified as risk grade 1?"],
+    ["G-044", "Counting only products currently on sale, how many domestic ETFs invest in bonds, and how many bond-type public funds are there?"],
+    ["G-045", "What will the net assets of KODEX 200 be at the end of 2027?"],
+    ["G-046", "Which public fund currently on sale is expected to have the highest return next year?"],
+    ["G-047", "What will the purchase yield of the KRW bonds available for purchase be 6 months from now?"],
+    ["G-048", "What are the net assets of the KODEX 우주항공레버리지 ETF?"],
+    ["G-049", "What was the most recent 1-year return of the fund 미래에셋탄소중립그린뉴딜증권자투자신탁?"],
+    ["G-050", "How many KRW bonds have a credit rating of A1?"],
+    ["G-051", "Show me the public funds with risk grade 0."],
+    ["G-052", "Which 3 domestic ETFs holding 쿠팡 (Coupang) have the largest net assets?"],
+    ["G-053", "Are there any domestic ETFs that hold 야놀자 (Yanolja)?"],
+    ["G-054", "What is the total expense ratio of TIGER 미국양자컴퓨팅TOP10?"],
+  ],
+  ko: [
+    ["G-001", "현재 구매 가능한 원화채권 중 신용등급 AA- 이상인 종목은 몇 개인가요?"],
+    ["G-002", "구매 가능한 원화채권 중 신용등급 AAA이고 만기가 2027년인 종목 수를 알려줘"],
+    ["G-003", "매수수익률이 실제로 수록된 채권 중 세후 운용수익률이 가장 높은 종목의 이름과 수익률은?"],
+    ["G-004", "국내 상장 ETF 중 순자산이 가장 큰 상품 3개의 이름을 알려줘"],
+    ["G-005", "삼성자산운용이 운용하는 국내 상장 ETF는 몇 개인가요?"],
+    ["G-006", "국내 ETF 중 위험등급 1등급이면서 순자산 1조원 이상인 상품의 개수는?"],
+    ["G-007", "미국 증시에 상장된 주식형 ETF 중 총보수가 가장 낮은 상품을 모두 알려줘"],
+    ["G-008", "VanEck China Semiconductor ETF의 총보수는 몇 퍼센트인가요?"],
+    ["G-009", "해외 ETF 중 운용규모(AUM)가 가장 큰 상품 3개의 이름을 알려줘"],
+    ["G-010", "판매중인 공모 주식형 펀드 중 1년 수익률이 가장 높은 펀드의 이름은?"],
+    ["G-011", "국민성장펀드는 몇 개의 클래스로 판매되고 있나요?"],
+    ["G-012", "환헤지형 해외 채권형 공모펀드 중 판매중인 상품은 몇 개인가요?"],
+    ["G-013", "국내 ETF와 공모펀드를 합쳐서 1년 수익률이 가장 높은 상품 3개를 알려줘"],
+    ["G-014", "에코프로비엠을 편입한 국내 ETF는 몇 개인가요?"],
+    ["G-015", "삼성전자를 보유한 국내 ETF 중 순자산이 가장 큰 상품 3개를 알려줘"],
+    ["G-016", "신용등급 AAAA인 채권을 찾아줘"],
+    ["G-017", "위험등급 8등급인 국내 ETF를 알려줘"],
+    ["G-018", "Kimi 관련 투자상품이 있나요?"],
+    ["G-019", "TIGER 반도체 ETF의 내년 예상 수익률을 알려줘"],
+    ["G-020", "삼성전자를 보유한 공모펀드를 알려줘"],
+    ["G-021", "KODEX AI로봇 ETF 정보 알려줘"],
+    ["G-022", "TIGER 양자컴퓨팅커버드콜 ETF의 순자산을 알려줘"],
+    ["G-023", "해외 ETF 중 인버스나 숏 전략을 사용하는 상품은 몇 개인가요?"],
+    ["G-024", "구매 가능한 원화채권 가운데 신용등급이 A0인 채권은 서로 다른 종목(종목코드) 기준으로 몇 개인가요?"],
+    ["G-025", "미래에셋미국배당커버드콜액티브증권자투자신탁(주식)은 환헤지형(H)과 환노출형(UH)을 합쳐 몇 개 클래스가 판매되고 있나요?"],
+    ["G-026", "국내 ETF 중 분배금을 매월 지급하는 월배당 상품은 몇 개인가요?"],
+    ["G-027", "판매중인 공모펀드 중 위험등급이 1등급인 상품은 몇 개인가요?"],
+    ["G-028", "구매 가능한 원화채권 중 표면금리가 가장 낮은 종목의 이름은 무엇인가요? 표면금리가 0%로 기재된 종목은 금리 근거가 없는 것이므로 제외하고 알려주세요."],
+    ["G-029", "국내 ETF 중 총보수가 가장 낮은 상품 3개를 알려줘. 총보수가 0이거나 기재되지 않은 상품은 제외해줘."],
+    ["G-030", "국내 ETF 중 분배금 수익률(분배율)이 가장 높은 상품 3개의 이름을 알려줘"],
+    ["G-031", "판매중인 공모펀드 중 순자산 규모가 가장 큰 상품 3개의 이름을 알려줘"],
+    ["G-032", "해외 ETF 중 채권형 상품만 놓고 볼 때 운용규모(AUM)가 가장 큰 3개는 무엇인가요?"],
+    ["G-033", "TIGER 미국나스닥100을 운용하는 자산운용사는 어디인가요?"],
+    ["G-034", "Invesco QQQ Trust, Series 1의 운용사 이름을 알려줘"],
+    ["G-035", "한국도로공사고속도로건설채권 634(변)의 신용등급은 무엇인가요?"],
+    ["G-036", "신한글로벌탄소중립솔루션증권투자신탁(H)[주식](종류A-e)의 벤치마크 지수는 무엇인가요?"],
+    ["G-037", "SK하이닉스를 편입하고 있는 국내 ETF는 몇 개인가요?"],
+    ["G-038", "두산에너빌리티를 보유한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
+    ["G-039", "국내 ETF 가운데 삼성전자 비중이 가장 높은 상품은 무엇인가요?"],
+    ["G-040", "엔비디아를 편입한 해외 ETF를 알려줘"],
+    ["G-041", "SK하이닉스를 담고 있는 공모펀드 중 순자산이 가장 큰 상품은 무엇인가요?"],
+    ["G-042", "판매중인 국내 ETF와 판매중인 공모펀드는 각각 몇 개인가요?"],
+    ["G-043", "판매중인 국내 ETF와 공모펀드를 통틀어 위험등급 1등급으로 분류된 상품은 모두 몇 개인가요?"],
+    ["G-044", "판매중인 상품 기준으로 채권에 투자하는 국내 ETF와 채권형 공모펀드는 각각 몇 개인가요?"],
+    ["G-045", "KODEX 200의 2027년 말 예상 순자산 규모는 얼마인가요?"],
+    ["G-046", "판매중인 공모펀드 중 내년에 수익률이 가장 높을 것으로 예상되는 펀드는 무엇인가요?"],
+    ["G-047", "구매 가능한 원화채권의 6개월 뒤 예상 매수수익률을 알려줘"],
+    ["G-048", "KODEX 우주항공레버리지 ETF의 순자산을 알려줘"],
+    ["G-049", "미래에셋탄소중립그린뉴딜증권자투자신탁의 최근 1년 수익률을 알려줘"],
+    ["G-050", "신용등급이 A1인 원화채권은 몇 개인가요?"],
+    ["G-051", "위험등급 0등급인 공모펀드를 알려줘"],
+    ["G-052", "쿠팡을 편입한 국내 ETF 중 순자산이 가장 큰 3개를 알려줘"],
+    ["G-053", "야놀자를 보유한 국내 ETF가 있나요?"],
+    ["G-054", "TIGER 미국양자컴퓨팅TOP10의 총보수를 알려줘"],
+  ],
+};
+
+/* Shortens a pill label, preferring to cut at a space so words are not split. */
+function pillText(text, max) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max), sp = cut.lastIndexOf(" ");
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut) + "…";
+}
 
 const pills = $("#samples");
 function renderSamples() {
   pills.innerHTML = "";
-  SAMPLES.forEach(([tag, text]) => {
+  SAMPLES[LANG].forEach(([tag, text]) => {
     const b = document.createElement("button");
     b.className = "pill";
-    b.textContent = T(tag) + " · " + (text.length > 32 ? text.slice(0, 32) + "…" : text);
+    b.textContent = T(tag) + " · " + pillText(text, PILL_MAX[LANG]);
     b.title = text;
     b.onclick = () => { $("#q").value = text; };
     pills.appendChild(b);
@@ -476,7 +664,7 @@ let es = null, t0 = 0, timer = null, nTools = 0, nErr = 0, lastRound = 0;
 function li(kind, at, html) {
   const el = document.createElement("li");
   el.className = "k-" + kind;
-  el.innerHTML = `<div class="ev"><span class="at">${at == null ? "" : fmt(at)}</span><div style="flex:1">${html}</div></div>`;
+  el.innerHTML = `<div class="ev"><span class="at">${at == null ? "" : tspan("sec", at)}</span><div style="flex:1">${html}</div></div>`;
   $("#tl").appendChild(el);
   return el;
 }
@@ -488,7 +676,7 @@ function argsHtml(name, args) {
   const parts = Object.entries(args)
     .filter(([k]) => k !== "purpose")
     .map(([k, v]) => `${esc(k)}=${esc(typeof v === "object" ? JSON.stringify(v) : v)}`);
-  const purpose = args.purpose ? `<div class="meta2">${LANG === "en" ? "intent" : "의도"}: ${esc(args.purpose)}</div>` : "";
+  const purpose = args.purpose ? `<div class="meta2">${tspan("intent")}: ${esc(args.purpose)}</div>` : "";
   return `<pre>${parts.join("  ·  ")}</pre>${purpose}`;
 }
 
@@ -496,39 +684,40 @@ function onEvent(e) {
   const d = JSON.parse(e.data);
   const at = d.elapsed;
   if (d.type === "start") {
-    $("#phase").textContent = T("phase_pre");
+    setT($("#phase"), "phase_pre");
   } else if (d.type === "pre_analysis") {
     const bits = [];
-    if (d.mentions && d.mentions.length) bits.push(`${T("pre_mentions")} <b>${esc(d.mentions.join(", "))}</b>`);
-    if (d.unresolved && d.unresolved.length) bits.push(`<span class="warnline">${T("pre_unresolved")} ${esc(d.unresolved.join(", "))}</span>`);
-    if (d.invalid && d.invalid.length) bits.push(`<span class="warnline">${T("pre_invalid")} ${esc(d.invalid.join(", "))}</span>`);
+    if (d.mentions && d.mentions.length) bits.push(`${tspan("pre_mentions")} <b>${esc(d.mentions.join(", "))}</b>`);
+    if (d.unresolved && d.unresolved.length) bits.push(`<span class="warnline">${tspan("pre_unresolved")} ${esc(d.unresolved.join(", "))}</span>`);
+    if (d.invalid && d.invalid.length) bits.push(`<span class="warnline">${tspan("pre_invalid")} ${esc(d.invalid.join(", "))}</span>`);
     li("pre", at,
-      `<b>${T("pre_title")}</b> — ${T("pre_desc")}` +
-      (bits.length ? `<div class="meta2">${bits.join(" · ")}</div>` : `<div class="meta2">${T("pre_none")}</div>`) +
-      `<details><summary>${T("sum_prompt")}</summary><pre>${esc(d.text)}</pre></details>`);
-    $("#phase").textContent = T("phase_llm");
+      `<b>${tspan("pre_title")}</b> — ${tspan("pre_desc")}` +
+      (bits.length ? `<div class="meta2">${bits.join(" · ")}</div>` : `<div class="meta2">${tspan("pre_none")}</div>`) +
+      `<details><summary>${tspan("sum_prompt")}</summary><pre>${esc(d.text)}</pre></details>`);
+    setT($("#phase"), "phase_llm");
   } else if (d.type === "tool_call") {
     nTools++;
-    if (d.round !== lastRound) { lastRound = d.round; li("round", at, `<b>${T("round")(d.round)}</b>`); }
+    if (d.round !== lastRound) { lastRound = d.round; li("round", at, `<b>${tspan("round", d.round)}</b>`); }
     li("tool", at, `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
-        <span class="badge">${T("b_called")}</span>${argsHtml(d.name, d.args)}</div>`);
-    $("#phase").textContent = T("phase_tool")(d.name);
+        <span class="badge">${tspan("b_called")}</span>${argsHtml(d.name, d.args)}</div>`);
+    setT($("#phase"), "phase_tool", d.name);
   } else if (d.type === "tool_result") {
     if (!d.ok) nErr++;
     const ev = d.evidence;
-    const meta = ev ? `<div class="meta2">${T("evidence")}: ${esc(ev.kind)}${ev.table ? " · " + esc(ev.table) : ""}${ev.base_date ? " · " + (LANG === "en" ? "as of " : "기준일 ") + esc(ev.base_date) : ""}${ev.row_count != null ? " · " + ev.row_count + (LANG === "en" ? " rows" : "건") : ""}</div>` : "";
+    const meta = ev ? `<div class="meta2">${tspan("evidence")}: ${esc(ev.kind)}${ev.table ? " · " + esc(ev.table) : ""}${ev.base_date ? " · " + tspan("ev_asof", ev.base_date) : ""}${ev.row_count != null ? " · " + tspan("ev_rows", ev.row_count) : ""}</div>` : "";
     li(d.ok ? "tool" : "err", at,
       `<div class="tool"><span class="tname t-${esc(d.name)}">${esc(d.name)}</span>
-        <span class="badge ${d.ok ? "" : "bad"}">${d.ok ? T("b_result") : T("b_error")}</span>
-        <span class="badge">${d.seconds != null ? d.seconds.toFixed(2) + "s" : ""}</span>
+        <span class="badge ${d.ok ? "" : "bad"}">${d.ok ? tspan("b_result") : tspan("b_error")}</span>
+        <span class="badge">${d.seconds != null ? tspan("sec2", d.seconds) : ""}</span>
         <pre class="out">${esc(d.content)}</pre>${meta}</div>`);
-    $("#phase").textContent = T("phase_llm");
+    setT($("#phase"), "phase_llm");
   } else if (d.type === "step") {
     const t = d.text || "";
-    // tool call/result lines are already rendered richly above; keep the rest
-    if (/^라운드 \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
-    const fix = /보정|명시|경고/.test(t);
-    const err = /오류|초과|거부|실패/.test(t);
+    // tool call/result lines are already rendered richly above; keep the rest.
+    // These patterns match the server's own step text (data, not interface text) — do not translate.
+    if (/^(?:라운드|Round) \d+: (sql_query|graph_|search_|resolve_|table_info)/.test(t)) return;
+    const fix = /보정|명시|경고|corrected|stated|warning/i.test(t);
+    const err = /오류|초과|거부|실패|error|timed out|exceeded|rejected|failed|refused/i.test(t);
     li(err ? "err" : (fix ? "fix" : "step"), at, `<span class="${err ? "" : (fix ? "warnline" : "")}">${esc(t)}</span>`);
   } else if (d.type === "done") {
     finish(d);
@@ -536,7 +725,7 @@ function onEvent(e) {
     li("err", at, `<span style="color:var(--bad)">${esc(d.message)}</span>`);
     stop("err");
   }
-  $("#counts").textContent = T("tools_n")(nTools, nErr);
+  setT($("#counts"), "tools_n", nTools, nErr);
   window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
 }
 
@@ -544,18 +733,18 @@ function finish(d) {
   const r = d.response || {};
   $("#out").innerHTML = `
     <div class="card">
-      <h2>${T("h_answer")}</h2>
+      <h2>${tspan("h_answer")}</h2>
       <div><span class="status s-${esc(d.status)}">${esc(d.status)}</span>
-           <span class="badge">${fmt(d.elapsed)}</span></div>
+           <span class="badge">${tspan("sec", d.elapsed)}</span></div>
       <div class="answer" style="margin-top:9px">${esc(r.answer)}</div>
     </div>
     <div class="card">
-      <h2>${T("h_context")}</h2>
-      <pre>${esc(r.retrieved_context || T("no_context"))}</pre>
+      <h2>${tspan("h_context")}</h2>
+      <pre>${r.retrieved_context ? esc(r.retrieved_context) : tspan("no_context")}</pre>
     </div>
     <div class="card">
-      <h2>${T("h_raw")}</h2>
-      <details><summary>${T("sum_expand")}</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
+      <h2>${tspan("h_raw")}</h2>
+      <details><summary>${tspan("sum_expand")}</summary><pre>${esc(JSON.stringify(r, null, 2))}</pre></details>
     </div>`;
   stop("done");
 }
@@ -564,7 +753,7 @@ function stop(state) {
   if (es) { es.close(); es = null; }
   clearInterval(timer);
   $("#dot").className = "dot " + (state || "done");
-  $("#phase").textContent = state === "err" ? T("stopped") : T("finished");
+  setT($("#phase"), state === "err" ? "stopped" : "finished");
   $("#go").disabled = false;
   $("#stop").disabled = true;
 }
@@ -576,14 +765,14 @@ function ask() {
   $("#go").disabled = true; $("#stop").disabled = false;
   $("#tl").innerHTML = ""; $("#out").innerHTML = "";
   $("#livecard").classList.remove("hide"); $("#tlcard").classList.remove("hide");
-  $("#dot").className = "dot run"; $("#phase").textContent = T("phase_conn");
+  $("#dot").className = "dot run"; setT($("#phase"), "phase_conn");
   nTools = 0; nErr = 0; lastRound = 0; t0 = performance.now();
   clearInterval(timer);
-  timer = setInterval(() => { $("#clock").textContent = fmt((performance.now() - t0) / 1000); }, 100);
+  timer = setInterval(() => { setT($("#clock"), "sec", (performance.now() - t0) / 1000); }, 100);
 
   es = new EventSource(`/answer/stream?question_id=${encodeURIComponent(qid)}&question=${encodeURIComponent(q)}`);
   es.onmessage = onEvent;
-  es.onerror = () => { if (es) { li("err", null, T("stream_lost")); stop("err"); } };
+  es.onerror = () => { if (es) { li("err", null, tspan("stream_lost")); stop("err"); } };
 }
 
 $("#go").onclick = ask;
@@ -605,8 +794,8 @@ function setList(rows) {
   $("#bq").value = rows.map(([id, q]) => `${id} | ${q}`).join("\n");
   renderBatchCount();
 }
-$("#load-gt").onclick = () => setList(SET_GT);
-$("#load-p12").onclick = () => setList(SET_P12);
+$("#load-gt").onclick = () => setList(SET_GT[LANG]);
+$("#load-p12").onclick = () => setList(SET_P12[LANG]);
 $("#clear-list").onclick = () => { $("#bq").value = ""; renderBatchCount(); };
 $("#bq").addEventListener("input", renderBatchCount);
 
@@ -625,14 +814,14 @@ function parseList() {
 }
 
 function renderBatchCount() {
-  $("#bcount").textContent = T("n_items")(parseList().length);
+  setT($("#bcount"), "n_items", parseList().length);
 }
 
 /* Reads one /answer/stream response to completion.  Rejects only on network/abort. */
 async function runOne(item, signal) {
   const url = `/answer/stream?question_id=${encodeURIComponent(item.id)}&question=${encodeURIComponent(item.q)}`;
   const res = await fetch(url, { signal, headers: { Accept: "text/event-stream" } });
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  if (!res.ok) throw new Error(T("err_http", res.status));
   const reader = res.body.getReader();
   const dec = new TextDecoder("utf-8");
   let buf = "", tools = 0, toolErrors = 0, status = null, response = null, streamError = null;
@@ -655,7 +844,7 @@ async function runOne(item, signal) {
         if (d.type === "tool_call") tools++;
         else if (d.type === "tool_result") { if (!d.ok) toolErrors++; }
         else if (d.type === "done") { status = d.status; response = d.response || null; }
-        else if (d.type === "error") streamError = d.message || "stream error";
+        else if (d.type === "error") streamError = d.message || T("err_stream");
       }
     }
   } finally {
@@ -687,12 +876,12 @@ async function runBatch() {
     if (batchStopped) break;
     const it = items[i], row = RESULTS[i];
     row.status = "running";
-    $("#bphase").textContent = T("running");
-    $("#bnow").textContent = T("of")(i + 1, items.length) + " · " + it.id;
+    setT($("#bphase"), "running");
+    $("#bnow").innerHTML = tspan("of", i + 1, items.length) + " · " + esc(it.id);
     $("#bfill").style.width = (i / items.length * 100).toFixed(1) + "%";
     bt0 = performance.now();
     clearInterval(btimer);
-    btimer = setInterval(() => { $("#bclock").textContent = fmt((performance.now() - bt0) / 1000); }, 100);
+    btimer = setInterval(() => { setT($("#bclock"), "sec", (performance.now() - bt0) / 1000); }, 100);
     renderTable();
 
     batchAbort = new AbortController();
@@ -708,7 +897,7 @@ async function runBatch() {
         row.think_trace = r.response.think_trace || "";
       }
       if (r.status) row.status = r.status;
-      else { row.status = "error"; row.error = r.streamError || "no done event"; }
+      else { row.status = "error"; row.error = r.streamError || T("err_no_done"); }
       if (r.streamError && r.status) row.error = r.streamError;
     } catch (err) {
       // One failure must never stop the run.
@@ -719,7 +908,7 @@ async function runBatch() {
       batchAbort = null;
     }
     clearInterval(btimer);
-    $("#bclock").textContent = "";
+    clearT($("#bclock"));
     renderStats(); renderTable();
     // Sequential by design: a short gap keeps us clear of the CLOVA rate limit.
     if (!batchStopped && i < items.length - 1) await new Promise(r => setTimeout(r, 400));
@@ -728,11 +917,11 @@ async function runBatch() {
   if (batchStopped) RESULTS.forEach(r => { if (r.status === "pending" || r.status === "running") r.status = "skipped"; });
   $("#bfill").style.width = "100%";
   $("#bdot").className = "dot " + (batchStopped ? "err" : "done");
-  $("#bphase").textContent = batchStopped ? T("stopped") : T("finished");
-  $("#bnow").textContent = T("of")(RESULTS.filter(r => r.status !== "pending" && r.status !== "skipped").length, RESULTS.length);
+  setT($("#bphase"), batchStopped ? "stopped" : "finished");
+  $("#bnow").innerHTML = tspan("of", RESULTS.filter(r => r.status !== "pending" && r.status !== "skipped").length, RESULTS.length);
   $("#brun").disabled = false; $("#bstop").disabled = true;
   batchRunning = false;
-  clearInterval(btimer); $("#bclock").textContent = "";
+  clearInterval(btimer); clearT($("#bclock"));
   renderStats(); renderTable();
 }
 
@@ -758,16 +947,18 @@ function renderStats() {
   const dist = {};
   RESULTS.forEach(r => { dist[r.status] = (dist[r.status] || 0) + 1; });
 
+  // label and value are markup: tspan() for interface text, esc() for everything else
   const cell = (label, value, alarm) =>
-    `<div class="stat${alarm ? " alarm" : ""}"><b>${esc(value)}</b><span>${esc(label)}</span></div>`;
+    `<div class="stat${alarm ? " alarm" : ""}"><b>${value}</b><span>${label}</span></div>`;
   let html =
-    cell(T("st_total"), RESULTS.length) +
-    cell(T("st_done"), done.length) +
-    cell(T("st_avg"), timed.length ? fmt(avg) : "—") +
-    cell(T("st_max"), timed.length ? fmt(max) : "—") +
-    cell(T("st_over60"), over, over > 0);
+    cell(tspan("st_total"), esc(RESULTS.length)) +
+    cell(tspan("st_done"), esc(done.length)) +
+    cell(tspan("st_avg"), timed.length ? tspan("sec", avg) : "—") +
+    cell(tspan("st_max"), timed.length ? tspan("sec", max) : "—") +
+    cell(tspan("st_over60"), esc(over), over > 0);
+  // status values come from the API and stay as they are
   ["answered", "cannot_confirm", "clarify", "error", "skipped", "pending"].forEach(s => {
-    if (dist[s]) html += cell(s, dist[s]);
+    if (dist[s]) html += cell(esc(s), esc(dist[s]));
   });
   $("#bstats").innerHTML = html;
 }
@@ -784,18 +975,18 @@ function renderTable() {
     tr.innerHTML =
       `<td class="qid">${esc(r.question_id)}</td>` +
       `<td class="qtext"><span class="caret">▸</span> ${esc(clip(r.question, 70))}</td>` +
-      `<td class="num${slow ? " slow" : ""}">${typeof r.seconds === "number" ? fmt(r.seconds) : "—"}</td>` +
+      `<td class="num${slow ? " slow" : ""}">${typeof r.seconds === "number" ? tspan("sec", r.seconds) : "—"}</td>` +
       `<td><span class="status s-${esc(r.status)}">${esc(r.status)}</span></td>` +
       `<td class="num">${r.tool_calls || 0}${r.tool_errors ? ` <span class="badge bad">${r.tool_errors}</span>` : ""}</td>` +
-      `<td class="atext">${esc(clip(r.error || r.answer, 90))}</td>`;
+      `<td class="atext">${r.error ? errHtml(r.error, 90) : esc(clip(r.answer, 90))}</td>`;
     const det = document.createElement("tr");
     det.className = "det hide";
     det.innerHTML = `<td colspan="6">
-        <h3>${T("th_question")}</h3><pre>${esc(r.question)}</pre>
-        ${r.error ? `<h3>error</h3><pre>${esc(r.error)}</pre>` : ""}
-        <h3>${T("d_answer")}</h3><pre>${esc(r.answer || T("no_context"))}</pre>
-        <h3>${T("d_context")}</h3><pre class="out">${esc(r.retrieved_context || T("no_context"))}</pre>
-        <h3>${T("d_trace")}</h3><pre class="out">${esc(r.think_trace || T("no_context"))}</pre>
+        <h3>${tspan("th_question")}</h3><pre>${esc(r.question)}</pre>
+        ${r.error ? `<h3>${tspan("d_error")}</h3><pre>${errHtml(r.error)}</pre>` : ""}
+        <h3>${tspan("d_answer")}</h3><pre>${r.answer ? esc(r.answer) : tspan("no_context")}</pre>
+        <h3>${tspan("d_context")}</h3><pre class="out">${r.retrieved_context ? esc(r.retrieved_context) : tspan("no_context")}</pre>
+        <h3>${tspan("d_trace")}</h3><pre class="out">${r.think_trace ? esc(r.think_trace) : tspan("no_context")}</pre>
       </td>`;
     tr.onclick = () => {
       const open = det.classList.toggle("hide");
@@ -851,7 +1042,8 @@ $("#exp-csv").onclick = () => {
 };
 
 /* ─────────────────────────── boot ─────────────────────────── */
-$("#lang-ko").onclick = () => applyLang("ko");
-$("#lang-en").onclick = () => applyLang("en");
-applyLang(lsGet("finagent.lang") === "en" ? "en" : "ko");
+// Only an explicit click is remembered; the page works the same when storage is unavailable.
+$("#lang-en").onclick = () => { applyLang("en"); lsSet(LANG_KEY, "en"); };
+$("#lang-ko").onclick = () => { applyLang("ko"); lsSet(LANG_KEY, "ko"); };
+applyLang(lsGet(LANG_KEY) === "ko" ? "ko" : DEFAULT_LANG);
 </script>

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 403,
+    "message": "The caller does not have permission to use the google_search tool. Grounding with Google Search requires a billing-enabled project.",
+    "status": "PERMISSION_DENIED"
+  }
+}

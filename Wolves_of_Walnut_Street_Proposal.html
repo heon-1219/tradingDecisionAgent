@@ -1,0 +1,1500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Financial Product Agent Technical Proposal — Wolves of Walnut Street</title>
+<style>
+/* ===================== Base ===================== */
+:root{
+  --ink:#16202e; --muted:#5c6b80; --line:#d3dae4; --hair:#e6ebf1;
+  --key:#1f4e79; --key-bg:#e8f0f9;
+  --good:#2e7d5b; --good-bg:#e2f0e9;
+  --warn:#b5651d; --warn-bg:#f8ece0;
+  --bad:#a32d2d;  --bad-bg:#f7e4e4;
+  --neut:#7a8699; --neut-bg:#eef1f5;
+  --tint:#f6f8fb;
+}
+*{box-sizing:border-box}
+html{-webkit-print-color-adjust:exact; print-color-adjust:exact;}
+body{
+  margin:0 auto; padding:14mm 12mm 20mm; max-width:210mm; background:#fff; color:var(--ink);
+  /* Latin face first; the Korean faces remain as fallbacks for the Korean data values kept in the text */
+  font-family:"Segoe UI","Helvetica Neue",Arial,"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR","Nanum Gothic",
+              sans-serif;
+  font-size:10.4pt; line-height:1.62; letter-spacing:0;
+  word-break:keep-all; overflow-wrap:break-word;
+}
+p{margin:0 0 .62em}
+strong{font-weight:700}
+em{font-style:normal; background:linear-gradient(transparent 62%, #ffe9a8 62%); font-weight:600;}
+code{font-family:"Consolas","D2Coding","Menlo",monospace; font-size:.88em; background:var(--tint);
+     border:1px solid var(--hair); border-radius:3px; padding:0 .28em;}
+a{color:var(--key); text-decoration:none}
+hr{border:0; border-top:1px solid var(--line); margin:1.4em 0}
+
+/* ===================== Headings ===================== */
+h1,h2,h3,h4{ page-break-after:avoid; break-after:avoid; margin:0 0 .5em; line-height:1.35; }
+h2{
+  font-size:17pt; letter-spacing:-0.02em; margin:0 0 .55em;
+  padding:0 0 6px; border-bottom:2.5px solid var(--key); color:var(--key);
+}
+h2 .no{ display:inline-block; min-width:2.1em; color:var(--ink); }
+h3{ font-size:12.6pt; margin:1.5em 0 .5em; color:var(--ink);
+    padding-left:9px; border-left:4px solid var(--key); }
+h4{ font-size:11pt; margin:1.2em 0 .35em; color:var(--key); }
+.lead{ font-size:11pt; color:var(--ink); background:var(--tint);
+       border-left:3px solid var(--key); padding:10px 14px; margin:0 0 1.1em; }
+
+/* ===================== Tables ===================== */
+table{ width:100%; border-collapse:collapse; margin:.5em 0 .3em; font-size:9.3pt; line-height:1.45;
+       page-break-inside:avoid; break-inside:avoid; }
+caption{ caption-side:top; text-align:left; font-size:9.4pt; font-weight:700; color:var(--key);
+         padding:0 0 5px; }
+th,td{ border:1px solid var(--line); padding:5px 7px; vertical-align:top; text-align:left; }
+thead th{ background:var(--key-bg); color:var(--key); font-weight:700; white-space:nowrap; }
+/* English row headers are longer than the Korean ones, so they are allowed to wrap */
+tbody th{ background:var(--tint); font-weight:600; white-space:normal; }
+td.num,th.num{ text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+td.num.wrap{ white-space:normal; }
+td.c,th.c{ text-align:center; white-space:nowrap; }
+tr.tot td,tr.tot th{ background:var(--tint); font-weight:700; }
+.ok{ color:var(--good); font-weight:700 }
+.no{ color:var(--bad); font-weight:700 }
+
+/* ===================== Figures ===================== */
+figure{ margin:1.1em 0 1.2em; padding:0; page-break-inside:avoid; break-inside:avoid; }
+figure svg{ width:100%; height:auto; display:block; border:1px solid var(--line); background:#fff; }
+figcaption{ font-size:9pt; color:var(--muted); padding:6px 2px 0; line-height:1.5; }
+figcaption b{ color:var(--key); }
+svg text{ font-family:"Segoe UI","Helvetica Neue",Arial,"Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+          fill:var(--ink); font-size:12px; }
+svg .t-ttl{ font-size:15px; font-weight:700; fill:var(--key); }
+svg .t-lab{ font-size:12.5px; font-weight:700; }
+svg .t-sub{ font-size:11px; fill:var(--muted); }
+svg .t-num{ font-size:13px; font-weight:700; fill:var(--key); }
+svg .t-tiny{ font-size:10px; fill:var(--muted); }
+svg .t-w{ fill:#fff; font-weight:700; }
+svg .bx{ fill:#fff; stroke:var(--line); stroke-width:1.2; }
+svg .bx-k{ fill:var(--key-bg); stroke:var(--key); stroke-width:1.4; }
+svg .bx-g{ fill:var(--good-bg); stroke:var(--good); stroke-width:1.3; }
+svg .bx-w{ fill:var(--warn-bg); stroke:var(--warn); stroke-width:1.3; }
+svg .bx-b{ fill:var(--bad-bg); stroke:var(--bad); stroke-width:1.3; }
+svg .bx-n{ fill:var(--neut-bg); stroke:var(--neut); stroke-width:1.2; }
+svg .bx-t{ fill:var(--tint); stroke:var(--line); stroke-width:1.1; }
+svg .f-k{ fill:var(--key) } svg .f-g{ fill:var(--good) } svg .f-w{ fill:var(--warn) }
+svg .f-n{ fill:var(--neut) } svg .f-b{ fill:var(--bad) }
+svg .ln{ stroke:var(--neut); stroke-width:1.4; fill:none; }
+svg .ln-k{ stroke:var(--key); stroke-width:1.6; fill:none; }
+svg .ln-d{ stroke:var(--neut); stroke-width:1.2; fill:none; stroke-dasharray:4 3; }
+svg .grid{ stroke:var(--hair); stroke-width:1; }
+
+/* ===================== Boxes ===================== */
+.box{ border:1px solid var(--line); border-left:4px solid var(--key); background:var(--tint);
+      padding:10px 14px; margin:.9em 0; font-size:9.8pt; page-break-inside:avoid; break-inside:avoid; }
+.box.warn{ border-left-color:var(--warn); background:var(--warn-bg); }
+.box.good{ border-left-color:var(--good); background:var(--good-bg); }
+.box.law{ border:2px solid var(--key); border-left-width:6px; background:#fff; padding:12px 16px; }
+.box h4{ margin:0 0 .35em; }
+.box p:last-child{ margin-bottom:0 }
+.law-q{ font-size:11.6pt; font-weight:700; color:var(--key); line-height:1.5; margin:0 0 .4em; }
+ul,ol{ margin:.3em 0 .7em; padding-left:1.25em }
+li{ margin:.2em 0 }
+.tick li{ list-style:none; position:relative; padding-left:1.1em }
+.tick li::before{ content:"▪"; position:absolute; left:0; color:var(--key); }
+
+/* ===================== Cover ===================== */
+.cover{ page-break-after:always; break-after:page; min-height:252mm;
+        display:flex; flex-direction:column; }
+.cover-top{ border-top:5px solid var(--key); padding-top:14px; }
+.cover-kicker{ font-size:10.5pt; color:var(--muted); letter-spacing:.02em; }
+.cover-title{ font-size:29pt; font-weight:800; letter-spacing:-0.03em; line-height:1.2;
+              margin:.35em 0 .1em; color:var(--key); }
+.cover-sub{ font-size:13pt; color:var(--ink); font-weight:600; letter-spacing:-0.02em; }
+.cover-claim{ margin:20px 0 0; padding:14px 18px; background:var(--key); color:#fff;
+              font-size:12pt; font-weight:600; line-height:1.55; letter-spacing:-0.02em; }
+.cover-claim small{ display:block; font-weight:400; font-size:9.6pt; opacity:.9; margin-top:6px; }
+.endpoint{ margin:16px 0 0; border:2px solid var(--key); padding:12px 16px; background:var(--key-bg); }
+.endpoint .lbl{ font-size:9pt; color:var(--key); font-weight:700; letter-spacing:.04em; }
+.endpoint .url{ font-family:"Consolas","D2Coding",monospace; font-size:15.5pt; font-weight:700;
+                color:var(--ink); letter-spacing:-0.01em; margin-top:2px; }
+.endpoint .note{ font-size:8.8pt; color:var(--muted); margin-top:4px; }
+.cover-meta{ margin-top:auto; }
+.cover-meta table{ font-size:10pt }
+.cover-meta th{ width:26%; }
+.stat-row{ display:flex; gap:8px; margin:16px 0 0; }
+.stat{ flex:1; border:1px solid var(--line); border-top:3px solid var(--key);
+       padding:8px 10px; background:#fff; }
+.stat .v{ font-size:15pt; font-weight:800; color:var(--key); letter-spacing:-0.03em; line-height:1.2 }
+.stat .k{ font-size:8.6pt; color:var(--muted); margin-top:1px }
+
+/* ===================== Table of contents ===================== */
+.toc{ page-break-after:always; break-after:page; }
+.toc ol{ list-style:none; padding:0; margin:0; font-size:10.4pt; counter-reset:none; }
+.toc li{ border-bottom:1px solid var(--hair); padding:7px 2px; display:flex; gap:12px; }
+.toc .tn{ color:var(--key); font-weight:800; min-width:2.4em; }
+.toc .tt{ font-weight:700 }
+.toc .td{ color:var(--muted); font-size:9.2pt; margin-left:auto; text-align:right; max-width:52%; }
+
+/* ===================== Page breaks ===================== */
+section{ page-break-before:always; break-before:page; }
+section.cont{ page-break-before:auto; break-before:auto; }
+.avoid{ page-break-inside:avoid; break-inside:avoid; }
+
+/* ===================== Print ===================== */
+@page{ size:A4 portrait; margin:13mm 13mm 12mm; }
+@media print{
+  body{ padding:0; max-width:none; font-size:9.4pt; line-height:1.52; }
+  h2{ font-size:15pt; margin-bottom:.45em } h3{ font-size:11.4pt; margin:1.15em 0 .4em }
+  h4{ font-size:10.2pt; margin:.9em 0 .3em }
+  p{ margin:0 0 .5em }
+  table{ font-size:8.3pt; line-height:1.4; margin:.4em 0 .25em }
+  th,td{ padding:4px 6px }
+  figure{ margin:.85em 0 .95em } figcaption{ font-size:8pt; padding-top:5px }
+  .lead{ font-size:9.8pt; padding:8px 12px; margin-bottom:.9em }
+  .box{ font-size:8.9pt; padding:8px 12px; margin:.7em 0 }
+  .law-q{ font-size:11pt }
+  ul,ol{ margin:.25em 0 .55em }
+  .cover{ min-height:auto; height:262mm; }
+  .cover-title{ font-size:27pt }
+  a{ color:var(--key) }
+}
+
+/* Justified body text. English words are hyphenated; keep-all still keeps the few Korean data values
+   whole. Tables, code and caption numbers are excluded. */
+p, li, .lead { text-align: justify; text-justify: inter-word; word-break: keep-all;
+               -webkit-hyphens: auto; hyphens: auto; }
+td, th, code, pre, .stat, figcaption b { text-align: inherit; word-break: keep-all; }
+
+/* ── Cover: pull the elements to the centre and reduce empty space ─────────────
+   Removing the subtitle, claim paragraph and stat cards left large gaps between the
+   elements, so they are centred vertically and the title, endpoint and meta table
+   share one spacing rhythm. */
+.cover{ display:flex; flex-direction:column; justify-content:center; text-align:center;
+        min-height:236mm; gap:22px; }
+.cover-top{ padding-top:10px; }
+.cover-title{ margin:6px 0 0; }
+.endpoint{ margin:0 auto; max-width:80%; text-align:center; }
+.cover-meta{ margin-top:0; }
+.cover-meta table{ text-align:left; }
+
+/* ── Section spacing: keep a minimum distance, but never more than that ────────
+   Neither cramped nor sparse: the space above and below headings, figures and
+   tables follows a single rhythm. */
+section{ margin-top:1.6em; }
+section:first-of-type{ margin-top:0; }
+h2{ margin:1.4em 0 .55em; }
+h3{ margin:1.15em 0 .45em; }
+h2 + h3, h2 + p, h3 + p, h3 + table, h3 + figure{ margin-top:.35em; }
+figure{ margin:.95em 0 1em; }
+figure + p, figure + h3, table + p, table + h3{ margin-top:.85em; }
+table{ margin:.45em 0 .3em; }
+p{ margin:.5em 0; }
+
+/* ── Translator's note (English edition only) ─────────────────────────────── */
+.tr-note{ font-size:8.4pt; line-height:1.45; color:var(--muted); background:var(--tint);
+          border:1px dashed var(--line); border-radius:3px; padding:5px 10px; margin:0 0 5mm;
+          text-align:left; }
+.tr-note b{ color:var(--key); font-weight:600; letter-spacing:.03em; }
+@media print{
+  .tr-note{ font-size:7.6pt; margin-bottom:4mm; }
+  /* the note sits above the cover, so the cover gives up the same height */
+  .cover{ height:248mm; }
+  /* English runs longer than the Korean: keep chapter 05 on two pages, as in the original */
+  section.fit figure{ margin:.5em 0 .6em; }
+  section.fit figure svg{ width:92%; margin:0 auto; }
+}
+</style>
+</head>
+<body>
+
+<div class="tr-note"><b>TRANSLATOR’S NOTE</b> — English translation of the technical proposal submitted to the 2026 Mirae Asset Securities AI Festival (Financial Product Agent track). The competition build used NCP HyperCLOVA X, as the rules required; this repository's English edition runs on Google Gemini.</div>
+
+<!-- Arrowhead definitions (referenced throughout the document) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#7a8699"/></marker>
+  <marker id="arwk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#1f4e79"/></marker>
+</defs></svg>
+
+
+<!-- ==================================================================== -->
+<!-- Cover                                                                -->
+<!-- ==================================================================== -->
+<div class="cover">
+  <div class="cover-top">
+    <div class="cover-kicker">10th Mirae Asset Securities AI Festival 2026 · Financial Product Agent Track</div>
+    <div class="cover-title">Technical Proposal</div>
+  </div>
+
+  <div class="endpoint">
+    <div class="lbl">API END-POINT FOR EVALUATION</div>
+    <div class="url">http://223.130.161.217/answer</div>
+  </div>
+
+
+  <div class="cover-meta">
+    <table>
+      <tbody>
+        <tr><th>Task</th><td>Financial Product Agent — building an Ontology · Knowledge Base · Agent on financial-product data</td></tr>
+        <tr><th>Team</th><td><strong>Wolves of Walnut Street</strong></td></tr>
+        <tr><th>Members</th><td><strong>David Seheon Chang (장세헌) · Violette Gimenez · Lee Ho-jeong (이호정)</strong></td></tr>
+        <tr><th>Submitted</th><td>2026-09-06 (same day as the code freeze)</td></tr>
+        <tr><th>Repository</th><td><code>https://github.com/miraeasset-aifestival-2026-product/fin-004</code></td></tr>
+        <tr><th>API End-point</th><td><code>http://223.130.161.217/answer</code> (Naver Cloud VPC · Ubuntu 24.04 · Docker Compose)</td></tr>
+        <tr><th>Answer-generation LLM</th><td>NCP HyperCLOVA X <code>HCX-005</code> (CLOVA Studio OpenAI-compatible endpoint, function calling)</td></tr>
+        <tr><th>Target data</th><td>The organizers’ 4 master datasets, 53,375 rows (domestic bonds · domestic ETF/ETN · foreign ETF/ETN · public/private funds)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ==================================================================== -->
+<!-- Table of contents                                                    -->
+<!-- ==================================================================== -->
+<div class="toc">
+  <h2><span class="no">Contents</span></h2>
+  <ol>
+    <li><span class="tn">01</span><span class="tt">Problem Definition</span><span class="td">The structural difficulties of financial-product data, and the six incidents we actually ran into</span></li>
+    <li><span class="tn">02</span><span class="tt">Proposed Approach</span><span class="td">Specialized data collection &amp; cleansing / ontology engineering / retrieval methodology</span></li>
+    <li><span class="tn">03</span><span class="tt">System Architecture</span><span class="td">The load → index → retrieve → generate pipeline, and the deployment setup</span></li>
+    <li><span class="tn">04</span><span class="tt">Key Functional Flow</span><span class="td">Data collection → ontology design → graph construction → retrieval</span></li>
+    <li><span class="tn">05</span><span class="tt">Expected Impact · Scalability</span><span class="td">Measured performance, points of business application, extending to more product types</span></li>
+    <li><span class="tn">06</span><span class="tt">Appendix</span><span class="td">Ontology schema · API specification · evaluation reproduction · data limitations</span></li>
+  </ol>
+
+  <h3 style="margin-top:2em">Three things to read first</h3>
+  <div class="lead lead-num" style="margin-bottom:.9em">
+    <p style="margin-bottom:.5em;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">①</span><span><strong>What we built.</strong>
+    A federated retrieval agent in which a single question splits into five paths — RDB · knowledge graph · lexical index · vector index · document store —
+    and merges back into one answer. Because all five paths reference <strong>one and the same ontology</strong>, they can verify each other’s answers.</span></p>
+    <p style="margin-bottom:.5em;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">②</span><span><strong>What is different.</strong>
+    We use the ontology as <strong>an execution layer that generates schema cards and value validators at startup</strong>.
+    And we made it standard procedure to recount the numbers produced by SQL through the graph and compare the two.</span></p>
+    <p style="margin-bottom:0;display:flex;gap:.55em;align-items:baseline"><span style="flex:0 0 1.35em;font-weight:700">③</span><span><strong>What we measured.</strong>
+    Accuracy 47/54, average 20.6 s, net contribution of the vector leg +3.5 pp, marginal cost of an extra round +11.2 s.
+    <strong>All of these are measured values.</strong> We report unfavorable results as they are, including the fact that the vector leg contributes little (06-D).</span></p>
+  </div>
+
+  <table>
+    <caption>Table 0. Sources of the measured figures in this document</caption>
+    <thead><tr><th style="width:34%">Metric</th><th style="width:30%">Value</th><th>How to reproduce</th></tr></thead>
+    <tbody>
+      <tr><td>Accuracy · response time</td><td>47/54 (87%) · average 20.6 s</td><td><code>scripts/eval_truth.py</code> → <code>data/eval/truth_results.jsonl</code></td></tr>
+      <tr><td>Knowledge graph size</td><td>1,082,874 triples (965,823 asserted + 117,051 inferred)</td><td><code>kg_asserted</code> / <code>kg_inferred</code> of <code>GET /health</code></td></tr>
+      <tr><td>Index size</td><td>75,089 documents</td><td><code>GET /health</code></td></tr>
+      <tr><td>Recall by retrieval method</td><td>Measured on 1,313 queries</td><td><code>python scripts/audit_vector.py --sections BC</code> (no LLM calls · fixed seed)</td></tr>
+      <tr><td>Routing · tool calls · latency</td><td>Full traces of all 54 questions</td><td><code>think_trace</code> in <code>data/eval/truth_results.jsonl</code></td></tr>
+      <tr><td>Tests</td><td>194 passing</td><td><code>python -m pytest -q</code></td></tr>
+    </tbody>
+  </table>
+</div>
+
+
+
+
+
+<!-- ==================================================================== -->
+<!-- 01. Problem definition                                               -->
+<!-- ==================================================================== -->
+<section>
+<h2><span class="no">01</span>Problem Definition</h2>
+
+<div class="lead">
+On the surface, the task looks like an <strong>NL2SQL</strong> problem: four structured master datasets are given, and natural-language questions must be answered.
+But once you actually open the data, <strong>“a row is not a product,”</strong> <strong>“the relationship the question asks about does not exist in the data at all,”</strong>
+<strong>“different kinds (species) are mixed within one table,”</strong> and <strong>“blanks are intended values.”</strong>
+None of these four is solved by writing SQL well. What is needed first is <strong>an agreed definition of what is being counted</strong>.
+</div>
+
+<h3>01-1. What the provided data actually looks like</h3>
+
+<table>
+  <caption>Table 1. The organizers’ four master datasets — measured after loading (reference date 2026-08-21; foreign ETFs 2026-08-22)</caption>
+  <thead>
+    <tr><th style="width:20%">Master / view</th><th class="num">Rows</th><th class="num">Actual products</th><th>Why rows and products diverge</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Domestic bonds <code>v_bond_kr</code></th><td class="num">21,882</td><td class="num">20,497 issues</td>
+        <td>One <code>pd_no</code> comes with both exchange-traded and OTC rows, and OTC holdings appear as multiple rows <strong>per LOT</strong> (<code>info_seq</code>)</td></tr>
+    <tr><th>Domestic ETFs <code>v_etf_kr</code></th><td class="num">1,780</td><td class="num">ETF 1,235 / ETN 545</td>
+        <td><strong>Two kinds, ETFs and ETNs,</strong> share the same columns in one table</td></tr>
+    <tr><th>Foreign ETFs <code>v_etf_gl</code></th><td class="num">6,037</td><td class="num">ETF 5,972 / ETN 65</td>
+        <td>Same (foreign ETFs + foreign ETNs)</td></tr>
+    <tr><th>Public funds <code>v_fund_pub</code></th><td class="num">23,676</td><td class="num">17,795 funds</td>
+        <td>1 row = 1 <strong>fund share class</strong>. Classes A/C/S each take a row of their own</td></tr>
+    <tr class="tot"><th>Total</th><td class="num">53,375</td><td class="num">—</td>
+        <td>+ 22,599 domestic-ETF constituent rows (externally collected, reference date 2026-09-05)</td></tr>
+  </tbody>
+</table>
+
+<figure>
+<svg viewBox="0 0 880 404" role="img" aria-label="Four structural difficulties of financial-product data: a row is not a product, the relationship is not in the data, different kinds are mixed in one table, and missing values are intended values">
+  <text class="t-ttl" x="18" y="26">Figure 1. Why this is not an SQL problem — four structural difficulties</text>
+
+  <!-- 1 -->
+  <rect class="bx-k" x="18" y="44" width="420" height="150" rx="4"/>
+  <circle cx="44" cy="70" r="13" class="f-k"/><text class="t-w" x="44" y="75" text-anchor="middle">1</text>
+  <text class="t-lab" x="66" y="75">A row is not a product</text>
+  <text class="t-sub" x="34" y="100">For “How many public funds are there?”, <tspan font-weight="700" fill="#a32d2d">COUNT(*)</tspan> gives the wrong answer.</text>
+  <rect class="bx" x="34" y="112" width="184" height="66" rx="3"/>
+  <text class="t-num" x="126" y="136" text-anchor="middle">23,676 rows</text>
+  <text class="t-sub" x="126" y="156" text-anchor="middle">= number of fund classes</text>
+  <text class="t-tiny" x="126" y="171" text-anchor="middle">COUNT(*)</text>
+  <rect class="bx-g" x="238" y="112" width="184" height="66" rx="3"/>
+  <text class="t-num" x="330" y="136" text-anchor="middle" fill="#2e7d5b">17,795 funds</text>
+  <text class="t-sub" x="330" y="156" text-anchor="middle">= actual number of funds</text>
+  <text class="t-tiny" x="330" y="171" text-anchor="middle">COUNT(DISTINCT fund_family)</text>
+  <path class="ln" d="M222,145 L234,145" marker-end="url(#arw)"/>
+
+  <!-- 2 -->
+  <rect class="bx-w" x="452" y="44" width="410" height="150" rx="4"/>
+  <circle cx="478" cy="70" r="13" class="f-w"/><text class="t-w" x="478" y="75" text-anchor="middle">2</text>
+  <text class="t-lab" x="500" y="75">The queried relationship is not in the data</text>
+  <text class="t-sub" x="468" y="97">“ETFs holding Samsung Electronics” — yet the four masters</text>
+  <text class="t-sub" x="468" y="111"><tspan font-weight="700">do not even have a constituents (holdings) column.</tspan></text>
+  <rect class="bx" x="468" y="118" width="120" height="60" rx="3"/>
+  <text class="t-sub" x="528" y="142" text-anchor="middle">Constituents</text>
+  <text class="t-sub" x="528" y="160" text-anchor="middle" fill="#a32d2d">no column</text>
+  <rect class="bx" x="598" y="118" width="120" height="60" rx="3"/>
+  <text class="t-sub" x="658" y="142" text-anchor="middle" font-size="10">Affiliates/subsidiaries</text>
+  <text class="t-sub" x="658" y="160" text-anchor="middle" fill="#a32d2d">no column</text>
+  <rect class="bx" x="728" y="118" width="118" height="60" rx="3"/>
+  <text class="t-sub" x="787" y="142" text-anchor="middle">Index · theme</text>
+  <text class="t-sub" x="787" y="160" text-anchor="middle" fill="#a32d2d">strings only</text>
+
+  <!-- 3 -->
+  <rect class="bx-n" x="18" y="208" width="420" height="150" rx="4"/>
+  <circle cx="44" cy="234" r="13" class="f-n"/><text class="t-w" x="44" y="239" text-anchor="middle">3</text>
+  <text class="t-lab" x="66" y="239">Different kinds are mixed in one table</text>
+  <text class="t-sub" x="34" y="260">Count ETNs when the question asked for “ETFs” and you are wrong —</text>
+  <text class="t-sub" x="34" y="274"><tspan font-weight="700" fill="#a32d2d">our own answer key actually made exactly this mistake.</tspan></text>
+  <rect class="bx" x="34" y="282" width="388" height="28" rx="3"/>
+  <rect class="bx-k" x="34" y="282" width="269" height="28" rx="3"/>
+  <text class="t-sub" x="168" y="301" text-anchor="middle" fill="#1f4e79" font-weight="700">v_etf_kr · Domestic ETF 1,235</text>
+  <text class="t-sub" x="362" y="301" text-anchor="middle">Domestic ETN 545</text>
+  <rect class="bx" x="34" y="318" width="388" height="28" rx="3"/>
+  <rect class="bx-k" x="34" y="318" width="384" height="28" rx="3"/>
+  <text class="t-sub" x="228" y="337" text-anchor="middle" fill="#1f4e79" font-weight="700">v_etf_gl · Foreign ETF 5,972 (+ Foreign ETN 65)</text>
+
+  <!-- 4 -->
+  <rect class="bx-b" x="452" y="208" width="410" height="150" rx="4"/>
+  <circle cx="478" cy="234" r="13" class="f-b"/><text class="t-w" x="478" y="239" text-anchor="middle">4</text>
+  <text class="t-lab" x="500" y="239">Blanks are intended values, not “unfilled” ones</text>
+  <text class="t-sub" x="468" y="260">Filling them with 0 makes answers silently wrong.</text>
+  <text class="t-sub" x="468" y="274">Organizers’ notice: <tspan font-weight="700">0 and blank are intended values.</tspan></text>
+  <rect class="bx" x="468" y="282" width="126" height="64" rx="3"/>
+  <text class="t-num" x="531" y="305" text-anchor="middle">18%</text>
+  <text class="t-tiny" x="531" y="322" text-anchor="middle">Domestic ETF TER</text>
+  <text class="t-tiny" x="531" y="337" text-anchor="middle">populated</text>
+  <rect class="bx" x="602" y="282" width="126" height="64" rx="3"/>
+  <text class="t-num" x="665" y="305" text-anchor="middle">~30%</text>
+  <text class="t-tiny" x="665" y="322" text-anchor="middle">Fund returns</text>
+  <text class="t-tiny" x="665" y="337" text-anchor="middle">populated</text>
+  <rect class="bx" x="736" y="282" width="110" height="64" rx="3"/>
+  <text class="t-num" x="791" y="305" text-anchor="middle">Unit unknown</text>
+  <text class="t-tiny" x="791" y="322" text-anchor="middle">Fund fee columns</text>
+  <text class="t-tiny" x="791" y="337" text-anchor="middle">→ relative only</text>
+
+  <text class="t-tiny" x="18" y="380">All four difficulties call not for “writing better queries” but for “a definition of what is being counted.”</text>
+  <text class="t-tiny" x="18" y="394">Putting that definition in the ontology rather than in code is the starting point of this proposal.</text>
+</svg>
+<figcaption><b>Figure 1.</b> Difficulties ① and ③ are problems of <em>definition</em>, ② is a problem of <em>missing relationships</em>, and ④ is a problem of <em>silent errors</em>. ② is impossible from the very first step with SQL alone, so a knowledge graph is required; ①, ③ and ④ only become repeatable once “what is being counted” is made explicit in the ontology.</figcaption>
+</figure>
+
+<h3>01-2. The hardest difficulty — there is no way to check the right answer</h3>
+
+<p>The organizers do not disclose the evaluation questions or their answers (task description: no reference question set included).
+So <strong>we have to build the answer key ourselves</strong>. And therein lies a trap.
+If the answer key is computed <strong>with the same code</strong> as the system, then whenever the code is wrong, the answer and the key are wrong <strong>together</strong> — and grading shows green.</p>
+
+<p>That actually happened. The knowledge graph <strong>had inflated the number of constituent relationships twofold</strong>, and it was still the “right answer” —
+because the answer key had been computed with the same code as the graph. After this incident,
+we made it standard procedure to <em>recount the numbers produced by SQL through the graph, and the numbers produced by the graph through SQL, and compare them</em> (02-3, 05-1).</p>
+
+<table>
+  <caption>Table 2. Six incidents we actually ran into — every one of them passed with no exception, no log and no red test</caption>
+  <thead>
+    <tr><th style="width:19%">Incident</th><th style="width:30%">Symptom</th><th style="width:26%">Cause</th><th>Fix (what remains in the design)</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>Relationship count inflated 2×</th>
+      <td>The number of constituent relationships was doubled, yet grading <span class="ok">passed</span></td>
+      <td>The answer key was computed with <strong>the same code</strong> as the graph</td>
+      <td><strong>SQL ↔ graph cross-validation made a procedure.</strong> Reconciled on 5 companies: Samsung Electronics 229/229 · EcoPro BM 42/42 · LG 26/26 · KT 48/48 · Samsung Electronics (pref.) 19/19</td>
+    </tr>
+    <tr>
+      <th>677 constituent rows misattributed</th>
+      <td>LG mapped to Shinhan Financial Group, KT to SKT</td>
+      <td><strong>The conversational name matcher was reused for bulk loading.</strong> <code>"lg"</code> matched as a substring of <code>"shinhanfinancialgroup"</code></td>
+      <td>Companies are identified only by the <strong>stock code</strong> supplied by the source (<code>company_code</code>, 79% populated). Name-similarity matching removed (<code>tests/test_constituent_keys.py</code>)</td>
+    </tr>
+    <tr>
+      <th>Misuse of <code>rdfs:domain</code></th>
+      <td>ETN rows misclassified into the ETF class</td>
+      <td><strong><code>domain</code> is an inference rule, not a constraint.</strong> Because it <em>asserts</em> “whoever uses this property is of this class,” it fabricates wrong facts instead of filtering them out</td>
+      <td>Where a constraint is needed: <strong>SHACL NodeShapes</strong> (13). Domains fixed by adding <code>fp:DomesticListedProduct</code> / <code>fp:ForeignListedProduct</code> so that every row type in the table is covered</td>
+    </tr>
+    <tr>
+      <th>A capped count reported as the total</th>
+      <td>Answered “200 in total,” while the actual number was 15,837</td>
+      <td>The display-row cap (LIMIT 200) leaked out as the total</td>
+      <td>The evidence block reports the two separately as <strong>“N in total (200 shown)”</strong> (<code>agent/answer.py</code>)</td>
+    </tr>
+    <tr>
+      <th>Answers without tool calls</th>
+      <td>The model <strong>invented products that do not exist</strong>. Of 5 runs of the same question, the runs that called tools were <span class="ok">all correct</span>; the runs that did not were <span class="no">all wrong</span></td>
+      <td>When the model judges that it can answer from pre-training knowledge, it skips the lookup</td>
+      <td><strong>An answer submitted with zero lookups is rejected</strong> and sent back. In the 54-question run this guard <strong>fired 5 times</strong> (<code>agent/orchestrator.py</code>)</td>
+    </tr>
+    <tr>
+      <th>Entity resolution not applied to SQL</th>
+      <td><strong>133 ETFs holding Naver were answered as “no data”</strong></td>
+      <td>Entity resolution was wired only into the graph path; the SQL path queried the user’s own spelling (<code>'네이버'</code>, Naver written in Hangul) verbatim</td>
+      <td>Fixed so that pre-analysis also hands <strong>the store’s actual codes and spellings</strong> to the SQL path (<code>agent/routing.py</code>)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box law">
+  <p class="law-q">“After you change something, count the results again.”</p>
+  <p style="margin:0">None of the six incidents above threw an exception, left a log entry or turned a test red.
+  They are not caught by looking at success or failure; they are caught only by <strong>counting again</strong>.
+  So for every load and fill step we made it procedure to <strong>recompute and compare the record counts before and after the operation</strong>.</p>
+</div>
+</section>
+
+
+<!-- ==================================================================== -->
+<!-- 02. Proposed approach                                                -->
+<!-- ==================================================================== -->
+<section>
+<h2><span class="no">02</span>Proposed Approach</h2>
+<p class="lead" style="margin-bottom:1.1em">
+This chapter answers, in order, the three questions set by the organizers —
+<strong>① what specialized data did we collect and cleanse, and how</strong>,
+<strong>② what ontology engineering did we apply</strong>, and
+<strong>③ which retrieval methodology did we choose, and why did we design it that way</strong>.
+</p>
+
+<h3>02-1. What specialized data did we collect and cleanse, and how</h3>
+
+<h4>Principle — external collection only for “items with no column at all in the provided data”</h4>
+<p>The rule is <strong>compute it from the provided data</strong>. External collection is not an exception to that rule:
+it was applied to only one item that cannot be computed because the provided data <strong>has no column for it at all</strong> (ETF constituents).
+Whether the rule was actually kept can be checked from the provenance breakdown of the knowledge graph.</p>
+
+<figure>
+<svg viewBox="0 0 880 218" role="img" aria-label="Provenance shares of the knowledge-graph triples: organizers' masters 58.9 percent, ontology and inference 27.0 percent, our dictionaries 8.1 percent, external collection 6.0 percent">
+  <text class="t-ttl" x="18" y="26">Figure 2. Where do the knowledge graph’s 1,082,874 triples come from — measured provenance</text>
+  <text class="t-sub" x="18" y="46">965,823 asserted + 117,051 inferred · 73 predicates</text>
+
+  <rect class="f-k"    x="18" y="60" width="494" height="46"/>
+  <rect class="f-g"    x="512" y="60" width="226" height="46"/>
+  <rect class="f-w"    x="738" y="60" width="68" height="46"/>
+  <rect class="f-n"    x="806" y="60" width="50" height="46"/>
+  <rect x="18" y="60" width="838" height="46" fill="none" stroke="#16202e" stroke-width="1"/>
+  <text class="t-w" x="265" y="89" text-anchor="middle" font-size="15">58.9%</text>
+  <text class="t-w" x="625" y="89" text-anchor="middle" font-size="14">27.0%</text>
+  <text class="t-w" x="772" y="89" text-anchor="middle" font-size="11">8.1%</text>
+  <text class="t-w" x="831" y="89" text-anchor="middle" font-size="11">6.0%</text>
+
+  <rect class="f-k" x="18" y="126" width="11" height="11" rx="2"/>
+  <text class="t-lab" x="36" y="136">Organizers’ masters</text><text class="t-sub" x="36" y="153">directly from the 4 masters</text>
+  <rect class="f-g" x="228" y="126" width="11" height="11" rx="2"/>
+  <text class="t-lab" x="246" y="136">Ontology · inference</text><text class="t-sub" x="246" y="153">TBox merge + rule materialization</text>
+  <rect class="f-w" x="452" y="126" width="11" height="11" rx="2"/>
+  <text class="t-lab" x="470" y="136">Our dictionaries</text><text class="t-sub" x="470" y="153">77 managers · 48 themes · 97 firms</text>
+  <rect class="f-n" x="662" y="126" width="11" height="11" rx="2"/>
+  <text class="t-lab" x="680" y="136">External collection</text><text class="t-sub" x="680" y="153">domestic ETF holdings (sole)</text>
+
+  <rect class="bx-t" x="18" y="170" width="838" height="34" rx="3"/>
+  <text class="t-sub" x="32" y="192">Triples rooted in the organizers’ data: <tspan font-weight="700" fill="#1f4e79">85.9%</tspan> (58.9 + 27.0). Only <tspan font-weight="700">6.0%</tspan> came from outside — and only for the one item with no column in the provided data.</text>
+</svg>
+<figcaption><b>Figure 2.</b> The provenance shares were measured when the graph held 1,074,824 triples; affiliate derivation later raised the total to 1,082,874 (the shares were not re-measured, so we state that they are <em>as of the time of measurement</em>).</figcaption>
+</figure>
+
+<h4>Cleansing — three lessons that came out of failures</h4>
+
+<table>
+  <caption>Table 3. Three cleansing cases (before → after, all measured)</caption>
+  <thead>
+    <tr><th style="width:16%">Target</th><th style="width:28%">How we found it</th><th style="width:30%">How we fixed it</th><th>Result</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>Definition of purchasable<br><code>is_sellable</code></th>
+      <td>An organizers’ notice (2026-08-24) <strong>invalidated</strong> the values of <code>BUYABLE_QUANTITY</code></td>
+      <td>Redefined as “not yet redeemed = purchasable.” ETL, tests and prompts were changed together</td>
+      <td class="num wrap">Bonds 634 → <strong>21,866</strong><br><span class="t-tiny">an item on which evaluation answers change substantially</span></td>
+    </tr>
+    <tr>
+      <th>Fund manager<br><code>manager_name</code></th>
+      <td>A full audit of per-view NULL ratios found <strong>25.4% (6,016 rows) missing</strong>. The cause: we had been <strong>guessing the manager from the fund-name prefix</strong></td>
+      <td>Derived from <code>or_co_xtn_itt_cd</code> (manager institution code), which the organizers supply <strong>100% populated</strong>. The majority spelling for each code is used as the canonical name</td>
+      <td class="num wrap">17,660 rows (74.6%) → <strong>21,592 rows (91.2%)</strong><br><span class="t-tiny">provenance recorded in <code>manager_source</code><br>name 17,660 / code 3,932 / NULL 2,084</span></td>
+    </tr>
+    <tr>
+      <th>Constituent identifier<br><code>company_code</code></th>
+      <td>While reconciling SQL and graph constituent counts, we found <strong>677 misattributed rows</strong> (LG → Shinhan Financial Group, KT → SKT)</td>
+      <td><strong>Removed</strong> the conversational alias matcher from bulk loading; only the stock codes supplied by the source (<code>itemCode</code>) are used</td>
+      <td class="num wrap"><strong>79%</strong> of rows carry a stock code<br><span class="t-tiny">0 name-similarity matches</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <h4>How to catch silent errors</h4>
+  <p>One fill step in the pipeline was <strong>reporting success while filling no rows at all</strong>: when <code>pandas</code>’ <code>Series.map</code> returned <code>None</code>,
+  it became <code>NaN</code>, and <code>NaN</code> is truthy.
+  There was no exception, no log entry, and the tests were green. So every fill step now looks
+  <strong>not at success or failure, but at the number of rows filled before and after the operation</strong>.</p>
+</div>
+
+<h4>What we chose not to fill — if the evidence is not in the provided data, we do not fill it in</h4>
+<ul class="tick">
+  <li><strong>A manager-rename mapping table</strong>: old and new brands are observed together under one institution code, but the provided data <strong>has no fund inception date</strong>, so there is no basis for deciding which is the current name. Pulling in an external table would break the rule, so we use the majority spelling as is — even when it is the old brand.</li>
+  <li><strong>Domestic ETF TER (18% populated) · fund returns (about 30% populated) · fund fee units</strong>: these are values the source did not provide. We do not estimate them and answer “no data”; because the unit of the fund fee columns is undisclosed, we allow <strong>only relative comparisons between classes</strong>.</li>
+  <li><strong>Return outliers</strong>: some 1-year returns exceed 200%, but <strong>since these are values supplied by the organizers, we use them as is, unmodified</strong>.</li>
+</ul>
+
+<h4>External collection — constituents, and the affiliates derived from them</h4>
+<p>We collected the top constituents of <strong>1,162 of the 1,235 domestic ETFs (22,599 rows)</strong>,
+<strong>loaded them into the SQLite table <code>etf_constituent</code></strong>, and generated the knowledge graph’s <code>hasConstituent</code>
+<strong>from that table</strong>. Because both paths read the same source, SQL results and graph results do not diverge.</p>
+<p>From there we <strong>derived affiliate relationships</strong>. The constituents of group-stock ETFs (<code>TIGER 삼성그룹</code> [Samsung Group], <code>PLUS 한화그룹주</code> [Hanwha Group stocks], etc.)
+are precisely the member companies of that business group, so we materialized them as <code>affiliateOf</code> —
+<strong>608 edges across 65 companies in 8 groups, with 0 false positives</strong> (<code>derive_group_affiliates</code> in <code>kb/graph.py</code>).
+<strong>This, however, is the fact of belonging to “the same business group,” not “equity ownership.”</strong>
+The data has no shareholding ratios, so the levels cannot be told apart, and answers therefore also say <strong>“affiliate.”</strong>
+The hand-written <code>subsidiaryOf</code> consists of <strong>just 4 edges</strong>, and we do not claim “multi-level subsidiary traversal” as a general capability.</p>
+
+<h3>02-2. What ontology engineering did we apply</h3>
+
+<div class="box good">
+  <p style="margin:0">Six TTL files are read at startup to automatically generate ① the <strong>schema card</strong> shown to the LLM, ② the <strong>validator</strong> that filters the values in a question,
+  and ③ the <strong>inference rules</strong> materialized into the graph.
+  As a result, the cost of adding a new product type drops to <strong>one view + one TTL</strong>.</p>
+</div>
+
+<figure>
+<svg viewBox="0 0 880 470" role="img" aria-label="The ontology class hierarchy, and how the TTL files turn into three things at runtime: schema cards, validators and inference rules">
+  <text class="t-ttl" x="18" y="26">Figure 3. The ontology — class hierarchy (left) and runtime binding (right)</text>
+
+  <!-- Left: hierarchy -->
+  <rect class="bx-t" x="18" y="40" width="392" height="410" rx="4"/>
+  <text class="t-lab" x="34" y="62">Class hierarchy · 40 classes / 6 TBox files</text>
+
+  <rect class="bx-k" x="34" y="76" width="140" height="30" rx="3"/>
+  <text class="t-lab" x="104" y="96" text-anchor="middle" fill="#1f4e79">fp:Product</text>
+
+  <path class="ln-k" d="M104,106 L104,124 M104,124 L60,124 L60,140 M104,124 L242,124 L242,140" marker-end="url(#arwk)"/>
+  <rect class="bx" x="34" y="140" width="120" height="26" rx="3"/>
+  <text class="t-sub" x="94" y="158" text-anchor="middle">DomesticListedProduct</text>
+  <rect class="bx" x="182" y="140" width="120" height="26" rx="3"/>
+  <text class="t-sub" x="242" y="158" text-anchor="middle">ForeignListedProduct</text>
+
+  <path class="ln" d="M94,166 L94,180 M67,180 L137,180 M67,180 L67,194 M137,180 L137,194"/>
+  <rect class="bx-g" x="34" y="194" width="66" height="26" rx="3"/><text class="t-sub" x="67" y="212" text-anchor="middle" font-size="9.5">DomesticETF</text>
+  <rect class="bx-n" x="104" y="194" width="66" height="26" rx="3"/><text class="t-sub" x="137" y="212" text-anchor="middle" font-size="9.5">DomesticETN</text>
+  <path class="ln" d="M242,166 L242,180 M208,180 L276,180 M208,180 L208,194 M276,180 L276,194"/>
+  <rect class="bx-g" x="182" y="194" width="58" height="26" rx="3"/><text class="t-sub" x="211" y="212" text-anchor="middle" font-size="9.5">ForeignETF</text>
+  <rect class="bx-n" x="244" y="194" width="58" height="26" rx="3"/><text class="t-sub" x="273" y="212" text-anchor="middle" font-size="9.5">ForeignETN</text>
+
+  <path class="ln-k" d="M104,106 L104,116 M104,116 L340,116 L340,240" marker-end="url(#arwk)"/>
+  <rect class="bx-g" x="308" y="240" width="86" height="26" rx="3"/><text class="t-sub" x="351" y="258" text-anchor="middle">DomesticBond</text>
+  <rect class="bx-g" x="308" y="272" width="86" height="26" rx="3"/><text class="t-sub" x="351" y="290" text-anchor="middle">PublicFund</text>
+  <rect class="bx-n" x="308" y="304" width="86" height="26" rx="3"/><text class="t-sub" x="351" y="322" text-anchor="middle">PrivateFund</text>
+  <path class="ln-d" d="M340,266 L340,272 M340,298 L340,304"/>
+
+  <rect class="bx-w" x="34" y="248" width="252" height="88" rx="3"/>
+  <text class="t-lab" x="46" y="268">Relations (ObjectProperty)</text>
+  <text class="t-sub" x="46" y="288">managedBy ⇄ manages · hasConstituent ⇄</text>
+  <text class="t-sub" x="46" y="304">constituentOf · affiliateOf · subsidiaryOf</text>
+  <text class="t-sub" x="46" y="320">hasTheme · tracksIndex · hasShareClass</text>
+
+  <rect class="bx" x="34" y="348" width="360" height="88" rx="3"/>
+  <text class="t-lab" x="46" y="368">Enumerated individuals (ordered value domains)</text>
+  <text class="t-sub" x="46" y="388">Credit rating AAA–D, <tspan font-weight="700">20-step ordinal</tspan> · risk grade 1–6 ·</text>
+  <text class="t-sub" x="46" y="404">asset class · investment region · distribution frequency</text>
+  <text class="t-tiny" x="46" y="424">“AA- or higher” = rank ≤ 4 → the grade list is generated automatically</text>
+
+  <!-- Right: runtime -->
+  <rect class="bx-t" x="424" y="40" width="438" height="410" rx="4"/>
+  <text class="t-lab" x="440" y="62">Runtime binding · <tspan font-family="Consolas,monospace">ontology/loader.py</tspan></text>
+
+  <rect class="bx-k" x="440" y="76" width="406" height="56" rx="3"/>
+  <text class="t-lab" x="456" y="98" fill="#1f4e79">ontology/*.ttl — 6 files</text>
+  <text class="t-sub" x="456" y="118">Every data property has <tspan font-family="Consolas,monospace" font-weight="700">fp:sourceTable · fp:sourceColumn · fp:unit</tspan></text>
+
+  <path class="ln-k" d="M643,132 L643,150 M540,150 L746,150 M540,150 L540,166 M643,150 L643,166 M746,150 L746,166" marker-end="url(#arwk)"/>
+
+  <rect class="bx-g" x="440" y="166" width="128" height="112" rx="3"/>
+  <text class="t-lab" x="504" y="188" text-anchor="middle">① Schema card</text>
+  <text class="t-sub" x="504" y="210" text-anchor="middle">column ↔ Korean name</text>
+  <text class="t-sub" x="504" y="228" text-anchor="middle">· unit · allowed values</text>
+  <text class="t-num" x="504" y="254" text-anchor="middle">215 columns</text>
+  <text class="t-tiny" x="504" y="270" text-anchor="middle">all exposed (no culling)</text>
+
+  <rect class="bx-g" x="580" y="166" width="128" height="112" rx="3"/>
+  <text class="t-lab" x="644" y="188" text-anchor="middle">② Value validator</text>
+  <text class="t-sub" x="644" y="210" text-anchor="middle">enums → allowed sets</text>
+  <text class="t-sub" x="644" y="228" text-anchor="middle">“AAAA”, “grade 7” are</text>
+  <text class="t-sub" x="644" y="246" text-anchor="middle">blocked in pre-analysis</text>
+  <text class="t-tiny" x="644" y="268" text-anchor="middle" font-size="9">unanswerable: 19/19 correct</text>
+
+  <rect class="bx-g" x="720" y="166" width="126" height="112" rx="3"/>
+  <text class="t-lab" x="783" y="188" text-anchor="middle">③ Materialization</text>
+  <text class="t-sub" x="783" y="210" text-anchor="middle">superclass inheritance</text>
+  <text class="t-sub" x="783" y="228" text-anchor="middle">inverses (inverseOf)</text>
+  <text class="t-sub" x="783" y="246" text-anchor="middle">domain / range</text>
+  <text class="t-num" x="783" y="270" text-anchor="middle">+117,051 triples</text>
+
+  <path class="ln" d="M504,278 L504,300 M644,278 L644,300 M783,278 L783,300"/>
+  <rect class="bx-k" x="440" y="300" width="268" height="46" rx="3"/>
+  <text class="t-lab" x="574" y="322" text-anchor="middle" fill="#1f4e79">LLM prompt · pre-analysis</text>
+  <text class="t-tiny" x="574" y="338" text-anchor="middle">handed to the model as facts “at the moment of use”</text>
+  <rect class="bx-k" x="720" y="300" width="126" height="46" rx="3"/>
+  <text class="t-lab" x="783" y="322" text-anchor="middle" fill="#1f4e79">Knowledge Graph</text>
+  <text class="t-tiny" x="783" y="338" text-anchor="middle">no query-time reasoning</text>
+
+  <rect class="bx-b" x="440" y="356" width="406" height="88" rx="3"/>
+  <text class="t-lab" x="456" y="376">Design call — <tspan font-family="Consolas,monospace">rdfs:domain</tspan> is not a constraint</text>
+  <text class="t-sub" x="456" y="395">It is an <tspan font-weight="700">inference rule</tspan>: it <tspan font-weight="700">asserts</tspan> “use this property and</text>
+  <text class="t-sub" x="456" y="411">the subject is of this class,” so instead of filtering, it <tspan font-weight="700">fabricates.</tspan></text>
+  <text class="t-sub" x="456" y="433">Where a constraint is needed we used <tspan font-weight="700">13 SHACL NodeShapes</tspan>.</text>
+</svg>
+<figcaption><b>Figure 3.</b> The left side is the class hierarchy; the right side is what those definitions become at runtime. Of the <b>261 property definitions, 215</b> are linked to actual view columns (<code>fp:sourceTable</code>/<code>fp:sourceColumn</code>). <b>Unlinked properties do not appear on the schema card, and a column missing from the schema card is, for the model, as good as nonexistent</b> (measured evidence in 02-3).</figcaption>
+</figure>
+
+<table>
+  <caption>Table 4. The six ontology files (submitted as <code>ontology/*.ttl</code>)</caption>
+  <thead><tr><th style="width:20%">File</th><th style="width:12%" class="c">SHACL</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><th><code>common.ttl</code></th><td class="c">4</td>
+        <td>Top class <code>fp:Product</code>; listed-product split <code>DomesticListedProduct</code>/<code>ForeignListedProduct</code>; asset manager · issuer · company · theme · index · fund family; enumerations for risk grade (1–6) · asset class · investment region · distribution frequency; common relations (<code>managedBy</code> · <code>hasConstituent</code> · <code>affiliateOf</code> · <code>subsidiaryOf</code> · <code>hasTheme</code> · <code>tracksIndex</code>)</td></tr>
+    <tr><th><code>bond_kr.ttl</code></th><td class="c">2</td>
+        <td><code>fp:DomesticBond</code> — credit rating scheme (AAA–D, <strong>20-step ordinal</strong>); enumerations for bond type · rate type · interest payment; yield and duration properties</td></tr>
+    <tr><th><code>etf_kr.ttl</code></th><td class="c">2</td>
+        <td><code>fp:DomesticETF</code> / <code>fp:DomesticETN</code> — strategy (physical · synthetic · active), leverage multiple, period returns · volatility, distribution information</td></tr>
+    <tr><th><code>etf_gl.ttl</code></th><td class="c">2</td>
+        <td><code>fp:ForeignETF</code> / <code>fp:ForeignETN</code> — total expense ratio, AUM, exchange, replication method, inverse · leverage</td></tr>
+    <tr><th><code>fund_pub.ttl</code></th><td class="c">3</td>
+        <td><code>fp:PublicFund</code> / <code>fp:PrivateFund</code> / <code>fp:ShareClass</code> — management attributes, benchmark, class fees · sales channels, asset-allocation ratios, manager institution code and fill provenance (<code>manager_source</code>)</td></tr>
+    <tr><th><code>etf_constituent.ttl</code></th><td class="c">0</td>
+        <td>Domestic ETF constituents — holding relationship, stock code · weight · cash-equivalent flag · reference date. The graph’s <code>hasConstituent</code> is generated from this view</td></tr>
+    <tr class="tot"><th>Total</th><td class="c">13</td><td>40 classes · 261 property definitions (of which <strong>215 are linked to actual view columns</strong>)</td></tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <p style="margin:0"><strong>A limitation we want to state —</strong> the 13 SHACL NodeShapes <strong>are declared, but runtime validation is not applied</strong>
+  (<code>pyshacl</code> is not among the dependencies). For now, SHACL serves as <em>a specification of the constraints</em>;
+  the actual blocking of values is done in the pre-analysis stage by the validator generated from the ontology’s enumerations.
+  Adopting <code>pyshacl</code> is left as an extension item (05-3).</p>
+</div>
+
+<h3>02-3. Which retrieval methodology did we choose, and why did we design it that way</h3>
+
+<h4>Five paths — but which ones to switch on is decided deterministically</h4>
+<p>Different elements of a query take different paths — numeric filters, sorting and aggregation go to SQL; relationship traversal to the graph;
+name and description matching to BM25; background knowledge to the documents. <strong>We did not leave this choice to the model</strong>.
+Before the LLM is called, pre-analysis draws up a <strong>retrieval execution plan</strong>, runs in advance only the stores the question needs,
+and <strong>injects the resulting rows into the first prompt as facts</strong> (<code>plan_retrieval</code> in <code>agent/routing.py</code>).</p>
+
+<figure>
+<svg viewBox="0 0 880 340" role="img" aria-label="Federated retrieval that routes each question type to one of five paths: RDB, knowledge graph, lexical index, vector index and external documents">
+  <text class="t-ttl" x="18" y="26">Figure 4. Five federated retrieval paths — which question goes where</text>
+
+  <rect class="bx-k" x="18" y="46" width="150" height="60" rx="4"/>
+  <text class="t-lab" x="93" y="70" text-anchor="middle" fill="#1f4e79">Pre-analysis</text>
+  <text class="t-tiny" x="93" y="88" text-anchor="middle">name spans · entities</text>
+  <text class="t-tiny" x="93" y="100" text-anchor="middle">themes · ontology checks</text>
+
+  <path class="ln-k" d="M168,76 L200,76" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="200" y="46" width="130" height="60" rx="4"/>
+  <text class="t-lab" x="265" y="70" text-anchor="middle" fill="#1f4e79">Retrieval plan</text>
+  <text class="t-tiny" x="265" y="88" text-anchor="middle">round 0 · median 0.8 ms</text>
+  <text class="t-tiny" x="265" y="100" text-anchor="middle">deterministic · no LLM</text>
+
+  <!-- five paths -->
+  <path class="ln" d="M330,76 L360,76 M360,76 L360,140 M360,140 L392,140" marker-end="url(#arw)"/>
+  <path class="ln" d="M360,76 L360,196 M360,196 L392,196" marker-end="url(#arw)"/>
+  <path class="ln" d="M360,76 L360,252 M360,252 L392,252" marker-end="url(#arw)"/>
+  <path class="ln" d="M360,76 L360,308 M360,308 L392,308" marker-end="url(#arw)"/>
+  <path class="ln" d="M360,76 L392,76" marker-end="url(#arw)"/>
+
+  <rect class="bx-g" x="392" y="52" width="200" height="48" rx="3"/>
+  <text class="t-lab" x="404" y="72">RDB · SQLite</text>
+  <text class="t-tiny" x="404" y="90">5 views · 215 columns · 53,375 rows</text>
+  <text class="t-sub" x="604" y="72">filter · sort · aggregate · cross-product</text>
+  <text class="t-tiny" x="604" y="90">→ <tspan font-family="Consolas,monospace">sql_query</tspan> · <tspan font-family="Consolas,monospace">table_info</tspan></text>
+
+  <rect class="bx-g" x="392" y="116" width="200" height="48" rx="3"/>
+  <text class="t-lab" x="404" y="136">Knowledge Graph · rdflib</text>
+  <text class="t-tiny" x="404" y="154">1,082,874 triples · 73 predicates</text>
+  <text class="t-sub" x="604" y="136">traversal — holdings · affiliates · themes · indices</text>
+  <text class="t-tiny" x="604" y="154">→ <tspan font-family="Consolas,monospace">graph_neighbors</tspan> · <tspan font-family="Consolas,monospace">graph_query</tspan></text>
+
+  <rect class="bx-g" x="392" y="172" width="200" height="48" rx="3"/>
+  <text class="t-lab" x="404" y="192">Lexical Index · BM25</text>
+  <text class="t-tiny" x="404" y="210">75,089 docs · Hangul bigrams</text>
+  <text class="t-sub" x="604" y="192">name · code · ticker · typo matching</text>
+  <text class="t-tiny" x="604" y="210">→ <tspan font-family="Consolas,monospace">search_products</tspan> · <tspan font-family="Consolas,monospace">resolve_entity</tspan></text>
+
+  <rect class="bx-n" x="392" y="228" width="200" height="48" rx="3"/>
+  <text class="t-lab" x="404" y="248">Vector Index · TF-IDF+LSA</text>
+  <text class="t-tiny" x="404" y="266">75,089 docs · 384 dimensions</text>
+  <text class="t-sub" x="604" y="248">queries that know the nature, not the name</text>
+  <text class="t-tiny" x="604" y="266">→ net gain: thematic recall@10 <tspan font-weight="700">+3.5 pp</tspan></text>
+
+  <rect class="bx-n" x="392" y="284" width="200" height="48" rx="3"/>
+  <text class="t-lab" x="404" y="304">External docs · Markdown</text>
+  <text class="t-tiny" x="404" y="322">3 files, 39 chunks</text>
+  <text class="t-sub" x="604" y="304">background — terms · risk factors explained</text>
+  <text class="t-tiny" x="604" y="322">→ <tspan font-family="Consolas,monospace">search_documents</tspan></text>
+
+  <rect x="18" y="126" width="332" height="196" fill="none"/>
+  <rect class="bx-t" x="18" y="126" width="332" height="196" rx="4"/>
+  <text class="t-lab" x="34" y="150">Routing, measured — 54 questions</text>
+  <text class="t-sub" x="34" y="176">graph pre-run</text><text class="t-num" x="330" y="176" text-anchor="end">6</text>
+  <rect class="f-g" x="34" y="182" width="33" height="8"/><rect class="bx" x="34" y="182" width="296" height="8"/>
+  <text class="t-sub" x="34" y="212">vector pre-run</text><text class="t-num" x="330" y="212" text-anchor="end">7</text>
+  <rect class="f-g" x="34" y="218" width="38" height="8"/><rect class="bx" x="34" y="218" width="296" height="8"/>
+  <text class="t-sub" x="34" y="248">document pre-run</text><text class="t-num" x="330" y="248" text-anchor="end">0</text>
+  <rect class="bx" x="34" y="254" width="296" height="8"/>
+  <text class="t-sub" x="34" y="284">nothing switched on</text><text class="t-num" x="330" y="284" text-anchor="end">41</text>
+  <rect class="f-k" x="34" y="290" width="225" height="8"/><rect class="bx" x="34" y="290" width="296" height="8"/>
+  <text class="t-tiny" x="34" y="314">Pure aggregation/sorting questions do not hit every store.</text>
+</svg>
+<figcaption><b>Figure 4.</b> Federated retrieval, yet it <em>does not always hit all five stores</em>. Median planning time is <b>0.8 ms</b>, and which stores were chosen, and why, is recorded verbatim in <code>think_trace</code>.</figcaption>
+</figure>
+
+<h4>Hybrid fusion — why we dropped RRF, and how large the alternative’s gain measured</h4>
+<p>At first we fused BM25 and vector results on an equal footing with <strong>RRF (Reciprocal Rank Fusion)</strong>.
+RRF lifts documents on which both retrievers agree, but in this corpus we saw cases where <strong>unrelated funds that each retriever had placed mid-list
+pushed out the top lexical match</strong> (“products related to battery cathode materials” → rank 1 was an unrelated fund of funds).
+If the top candidate is wrong, answer generation is contaminated, so the final structure is: <strong>lexical results take the head of the list,
+and the bottom ~30% of the slots are reserved for documents “found only by semantic search.”</strong></p>
+
+<figure>
+<svg viewBox="0 0 880 300" role="img" aria-label="The hybrid fusion structure and measured recall by retrieval method">
+  <text class="t-ttl" x="18" y="26">Figure 5. Fusion structure (left) and the size of its gain (right) — measured on 1,313 queries</text>
+
+  <!-- Left: structure -->
+  <rect class="bx-t" x="18" y="42" width="330" height="240" rx="4"/>
+  <text class="t-lab" x="34" y="64">Fusion — lexical is the head, vector the tail</text>
+  <rect class="bx-k" x="34" y="76" width="298" height="22"/><text class="t-sub" x="42" y="92" fill="#1f4e79" font-weight="700">Rank 1</text><text class="t-sub" x="322" y="92" text-anchor="end" fill="#1f4e79">lexical (BM25)</text>
+  <rect class="bx-k" x="34" y="100" width="298" height="22"/><text class="t-sub" x="42" y="116" fill="#1f4e79" font-weight="700">Ranks 2–5</text><text class="t-sub" x="322" y="116" text-anchor="end" fill="#1f4e79">lexical (BM25)</text>
+  <rect class="bx-k" x="34" y="124" width="298" height="22"/><text class="t-sub" x="42" y="140" fill="#1f4e79">Ranks 6–7</text><text class="t-sub" x="322" y="140" text-anchor="end" fill="#1f4e79">lexical (BM25)</text>
+  <rect class="bx-n" x="34" y="148" width="298" height="22"/><text class="t-sub" x="42" y="164">Ranks 8–10</text><text class="t-sub" x="322" y="164" text-anchor="end">vector-only slots (bottom ~30%)</text>
+  <text class="t-tiny" x="34" y="192">→ By design, <tspan font-weight="700">hybrid cannot fall below lexical alone.</tspan></text>
+  <text class="t-tiny" x="34" y="210">→ Measured: recall@1 · @5 <tspan font-weight="700">same as lexical alone, in all types.</tspan></text>
+  <rect class="bx-w" x="34" y="222" width="298" height="48" rx="3"/>
+  <text class="t-tiny" x="44" y="240">Of 1,313 queries, vector alone rescued <tspan font-weight="700">22 (1.7%)</tspan>;</text>
+  <text class="t-tiny" x="44" y="256">fusion lost <tspan font-weight="700">6 (0.5%)</tspan> — all in the rank 8–10 tail slots.</text>
+
+  <!-- Right: bars -->
+  <rect class="bx-t" x="360" y="42" width="502" height="240" rx="4"/>
+  <text class="t-lab" x="376" y="64">recall@10 — lexical / vector / fused</text>
+  <line class="grid" x1="470" y1="76" x2="470" y2="248"/>
+  <line class="grid" x1="560" y1="76" x2="560" y2="248"/>
+  <line class="grid" x1="650" y1="76" x2="650" y2="248"/>
+  <line class="grid" x1="740" y1="76" x2="740" y2="248"/>
+  <line class="grid" x1="830" y1="76" x2="830" y2="248"/>
+  <text class="t-tiny" x="470" y="262" text-anchor="middle">25%</text>
+  <text class="t-tiny" x="560" y="262" text-anchor="middle">50%</text>
+  <text class="t-tiny" x="650" y="262" text-anchor="middle">75%</text>
+  <text class="t-tiny" x="740" y="262" text-anchor="middle">100%</text>
+
+  <text class="t-sub" x="376" y="90">Official name</text>
+  <rect class="f-k" x="380" y="94" width="360" height="9"/><text class="t-tiny" x="746" y="102">100.0</text>
+  <rect class="f-n" x="380" y="105" width="216" height="9"/><text class="t-tiny" x="602" y="113">60.0</text>
+
+  <text class="t-sub" x="376" y="134">Code · ticker</text>
+  <rect class="f-k" x="380" y="138" width="178" height="9"/><text class="t-tiny" x="564" y="146">49.4</text>
+  <rect class="f-n" x="380" y="149" width="7" height="9"/><text class="t-tiny" x="393" y="157">1.9</text>
+
+  <text class="t-sub" x="376" y="178">Typos</text>
+  <rect class="f-k" x="380" y="182" width="335" height="9"/><text class="t-tiny" x="721" y="190">93.1</text>
+  <rect class="f-n" x="380" y="193" width="162" height="9"/><text class="t-tiny" x="548" y="201">45.0</text>
+
+  <text class="t-sub" x="376" y="222">Theme words</text>
+  <rect class="f-k" x="380" y="226" width="313" height="9"/><text class="t-tiny" x="699" y="219">87.0</text>
+  <rect class="f-n" x="380" y="237" width="201" height="9"/><text class="t-tiny" x="587" y="245">55.8</text>
+  <rect class="f-g" x="693" y="226" width="13" height="9"/>
+  <text class="t-tiny" x="712" y="234" fill="#2e7d5b" font-weight="700">→ 90.5 (fused, +3.5 pp)</text>
+
+  <rect class="f-k" x="376" y="270" width="9" height="9"/><text class="t-tiny" x="390" y="279">Lexical (BM25)</text>
+  <rect class="f-n" x="470" y="270" width="9" height="9"/><text class="t-tiny" x="484" y="279">Vector (TF-IDF+LSA)</text>
+  <rect class="f-g" x="600" y="270" width="9" height="9"/><text class="t-tiny" x="614" y="279">What fusion added — this is the only one</text>
+</svg>
+<figcaption><b>Figure 5.</b> We did not write that “semantic search absorbs typos and synonyms.” <b>Typo tolerance is provided by BM25’s Hangul bigrams</b> (lexical 93.1% vs. vector 45.0%). TF-IDF+LSA is based on lexical co-occurrence, not semantic embeddings, so this is about the ceiling for this method. Reproduce with: <code>python scripts/audit_vector.py --sections BC</code>.</figcaption>
+</figure>
+
+<h4>The model does not ask about the schema — so we changed the prompt design</h4>
+<p>In the 54-question run, the tools the model actually called were <code>sql_query</code> <strong>49 times</strong>, <code>graph_neighbors</code> <strong>7 times</strong> and
+<code>search_products</code> <strong>twice</strong>; <code>search_documents</code>, <code>table_info</code> and <code>graph_query</code> were called
+<strong>0 times each</strong>. The model does not <em>ask</em> about the schema.
+Therefore <strong>a column that is not in the prompt from the start effectively does not exist for the model</strong>.
+In fact, <code>has_buy_yield</code> was in the column list but had no ontology definition, so it did not appear on the schema card — and the model never used that column.
+This is why we decided <strong>to expose all 215 provided columns rather than a curated selection</strong>,
+and the measurement showing that latency does not grow even when the prompt grows 22-fold (05-2) backs that decision.</p>
+
+<div class="box law">
+  <p class="law-q">“What was handed over as fact at the moment of use was followed (5/5); prompt rules given in advance were ignored (4/4).”</p>
+  <p>Repeated measurements gave the same result.
+  Adding more warnings had no effect; <strong>handing the model the schema card, the pre-retrieved results and the lookup keys at the very moment it uses them</strong> did.</p>
+  <p style="margin-bottom:0">The clearest case: in a cross-product query, the <em>warning</em> “foreign ETFs have no 1-year return, so exclude them” was ignored,
+  but once <strong>we removed foreign ETFs from the <code>UNION</code> in the example SQL</strong>, that failure disappeared — the warning was not read, while the example was copied.
+  So instead of adding rules, we provide <strong>examples and facts in which the rules are already reflected</strong>.</p>
+</div>
+
+<h4>Answer generation — answers without a lookup are refused</h4>
+<p>When the model answers without calling tools, it <strong>makes up products that do not exist</strong> (Table 2).
+So <code>final_answer</code> enforces three states — <code>answered</code> / <code>cannot_confirm</code> / <code>clarify</code> — through the tool schema,
+and <strong>the server rejects and sends back any submission made without a single lookup</strong>.
+In the 54-question run this guard <strong>fired 5 times</strong>.</p>
+</section>
+
+
+<!-- ==================================================================== -->
+<!-- 03. System architecture                                              -->
+<!-- ==================================================================== -->
+<section>
+<h2><span class="no">03</span>System Architecture</h2>
+<p class="lead" style="margin-bottom:1.1em">
+Load → index → retrieve → generate. Because the four stages reference <strong>one and the same ontology</strong>,
+a definition made during loading becomes document text in the index, then the schema card for retrieval, and then the value validator for generation.
+</p>
+
+<figure>
+<svg viewBox="0 0 880 500" role="img" aria-label="The full pipeline in four stages: load, index, retrieve and generate">
+  <text class="t-ttl" x="18" y="26">Figure 6. The full pipeline — load → index → retrieve → generate</text>
+
+  <!-- Load -->
+  <rect class="bx-t" x="18" y="40" width="196" height="446" rx="4"/>
+  <rect class="f-k" x="18" y="40" width="196" height="26"/>
+  <text class="t-w" x="116" y="58" text-anchor="middle">Load (ETL)</text>
+  <rect class="bx" x="30" y="78" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="42" y="98">Organizers’ Excel ×4</text>
+  <text class="t-tiny" x="42" y="114">53,375 rows · as of 2026-08-21</text>
+  <rect class="bx" x="30" y="138" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="42" y="158">ETF holdings CSV</text>
+  <text class="t-tiny" x="42" y="174">22,599 rows · 1,162 ETFs · 09-05</text>
+  <rect class="bx" x="30" y="198" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="42" y="218">3 dictionary YAMLs</text>
+  <text class="t-tiny" x="42" y="234">77 managers · 48 themes · 97 firms</text>
+  <rect class="bx" x="30" y="258" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="42" y="278">External docs (PDF→MD)</text>
+  <text class="t-tiny" x="42" y="294">3 files, 39 chunks · source, date</text>
+
+  <path class="ln-k" d="M116,310 L116,330" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="30" y="330" width="172" height="70" rx="3"/>
+  <text class="t-lab" x="42" y="350" fill="#1f4e79">Normalize · derive</text>
+  <text class="t-tiny" x="42" y="368">ISO dates · keep leading zeros</text>
+  <text class="t-tiny" x="42" y="382">is_sellable · fund_family</text>
+  <text class="t-tiny" x="42" y="396">manager_name · manager_source</text>
+  <rect class="bx-g" x="30" y="410" width="172" height="62" rx="3"/>
+  <text class="t-lab" x="116" y="432" text-anchor="middle">SQLite <tspan font-family="Consolas,monospace">products.db</tspan></text>
+  <text class="t-tiny" x="116" y="450" text-anchor="middle">5 tables + 5 views</text>
+  <text class="t-num" x="116" y="466" text-anchor="middle">all 215 columns exposed</text>
+
+  <path class="ln-k" d="M214,250 L238,250" marker-end="url(#arwk)"/>
+
+  <!-- Index -->
+  <rect class="bx-t" x="238" y="40" width="196" height="446" rx="4"/>
+  <rect class="f-k" x="238" y="40" width="196" height="26"/>
+  <text class="t-w" x="336" y="58" text-anchor="middle">Index</text>
+  <rect class="bx-g" x="250" y="74" width="172" height="74" rx="3"/>
+  <text class="t-lab" x="262" y="93">Lexical index · BM25</text>
+  <text class="t-tiny" x="262" y="109">Hangul syllable bigrams</text>
+  <text class="t-tiny" x="262" y="123">exact product-name boost</text>
+  <text class="t-num" x="410" y="141" text-anchor="end">75,089 docs</text>
+  <rect class="bx-n" x="250" y="154" width="172" height="74" rx="3"/>
+  <text class="t-lab" x="262" y="173">Vector · TF-IDF+LSA</text>
+  <text class="t-tiny" x="262" y="189">384 dims · max_df 0.005</text>
+  <text class="t-tiny" x="262" y="203">no embedding API key needed</text>
+  <text class="t-num" x="410" y="221" text-anchor="end">75,089 docs</text>
+  <rect class="bx-g" x="250" y="234" width="172" height="96" rx="3"/>
+  <text class="t-lab" x="262" y="254">Knowledge graph · rdflib</text>
+  <text class="t-tiny" x="262" y="272">ABox: from SQLite + dictionaries</text>
+  <text class="t-tiny" x="262" y="286">TBox merge → materialization</text>
+  <text class="t-tiny" x="262" y="300">hasConstituent built from SQLite</text>
+  <text class="t-num" x="410" y="320" text-anchor="end">1,082,874 triples</text>
+  <rect class="bx-n" x="250" y="336" width="172" height="52" rx="3"/>
+  <text class="t-lab" x="262" y="356">Document chunk index</text>
+  <text class="t-tiny" x="262" y="372">front-matter source · as-of date</text>
+  <rect class="bx-w" x="250" y="394" width="172" height="80" rx="3"/>
+  <text class="t-lab" x="262" y="414"><tspan font-family="Consolas,monospace">ontology/*.ttl</tspan> loader</text>
+  <text class="t-tiny" x="262" y="432">generates schema cards</text>
+  <text class="t-tiny" x="262" y="446">generates value validators</text>
+  <text class="t-tiny" x="262" y="460">materializes inference rules</text>
+
+  <path class="ln-k" d="M434,250 L458,250" marker-end="url(#arwk)"/>
+
+  <!-- Retrieve -->
+  <rect class="bx-t" x="458" y="40" width="196" height="446" rx="4"/>
+  <rect class="f-k" x="458" y="40" width="196" height="26"/>
+  <text class="t-w" x="556" y="58" text-anchor="middle">Retrieve</text>
+  <rect class="bx-k" x="470" y="78" width="172" height="76" rx="3"/>
+  <text class="t-lab" x="482" y="98" fill="#1f4e79">Pre-analysis (pre-LLM)</text>
+  <text class="t-tiny" x="482" y="116">product-name span extraction</text>
+  <text class="t-tiny" x="482" y="130">entities → actual store codes</text>
+  <text class="t-tiny" x="482" y="144">ontology check (blocks AAAA)</text>
+  <path class="ln-k" d="M556,154 L556,168" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="470" y="168" width="172" height="72" rx="3"/>
+  <text class="t-lab" x="482" y="188" fill="#1f4e79">Round 0 · retrieval plan</text>
+  <text class="t-tiny" x="482" y="206">pre-runs only the needed stores</text>
+  <text class="t-tiny" x="482" y="220">injects result rows as facts</text>
+  <text class="t-tiny" x="482" y="234">median planning time 0.8 ms</text>
+  <path class="ln-k" d="M556,240 L556,254" marker-end="url(#arwk)"/>
+  <rect class="bx-g" x="470" y="254" width="172" height="128" rx="3"/>
+  <text class="t-lab" x="482" y="274">LLM tool-calling loop</text>
+  <text class="t-tiny" x="482" y="292">budget 120 s · max 8 rounds</text>
+  <text class="t-tiny" x="482" y="310">─ measured tool calls (54 Qs) ─</text>
+  <text class="t-tiny" x="482" y="326"><tspan font-family="Consolas,monospace">sql_query</tspan></text><text class="t-num" x="630" y="326" text-anchor="end">49</text>
+  <text class="t-tiny" x="482" y="342"><tspan font-family="Consolas,monospace">graph_neighbors</tspan></text><text class="t-num" x="630" y="342" text-anchor="end">7</text>
+  <text class="t-tiny" x="482" y="358"><tspan font-family="Consolas,monospace">search_products</tspan></text><text class="t-num" x="630" y="358" text-anchor="end">2</text>
+  <text class="t-tiny" x="482" y="374">3 other tools</text><text class="t-num" x="630" y="374" text-anchor="end">0</text>
+  <text class="t-tiny" x="482" y="400">→ Some tools go uncalled — which is</text>
+  <text class="t-tiny" x="492" y="414">why all 215 columns are exposed</text>
+  <rect class="bx-b" x="470" y="426" width="172" height="46" rx="3"/>
+  <text class="t-tiny" x="482" y="440">Submissions with 0 lookups are</text>
+  <text class="t-tiny" x="482" y="453"><tspan font-weight="700">rejected</tspan> and sent back —</text>
+  <text class="t-tiny" x="482" y="466"><tspan font-weight="700">fired 5 times</tspan> in 54 questions</text>
+
+  <path class="ln-k" d="M654,250 L678,250" marker-end="url(#arwk)"/>
+
+  <!-- Generate -->
+  <rect class="bx-t" x="678" y="40" width="184" height="446" rx="4"/>
+  <rect class="f-k" x="678" y="40" width="184" height="26"/>
+  <text class="t-w" x="770" y="58" text-anchor="middle">Generate</text>
+  <rect class="bx-k" x="690" y="78" width="160" height="62" rx="3"/>
+  <text class="t-lab" x="770" y="100" text-anchor="middle" fill="#1f4e79">HyperCLOVA X</text>
+  <text class="t-tiny" x="770" y="118" text-anchor="middle"><tspan font-family="Consolas,monospace">HCX-005</tspan> · function calling</text>
+  <text class="t-tiny" x="770" y="132" text-anchor="middle">CLOVA Studio, OpenAI-compatible</text>
+  <path class="ln-k" d="M770,140 L770,154" marker-end="url(#arwk)"/>
+  <rect class="bx-g" x="690" y="154" width="160" height="86" rx="3"/>
+  <text class="t-lab" x="702" y="174" font-size="11.5"><tspan font-family="Consolas,monospace">final_answer</tspan>: 3 states</text>
+  <text class="t-tiny" x="702" y="192">answered — from evidence</text>
+  <text class="t-tiny" x="702" y="208">cannot_confirm — unverifiable</text>
+  <text class="t-tiny" x="702" y="224">clarify — asks back</text>
+  <path class="ln-k" d="M770,240 L770,254" marker-end="url(#arwk)"/>
+  <rect class="bx-g" x="690" y="254" width="160" height="102" rx="3"/>
+  <text class="t-lab" x="702" y="274">5 fields · always 200</text>
+  <text class="t-tiny" x="702" y="292">question_id · question</text>
+  <text class="t-tiny" x="702" y="308"><tspan font-weight="700">retrieved_context</tspan> — table,</text>
+  <text class="t-tiny" x="712" y="322">as-of · count · SQL · codes</text>
+  <text class="t-tiny" x="702" y="338"><tspan font-weight="700">think_trace</tspan> — per-round log</text>
+  <text class="t-tiny" x="702" y="352"><tspan font-weight="700">answer</tspan> — Korean final answer</text>
+  <rect class="bx-w" x="690" y="370" width="160" height="102" rx="3"/>
+  <text class="t-lab" x="702" y="390">Answer policy</text>
+  <text class="t-tiny" x="702" y="408">figures, names: tool output only</text>
+  <text class="t-tiny" x="702" y="424">N total vs. 200 shown, split</text>
+  <text class="t-tiny" x="702" y="440">no forecasts, no firm picks</text>
+  <text class="t-tiny" x="702" y="456">explicit refusal if unverifiable</text>
+
+  <!-- the ontology runs through every stage -->
+  <path class="ln-d" d="M116,479 L770,479" stroke="#b5651d" stroke-width="1.6"/>
+  <path class="ln-d" d="M116,479 L116,472 M336,479 L336,474 M556,479 L556,472 M770,479 L770,472" stroke="#b5651d" stroke-width="1.6"/>
+</svg>
+<figcaption><b>Figure 6.</b> The orange dotted line means the ontology <em>runs through all four stages</em> — the same TTL becomes the derived definitions in loading, the inference rules in indexing, the schema card in retrieval, and the value validator in generation.</figcaption>
+</figure>
+
+<table>
+  <caption>Table 5. Components · roles · code locations</caption>
+  <thead><tr><th style="width:16%">Component</th><th>Role</th><th style="width:26%">Code</th></tr></thead>
+  <tbody>
+    <tr><th>ETL</th><td>Excel masters + constituents CSV → SQLite. ISO date conversion, on-sale flag, fund-family key, asset-manager normalization (derived from institution codes), 5 views · all 215 columns exposed</td><td><code>src/finagent/etl/</code></td></tr>
+    <tr><th>Ontology</th><td>Loads the TBox at runtime and generates the schema card (column ↔ Korean meaning · unit · allowed values) and the validators (value domains for credit rating and risk grade)</td><td><code>ontology/loader.py</code><br><span class="t-tiny"><code>Ontology.schema_card()</code> · <code>resolve_measure()</code></span></td></tr>
+    <tr><th>Knowledge Graph</th><td>Builds the ABox from SQLite + dictionaries, merges the TBox, then materializes inferences. Constituents are generated from the SQLite table, so they cannot diverge from SQL. Includes affiliate derivation</td><td><code>kb/graph.py</code><br><span class="t-tiny"><code>KG.build()</code> · <code>_materialize()</code> · <code>derive_group_affiliates()</code></span></td></tr>
+    <tr><th>Lexical Index</th><td>BM25 + Hangul syllable bigrams, exact product-name boost. Entity resolver (exact match · fuzzy candidates · company relations)</td><td><code>kb/search.py</code> · <code>entity.py</code> · <code>lexicon.py</code></td></tr>
+    <tr><th>Vector Index</th><td>TF-IDF (words + Hangul bigrams) → Truncated SVD to 384 dimensions → cosine. Deterministic, with no embedding key. Switchable via <code>VECTOR_BACKEND=openai</code></td><td><code>kb/vector.py</code></td></tr>
+    <tr><th>Retrieval Routing</th><td>The retrieval execution plan of round 0. Deterministically pre-runs only the stores needed and injects the results as facts</td><td><code>agent/routing.py</code><br><span class="t-tiny"><code>plan_retrieval()</code> · <code>signals_for()</code></span></td></tr>
+    <tr><th>Agent</th><td>Tool-calling LLM loop, time budget, evidence and trace collection, answer policy. Rejects answers submitted with zero lookups</td><td><code>agent/orchestrator.py</code> · <code>tools.py</code> · <code>answer.py</code></td></tr>
+    <tr><th>API</th><td>FastAPI <code>GET /answer</code>, <code>GET /health</code>. Always 200 + 5 fields</td><td><code>src/finagent/api.py</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Deployment — tailored to how the organizers call the evaluation</h3>
+
+<figure>
+<svg viewBox="0 0 880 204" role="img" aria-label="Deployment with Docker Compose on a Naver Cloud VPC">
+  <text class="t-ttl" x="18" y="26">Figure 7. Deployment — Naver Cloud Platform</text>
+  <rect class="bx" x="18" y="44" width="150" height="70" rx="4"/>
+  <text class="t-lab" x="93" y="70" text-anchor="middle">Evaluation system</text>
+  <text class="t-tiny" x="93" y="88" text-anchor="middle">sequential, no concurrency</text>
+  <text class="t-tiny" x="93" y="102" text-anchor="middle">300 s timeout per question</text>
+  <path class="ln-k" d="M168,79 L214,79" marker-end="url(#arwk)"/>
+  <text class="t-tiny" x="191" y="70" text-anchor="middle">HTTP :80</text>
+
+  <rect class="bx-t" x="214" y="44" width="648" height="126" rx="4"/>
+  <text class="t-lab" x="230" y="64">NCP VPC · Public Subnet · Ubuntu 24.04 · 4 vCPU / 16GB</text>
+  <rect class="bx-k" x="230" y="76" width="180" height="80" rx="3"/>
+  <text class="t-lab" x="320" y="98" text-anchor="middle" fill="#1f4e79">Docker Compose</text>
+  <text class="t-tiny" x="320" y="116" text-anchor="middle">container 8000 → host 80</text>
+  <text class="t-tiny" x="320" y="132" text-anchor="middle"><tspan font-family="Consolas,monospace">restart: unless-stopped</tspan></text>
+  <text class="t-tiny" x="320" y="148" text-anchor="middle">auto-recovers on crash or reboot</text>
+  <path class="ln" d="M410,116 L438,116" marker-end="url(#arw)"/>
+  <rect class="bx-g" x="438" y="76" width="180" height="80" rx="3"/>
+  <text class="t-lab" x="528" y="98" text-anchor="middle">FastAPI · uvicorn</text>
+  <text class="t-tiny" x="528" y="116" text-anchor="middle"><tspan font-family="Consolas,monospace">GET /answer</tspan> · <tspan font-family="Consolas,monospace">GET /health</tspan></text>
+  <text class="t-tiny" x="528" y="132" text-anchor="middle">always 200 OK · 5-field JSON</text>
+  <text class="t-tiny" x="528" y="148" text-anchor="middle">no auth header</text>
+  <path class="ln" d="M618,116 L646,116" marker-end="url(#arw)"/>
+  <rect class="bx-n" x="646" y="76" width="200" height="80" rx="3"/>
+  <text class="t-lab" x="746" y="98" text-anchor="middle">Done at image build time</text>
+  <text class="t-tiny" x="746" y="116" text-anchor="middle">store loaded + vector cache warmed</text>
+  <text class="t-tiny" x="746" y="132" text-anchor="middle">→ faster container startup</text>
+  <text class="t-tiny" x="746" y="148" text-anchor="middle"><tspan font-family="Consolas,monospace">HEALTHCHECK start-period 420s</tspan></text>
+  <text class="t-tiny" x="18" y="184">The organizers’ notice specifies plain HTTP on the standard port, so we put no certificate or reverse proxy in front</text>
+  <text class="t-tiny" x="18" y="198">(a Caddy + Let's Encrypt setup is also possible with <tspan font-family="Consolas,monospace">--profile https</tspan>, but it requires a domain).</text>
+</svg>
+<figcaption><b>Figure 7.</b> <code>.env</code> is listed in <code>.dockerignore</code>, so it is not baked into the image (protecting the API key); it is read at runtime via <code>env_file</code>.</figcaption>
+</figure>
+</section>
+
+
+<!-- ==================================================================== -->
+<!-- 04. Key functional flow                                              -->
+<!-- ==================================================================== -->
+<section>
+<h2><span class="no">04</span>Key Functional Flow</h2>
+<p class="lead" style="margin-bottom:1.1em">
+Data collection → ontology design → graph construction → retrieval.
+We show the four stages as <strong>the path that a single real question takes through them</strong>.
+</p>
+
+<figure>
+<svg viewBox="0 0 880 258" role="img" aria-label="The four stages of data collection, ontology design, graph construction and retrieval, with the outputs of each stage">
+  <text class="t-ttl" x="18" y="26">Figure 8. The four stages, their outputs, and their verification points</text>
+
+  <rect class="bx-k" x="18" y="44" width="196" height="106" rx="4"/>
+  <circle cx="44" cy="70" r="13" class="f-k"/><text class="t-w" x="44" y="75" text-anchor="middle">1</text>
+  <text class="t-lab" x="66" y="75">Data collection</text>
+  <text class="t-tiny" x="34" y="98">Excel ×4, 53,375 rows (as of 08-21)</text>
+  <text class="t-tiny" x="34" y="114">Constituents 22,599 rows (09-05)</text>
+  <text class="t-tiny" x="34" y="130">YAML dictionaries · 39 doc chunks</text>
+  <text class="t-tiny" x="34" y="144" fill="#b5651d">Check: recount before/after fills</text>
+
+  <path class="ln-k" d="M214,97 L238,97" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="238" y="44" width="196" height="106" rx="4"/>
+  <circle cx="264" cy="70" r="13" class="f-k"/><text class="t-w" x="264" y="75" text-anchor="middle">2</text>
+  <text class="t-lab" x="286" y="75">Ontology design</text>
+  <text class="t-tiny" x="254" y="98">6 TBox files · 40 classes · 261 props</text>
+  <text class="t-tiny" x="254" y="114">enums (e.g. 20-step credit ranking)</text>
+  <text class="t-tiny" x="254" y="130">13 SHACL NodeShapes</text>
+  <text class="t-tiny" x="254" y="144" fill="#b5651d">Check: 215 props mapped to columns?</text>
+
+  <path class="ln-k" d="M434,97 L458,97" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="458" y="44" width="196" height="106" rx="4"/>
+  <circle cx="484" cy="70" r="13" class="f-k"/><text class="t-w" x="484" y="75" text-anchor="middle">3</text>
+  <text class="t-lab" x="506" y="75">Graph construction</text>
+  <text class="t-tiny" x="474" y="98">ABox: SQLite + dictionaries → 965,823</text>
+  <text class="t-tiny" x="474" y="114">TBox merge → +117,051 inferred</text>
+  <text class="t-tiny" x="474" y="130">608 affiliate edges (8 groups, 65 cos)</text>
+  <text class="t-tiny" x="474" y="144" fill="#b5651d">Check: SQL ↔ graph count match</text>
+
+  <path class="ln-k" d="M654,97 L678,97" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="678" y="44" width="184" height="106" rx="4"/>
+  <circle cx="704" cy="70" r="13" class="f-k"/><text class="t-w" x="704" y="75" text-anchor="middle">4</text>
+  <text class="t-lab" x="726" y="75">Retrieve · generate</text>
+  <text class="t-tiny" x="694" y="98">pre-analysis → plan → tool loop</text>
+  <text class="t-tiny" x="694" y="114">evidence → 3-state submission</text>
+  <text class="t-tiny" x="694" y="130">0-lookup answers are rejected</text>
+  <text class="t-tiny" x="694" y="144" fill="#b5651d">Check: grading on 54-Q answer key</text>
+
+  <rect class="bx-w" x="18" y="166" width="844" height="76" rx="4"/>
+  <text class="t-lab" x="34" y="188">The point of this flow chart: every stage has a “verification point” attached</text>
+  <text class="t-sub" x="34" y="210">All six incidents in this project passed without an exception or a log entry (Table 2). They are not caught by success/failure — only by <tspan font-weight="700">counting again</tspan>.</text>
+  <text class="t-sub" x="34" y="230">So each arrow defines “what is recounted before handing over to the next stage” — and that is part of the pipeline.</text>
+</svg>
+<figcaption><b>Figure 8.</b> The four stages run in sequence, but the stage-3 graph takes <em>both</em> the stage-2 ontology and the stage-1 SQLite store as its sources. Constituent relationships are generated <b>from the SQLite table</b>, not from the graph.</figcaption>
+</figure>
+
+<h3>How a single question is processed — a real trace</h3>
+<p>Below is the actual execution record of question <code>G-015</code>, difficulty <strong>[Hard]</strong> (<code>data/eval/truth_results.jsonl</code>).
+All numbers and SQL in the figure are <strong>copied verbatim from the actual response</strong>; the question and the Korean answer text are shown in English translation.</p>
+
+<figure>
+<svg viewBox="0 0 880 476" role="img" aria-label="Actual trace of question G-015 through pre-analysis, routing, graph lookup, SQL lookup and final answer">
+  <text class="t-ttl" x="18" y="26" font-size="13.5">Figure 9. “Of the domestic ETFs holding Samsung Electronics, name the 3 with the largest net assets” — 15.6 s, correct</text>
+
+  <!-- participants -->
+  <text class="t-tiny" x="18" y="52">Participants</text>
+  <rect class="bx-n" x="88" y="40" width="70" height="16" rx="2"/><text class="t-tiny" x="123" y="52" text-anchor="middle">Evaluator</text>
+  <rect class="bx-n" x="164" y="40" width="76" height="16" rx="2"/><text class="t-tiny" x="202" y="52" text-anchor="middle">Pre-analysis</text>
+  <rect class="bx-n" x="246" y="40" width="70" height="16" rx="2"/><text class="t-tiny" x="281" y="52" text-anchor="middle">Routing</text>
+  <rect class="bx-n" x="322" y="40" width="78" height="16" rx="2"/><text class="t-tiny" x="361" y="52" text-anchor="middle">HCX-005</text>
+  <rect class="bx-n" x="406" y="40" width="90" height="16" rx="2"/><text class="t-tiny" x="451" y="52" text-anchor="middle">RDB · KG · index</text>
+
+  <!-- step 1 -->
+  <rect class="bx-k" x="18" y="62" width="330" height="34" rx="3"/>
+  <text class="t-sub" x="30" y="84"><tspan font-family="Consolas,monospace">GET /answer?question_id=G-015&amp;question=…</tspan></text>
+  <path class="ln-k" d="M348,79 L370,79" marker-end="url(#arwk)"/>
+
+  <!-- step 2: pre-analysis -->
+  <rect class="bx-g" x="18" y="104" width="844" height="60" rx="3"/>
+  <text class="t-lab" x="30" y="124">① Pre-analysis — before any LLM call, deterministic</text>
+  <text class="t-sub" x="30" y="144">no product mention · company <tspan font-weight="700">Samsung Electronics</tspan> · theme domestic/Korea · product type <tspan font-weight="700">domestic ETF</tspan> · sort key <tspan font-weight="700">‘net assets’</tspan> · 0 ontology violations</text>
+  <text class="t-tiny" x="30" y="158">Entity resolution pins down the store’s actual spelling — extending this step to the SQL path was the fix for the “133 Naver ETFs not found” incident (Table 2).</text>
+
+  <!-- step 3: routing -->
+  <rect class="bx-g" x="18" y="172" width="844" height="58" rx="3"/>
+  <text class="t-lab" x="30" y="192">② Round 0 · retrieval execution plan</text>
+  <text class="t-sub" x="30" y="212"><tspan fill="#2e7d5b" font-weight="700">graph = run</tspan> (holdings query on ‘Samsung Electronics’) / <tspan fill="#7a8699">vector = skipped</tspan> (no specific product named) / <tspan fill="#7a8699">documents = skipped</tspan> (numeric/list query)</text>
+  <text class="t-tiny" x="30" y="226">It does not hit every store. What was switched on, and why, is recorded in <tspan font-family="Consolas,monospace">think_trace</tspan>.</text>
+
+  <!-- step 4: graph -->
+  <rect class="bx-k" x="18" y="238" width="844" height="46" rx="3"/>
+  <text class="t-lab" x="30" y="258">③ Round 0 run — <tspan font-family="Consolas,monospace">graph_neighbors('삼성전자', constituentOf)</tspan></text>
+  <text class="t-sub" x="30" y="276">→ <tspan font-weight="700">229 hits</tspan> · 177-character result. SQL also gives 229 for this count (cross-validated · Table 2).</text>
+
+  <!-- step 5: sql -->
+  <rect class="bx-k" x="18" y="292" width="844" height="70" rx="3"/>
+  <text class="t-lab" x="30" y="312">④ Round 1 — <tspan font-family="Consolas,monospace">sql_query</tspan></text>
+  <rect class="bx-t" x="30" y="320" width="820" height="34" rx="2"/>
+  <text class="t-tiny" x="40" y="336" font-family="Consolas,monospace">SELECT e.pd_abrv_nm, e.pd_net_tamt FROM v_etf_kr e JOIN v_etf_constituent c ON c.etf_itm_no = e.pd_itm_no</text>
+  <text class="t-tiny" x="40" y="350" font-family="Consolas,monospace">WHERE c.company_name='삼성전자' AND c.is_cash=0 AND e.is_on_sale=1 AND e.pd_net_tamt IS NOT NULL ORDER BY e.pd_net_tamt DESC LIMIT 3</text>
+
+  <!-- step 6 -->
+  <rect class="bx-n" x="18" y="370" width="410" height="42" rx="3"/>
+  <text class="t-lab" x="30" y="390">⑤ Round 2 — text only, no tool call</text>
+  <text class="t-tiny" x="30" y="404">A round trip that adds nothing to the answer (occurs in 50 of 54 questions · 05-2)</text>
+  <rect class="bx-g" x="440" y="370" width="422" height="42" rx="3"/>
+  <text class="t-lab" x="452" y="390">⑥ Round 3 — <tspan font-family="Consolas,monospace">final_answer(status=answered)</tspan></text>
+  <text class="t-tiny" x="452" y="404">1 evidence item · 15.6 s · refs KODEX 200 | TIGER 200 | TIGER 반도체TOP10</text>
+
+  <!-- result -->
+  <rect class="bx-k" x="18" y="420" width="844" height="46" rx="3"/>
+  <text class="t-lab" x="30" y="440">⑦ Response — <tspan font-family="Consolas,monospace">answer</tspan> <tspan class="t-tiny" font-weight="400">(Korean in the original; translated here)</tspan></text>
+  <text class="t-sub" x="30" y="458">“KODEX 200: KRW 25.4748 tn, TIGER 200: KRW 10.4278 tn, TIGER 반도체TOP10: KRW 9.7582 tn” <tspan class="t-tiny">(+ view, as-of date, count, SQL, codes in retrieved_context)</tspan></text>
+</svg>
+<figcaption><b>Figure 9.</b> This question is <b>impossible from the very first step with SQL alone</b> — the four masters have no constituents column (Figure 1, difficulty ②). The graph resolves the relationship, SQL finishes the sorting and aggregation, and <b>because both paths draw on the same SQLite table, the numbers do not diverge</b>. (<code>'삼성전자'</code> is the stored company name of Samsung Electronics; <code>TIGER 반도체TOP10</code> is TIGER Semiconductor TOP10.)</figcaption>
+</figure>
+
+<table>
+  <caption>Table 6. The answer-policy state machine — mapped to the organizers’ evaluation rules</caption>
+  <thead><tr><th style="width:16%">State</th><th style="width:32%">When it is chosen</th><th>What the server guarantees</th></tr></thead>
+  <tbody>
+    <tr><th><code>answered</code></th><td>When the values are confirmed by tool results</td>
+        <td>Figures and product names come <strong>only from tool results</strong>. The evidence (Korean view name · reference date · count · SQL/SPARQL · product codes) must be recorded in <code>retrieved_context</code>. When capped, reported separately as <strong>“N in total (200 shown)”</strong></td></tr>
+    <tr><th><code>cannot_confirm</code></th><td>A nonexistent product, company or value; outside the data’s range; or the product type has no such data</td>
+        <td>Starts with “This cannot be confirmed from the provided data.” Violations of the ontology’s allowed values (credit rating AAAA, risk grade 7) are <strong>blocked in pre-analysis</strong>. <span class="ok">Measured: 19/19 correct</span></td></tr>
+    <tr><th><code>clarify</code></th><td>When the conditions are too ambiguous to pin down an answer</td><td>Responds with a clarifying question (ending in a question mark)</td></tr>
+    <tr class="tot"><th>Common guards</th><td colspan="2"><strong>Submissions with zero lookups are rejected</strong> and sent back (fired 5 times in 54 questions) · no return forecasts or definitive recommendations · when the budget (120 s) is about to run out, the loop is force-stopped and answers with the evidence gathered · <strong>even on an internal error, 200 + the same schema instead of a 500</strong></td></tr>
+  </tbody>
+</table>
+</section>
+
+
+<!-- ==================================================================== -->
+<!-- 05. Expected impact · scalability                                    -->
+<!-- ==================================================================== -->
+<section class="fit">
+<h2><span class="no">05</span>Expected Impact · Scalability</h2>
+
+<h3>05-1. Measured performance</h3>
+<div class="box warn" style="margin-top:.4em">
+  <p style="margin:0"><strong>About the answer key —</strong> the organizers did not disclose the evaluation questions or their answers (task description: no reference question set included).
+  The figures below are therefore based on <strong>54 self-built questions whose answers are computed from the provided data via SQL and the graph</strong>,
+  not on performance against the organizers’ evaluation set. The answer key is recomputed from the data at grading time, so when the data is updated the answers are updated along with it.</p>
+</div>
+
+<table>
+  <caption>Table 7. Grading results on our own 54-question answer key — measured with <code>scripts/eval_truth.py</code></caption>
+  <thead>
+    <tr><th style="width:14%">Difficulty</th><th class="c">Correct / Qs</th><th class="c">Accuracy</th>
+        <th style="width:14%">Product type</th><th class="c">Correct / Qs</th>
+        <th style="width:20%">Response time</th><th class="c">Value</th></tr>
+  </thead>
+  <tbody>
+    <tr><th>Easy</th><td class="c">8 / 10</td><td class="c">80.0%</td>
+        <th>Domestic ETF</th><td class="c"><span class="ok">14 / 14</span></td>
+        <td>Mean</td><td class="c"><strong>20.6 s</strong></td></tr>
+    <tr><th>Medium</th><td class="c">14 / 16</td><td class="c">87.5%</td>
+        <th>Bonds</th><td class="c"><span class="ok">9 / 9</span></td>
+        <td>Median</td><td class="c">14.2 s</td></tr>
+    <tr><th>Hard</th><td class="c">6 / 9</td><td class="c">66.7%</td>
+        <th>Funds</th><td class="c">10 / 12</td>
+        <td>Max</td><td class="c">87.4 s</td></tr>
+    <tr><th>Unanswerable</th><td class="c"><span class="ok">19 / 19</span></td><td class="c"><span class="ok">100%</span></td>
+        <th>Foreign ETF</th><td class="c">5 / 7</td>
+        <td>Over 60 s</td><td class="c">1</td></tr>
+    <tr class="tot"><th>Total</th><td class="c"><strong>47 / 54</strong></td><td class="c"><strong>87.0%</strong></td>
+        <th>Cross-product</th><td class="c">8 / 11</td>
+        <td><strong>Over 300 s</strong></td><td class="c"><span class="ok"><strong>0</strong></span></td></tr>
+  </tbody>
+</table>
+<p style="font-size:9pt;color:#5c6b80;margin-top:-.2em">
+All 19 unanswerable questions were answered correctly — because the ontology value validator blocks nonexistent values in pre-analysis (02-2, Figure 3 ②).
+The weakest areas are <strong>cross-product queries (8/11)</strong> and <strong>Hard difficulty (6/9)</strong>.
+</p>
+
+<table>
+  <caption>Table 8. All 7 wrong answers</caption>
+  <thead><tr><th style="width:8%">Q</th><th style="width:8%" class="c">Difficulty</th><th style="width:44%">Question (translated)</th><th>What went wrong · diagnosis</th></tr></thead>
+  <tbody>
+    <tr><td>G-012</td><td class="c">Medium</td><td>How many currency-hedged overseas-bond public funds are currently on sale?</td><td>Expected value 63 missing from the answer — ambiguous definition: <strong>“fund class or fund?”</strong> (06-D)</td></tr>
+    <tr><td>G-027</td><td class="c">Easy</td><td>Among public funds on sale, how many have risk grade 1?</td><td>Expected value 444 missing — same cause</td></tr>
+    <tr><td>G-043</td><td class="c">Hard</td><td>Across domestic ETFs and public funds on sale combined, how many products have risk grade 1?</td><td>Expected value 667 missing — same cause + cross-product query</td></tr>
+    <tr><td>G-044</td><td class="c">Hard</td><td>How many domestic ETFs invest in bonds, and how many bond-type public funds are there, respectively?</td><td>0/2 — in the cross-product query, the two product types use different criteria for “bond-type”</td></tr>
+    <tr><td>G-032</td><td class="c">Medium</td><td>Among foreign ETFs, considering only bond products, which 3 have the largest AUM?</td><td>0/3 — interpretation of the foreign-ETF asset-class column</td></tr>
+    <tr><td>G-037</td><td class="c">Hard</td><td>How many domestic ETFs hold SK hynix?</td><td>Expected value 214 missing — a scope limit: the constituents <strong>cover only the top holdings</strong></td></tr>
+    <tr><td>G-034</td><td class="c">Easy</td><td>What is the name of the asset manager of Invesco QQQ Trust, Series 1?</td><td>Mismatch in the manager’s official name (<code>Invesco Capital Management L…</code>) — the edge of exact-string-match grading</td></tr>
+  </tbody>
+</table>
+<p style="font-size:9pt;color:#5c6b80;margin-top:-.2em">
+<strong>4 of the 7 share the same cause</strong> (an ambiguous definition of what to count). This is not a failure of the model but <strong>a question the ontology has not yet answered</strong> —
+whether “the number of funds” counts classes or families is a matter for <strong>definition</strong>, not for the data,
+and making that definition explicit in the ontology is the next piece of work (06-D).
+</p>
+
+<h3>05-2. The structure of latency — what consumes the time</h3>
+
+<figure>
+<svg viewBox="0 0 880 250" role="img" aria-label="Two measurements: prompt size is unrelated to latency, and what creates latency is the number of round trips">
+  <text class="t-ttl" x="18" y="26">Figure 10. Prompt size does not create latency (left) · round trips do (right)</text>
+
+  <!-- left -->
+  <rect class="bx-t" x="18" y="42" width="420" height="196" rx="4"/>
+  <text class="t-lab" x="34" y="64">Median first-call latency (s)</text>
+  <line class="grid" x1="70" y1="180" x2="424" y2="180"/>
+  <line class="grid" x1="70" y1="140" x2="424" y2="140"/>
+  <line class="grid" x1="70" y1="100" x2="424" y2="100"/>
+  <text class="t-tiny" x="62" y="184" text-anchor="end">0</text>
+  <text class="t-tiny" x="62" y="144" text-anchor="end">2.5</text>
+  <text class="t-tiny" x="62" y="104" text-anchor="end">5.0</text>
+  <rect class="f-k" x="96" y="134" width="52" height="46"/><text class="t-tiny" x="122" y="128" text-anchor="middle">2.90</text>
+  <rect class="f-k" x="176" y="122" width="52" height="58"/><text class="t-tiny" x="202" y="116" text-anchor="middle">3.65</text>
+  <rect class="f-k" x="256" y="133" width="52" height="47"/><text class="t-tiny" x="282" y="127" text-anchor="middle">2.94</text>
+  <rect class="f-k" x="336" y="119" width="52" height="61"/><text class="t-tiny" x="362" y="113" text-anchor="middle">3.82</text>
+  <text class="t-tiny" x="122" y="196" text-anchor="middle">599</text>
+  <text class="t-tiny" x="202" y="196" text-anchor="middle">5,591</text>
+  <text class="t-tiny" x="282" y="196" text-anchor="middle">8,789</text>
+  <text class="t-tiny" x="362" y="196" text-anchor="middle">13,495</text>
+  <text class="t-tiny" x="242" y="212" text-anchor="middle">prompt tokens</text>
+  <text class="t-sub" x="34" y="230"><tspan font-weight="700" fill="#2e7d5b">Essentially flat</tspan> over a 22× increase → exposing all 215 columns costs nothing.</text>
+
+  <!-- right -->
+  <rect class="bx-t" x="450" y="42" width="412" height="196" rx="4"/>
+  <text class="t-lab" x="466" y="64">Marginal cost of one more round (s)</text>
+  <text class="t-sub" x="466" y="92">Round 1 → 2</text>
+  <rect class="f-b" x="580" y="80" width="224" height="16"/><text class="t-num" x="812" y="93" fill="#a32d2d">+11.2 s</text>
+  <text class="t-sub" x="466" y="122">Round 2 → 3</text>
+  <rect class="f-n" x="580" y="110" width="36" height="16"/><text class="t-num" x="624" y="123">+1.8</text>
+  <text class="t-sub" x="466" y="152">Round 3 → 4</text>
+  <rect class="f-n" x="580" y="140" width="74" height="16"/><text class="t-num" x="662" y="153">+3.7</text>
+  <rect class="bx-w" x="466" y="164" width="380" height="68" rx="3"/>
+  <text class="t-sub" x="478" y="181"><tspan font-weight="700">The first round trip is the most expensive.</tspan> Yet in <tspan font-weight="700">50</tspan> of</text>
+  <text class="t-sub" x="478" y="195">the 54 questions, one round right before submission emits</text>
+  <text class="t-sub" x="478" y="209">only text, without a tool call — a round trip that adds nothing.</text>
+  <text class="t-tiny" x="478" y="224">Correlation between answer length and time: 0.00</text>
+</svg>
+<figcaption><b>Figure 10.</b> The 35-second calls observed earlier were not caused by prompt size but by <b>rate-limit waits on the test-app tier</b>. These two measurements led to two different conclusions: “do not curate the columns — expose them all” and “reduce the number of round trips.”</figcaption>
+</figure>
+
+<h3>05-3. Points of business application</h3>
+<table>
+  <caption>Table 9. Business application — what is already built into the architecture</caption>
+  <thead><tr><th style="width:17%">Application</th><th style="width:47%">What this system already does</th><th>Remaining work</th></tr></thead>
+  <tbody>
+    <tr><th>Advisory support</th>
+        <td>Product search, comparison and condition filtering in natural language. Every answer carries <strong>the referenced view’s Korean name · reference date · count · product codes</strong>, so an advisor can check the source immediately</td>
+        <td>A connector to the in-house product master; integration with customers’ holdings</td></tr>
+    <tr><th>Compliance</th>
+        <td><strong>Ungrounded answers are structurally impossible</strong> (zero-lookup submissions are rejected) · no return forecasts or definitive recommendations · explicit refusal when unverifiable. <code>think_trace</code> provides an audit trail as is</td>
+        <td>Move the prohibited terms and mandatory wording of internal review rules into ontology constraints</td></tr>
+    <tr><th>Product data quality</th>
+        <td>SQL ↔ graph cross-validation <strong>detects loading errors automatically</strong>. Missing-value fills record their provenance in columns such as <code>manager_source</code></td>
+        <td>Adopt <code>pyshacl</code> to promote the 13 SHACL NodeShapes to <strong>actual validation at load time</strong></td></tr>
+    <tr><th>Internal knowledge search</th>
+        <td>The ontology holds “what each column means” in Korean — it doubles as onboarding documentation for new staff</td>
+        <td>Expand the unstructured documents, such as terms and conditions and prospectuses (currently 3 files, 39 chunks)</td></tr>
+  </tbody>
+</table>
+
+<h3>05-4. Scalability — the cost of adding a new product type</h3>
+
+<figure>
+<svg viewBox="0 0 880 208" role="img" aria-label="Adding a new product type takes one view and one TTL; everything else is generated automatically">
+  <text class="t-ttl" x="18" y="26">Figure 11. Adding a new product type — people do two things, the loader builds the rest</text>
+
+  <rect class="bx-w" x="18" y="44" width="200" height="120" rx="4"/>
+  <text class="t-lab" x="118" y="66" text-anchor="middle">What people do</text>
+  <rect class="bx" x="32" y="78" width="172" height="34" rx="3"/>
+  <text class="t-sub" x="44" y="99">① Add one view <tspan class="t-tiny">(ETL)</tspan></text>
+  <rect class="bx" x="32" y="118" width="172" height="34" rx="3"/>
+  <text class="t-sub" x="44" y="139">② Add one TTL <tspan class="t-tiny">(+ dict. entries)</tspan></text>
+
+  <path class="ln-k" d="M218,104 L250,104" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="250" y="44" width="140" height="120" rx="4"/>
+  <text class="t-lab" x="320" y="80" text-anchor="middle" fill="#1f4e79">At startup</text>
+  <text class="t-lab" x="320" y="102" text-anchor="middle" fill="#1f4e79">Ontology loader</text>
+  <text class="t-tiny" x="320" y="126" text-anchor="middle"><tspan font-family="Consolas,monospace">ontology/loader.py</tspan></text>
+  <text class="t-tiny" x="320" y="142" text-anchor="middle">no code changes</text>
+
+  <path class="ln-k" d="M390,104 L414,104 M414,60 L414,148 M414,60 L438,60 M414,104 L438,104 M414,148 L438,148" marker-end="url(#arwk)"/>
+  <rect class="bx-g" x="438" y="44" width="200" height="34" rx="3"/>
+  <text class="t-sub" x="450" y="65">Schema card <tspan class="t-tiny">(LLM prompt)</tspan></text>
+  <rect class="bx-g" x="438" y="88" width="200" height="34" rx="3"/>
+  <text class="t-sub" x="450" y="109">Value validator <tspan class="t-tiny">(enum → allowed set)</tspan></text>
+  <rect class="bx-g" x="438" y="132" width="200" height="34" rx="3"/>
+  <text class="t-sub" x="450" y="153">Graph ABox + inferred triples</text>
+
+  <path class="ln-k" d="M638,104 L662,104" marker-end="url(#arwk)"/>
+  <rect class="bx-k" x="662" y="44" width="200" height="120" rx="4"/>
+  <text class="t-lab" x="762" y="72" text-anchor="middle" fill="#1f4e79">Usable immediately</text>
+  <text class="t-tiny" x="762" y="96" text-anchor="middle">auto-added to lexical &amp; vector index</text>
+  <text class="t-tiny" x="762" y="114" text-anchor="middle">included in cross-query UNIONs</text>
+  <text class="t-tiny" x="762" y="132" text-anchor="middle">Korean view name shown in evidence</text>
+  <text class="t-tiny" x="762" y="150" text-anchor="middle">LLM provider swap = one env variable</text>
+
+  <text class="t-tiny" x="18" y="188">Evidence: already proven once — the constituents (<tspan font-family="Consolas,monospace">etf_constituent</tspan>) were added as 1 view + 1 TTL and appeared in SQL, graph, indices and evidence at once.</text>
+  <text class="t-tiny" x="18" y="202">Thanks to the LLM adapter, switching cost was practically zero when the rules fixed the provider to HyperCLOVA X (one <tspan font-family="Consolas,monospace">LLM_PROVIDER</tspan> env variable).</text>
+</svg>
+<figcaption><b>Figure 11.</b> Adding a TTL grows the prompt, the validator and the graph together; none of the three needs separate attention.</figcaption>
+</figure>
+
+<h4>Directions for extension</h4>
+<ul class="tick">
+  <li><strong>More product types</strong> — overseas bonds · wrap accounts · trusts · derivative-linked securities (ELS/DLS) each attach as one view + one TTL. The procedure has already been validated on the four masters.</li>
+  <li><strong>More relationships</strong> — <code>affiliateOf</code> currently consists of <strong>608 edges</strong> derived from group-stock ETFs. If shareholding data becomes available, the same pipeline can formally derive <code>subsidiaryOf</code>, promoting “affiliate” to “subsidiary.”</li>
+  <li><strong>Better retrieval</strong> — switch to commercial embeddings with <code>VECTOR_BACKEND=openai</code> (no code change needed). This leaves room to exceed the current TF-IDF+LSA ceiling, but <strong>we do not claim an improvement we have not measured</strong>.</li>
+  <li><strong>Stronger validation</strong> — adopt <code>pyshacl</code> so the 13 SHACL NodeShapes, so far only declared, are validated at load time.</li>
+  <li><strong>Sharper definitions</strong> — declare <strong>“what counts as one”</strong>, the cause of 4 of the 7 wrong answers, as explicit cardinality in the ontology (05-1, Table 8).</li>
+</ul>
+</section>
+
+
+<!-- ==================================================================== -->
+<!-- 06. Appendix                                                         -->
+<!-- ==================================================================== -->
+<section>
+<h2><span class="no">06</span>Appendix</h2>
+
+<h3>06-A. Ontology schema summary</h3>
+<table>
+  <caption>Table 10. Ontology composition summary (<code>ontology/*.ttl</code> · 6 files)</caption>
+  <thead><tr><th style="width:26%">Item</th><th style="width:16%" class="c">Count</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><th>TBox files</th><td class="c">6</td><td><code>common</code> · <code>bond_kr</code> · <code>etf_kr</code> · <code>etf_gl</code> · <code>fund_pub</code> · <code>etf_constituent</code></td></tr>
+    <tr><th>Classes</th><td class="c">40</td><td>Top-level <code>fp:Product</code> → listing type → product type. <code>DomesticListedProduct</code>/<code>ForeignListedProduct</code> added to cover ETNs</td></tr>
+    <tr><th>Property definitions</th><td class="c">261</td><td>Of these, <strong>215</strong> are linked to actual view columns via <code>fp:sourceTable</code> / <code>fp:sourceColumn</code></td></tr>
+    <tr><th>Enumerated individuals</th><td class="c">—</td><td>Credit rating AAA–D (<strong>20-step ordinal</strong>) · risk grade 1–6 · asset class · investment region · distribution frequency. Expressions such as “AA- or higher” are expanded automatically by ordinal comparison</td></tr>
+    <tr><th>Object properties</th><td class="c">—</td><td><code>managedBy</code>⇄<code>manages</code> · <code>hasConstituent</code>⇄<code>constituentOf</code> · <code>affiliateOf</code> · <code>subsidiaryOf</code> · <code>hasTheme</code> · <code>tracksIndex</code> · <code>hasShareClass</code> (reverse directions generated automatically from the <code>owl:inverseOf</code> declarations)</td></tr>
+    <tr><th>SHACL NodeShape</th><td class="c">13</td><td><strong>Declared only; not validated at runtime</strong> (no <code>pyshacl</code> dependency) — see 06-D</td></tr>
+    <tr><th>ABox (built at startup)</th><td class="c">965,823</td><td>Generated from SQLite + dictionaries (products · managers · indices · themes · companies · fund families · holdings)</td></tr>
+    <tr><th>Materialized inferences</th><td class="c">117,051</td><td>Superclass inheritance · inverse relations · domain/range type inference. <strong>Zero inference cost at query time</strong></td></tr>
+    <tr class="tot"><th>Knowledge graph total</th><td class="c">1,082,874</td><td><strong>73</strong> predicates (previously 5,082 → cleaned up by folding holding weights into a column instead of per-company predicates)</td></tr>
+  </tbody>
+</table>
+
+<h3>06-B. API specification</h3>
+<table>
+  <caption>Table 11. Endpoint · request · response</caption>
+  <thead><tr><th style="width:20%">Item</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><th>Endpoint</th><td><code>GET http://223.130.161.217/answer</code> — path fixed at <code>/answer</code>, no auth header, no POST body</td></tr>
+    <tr><th>Request parameters</th><td><code>question_id</code> (string, required · echoed back as is) · <code>question</code> (string, required · URL-encoded). Undefined parameters are ignored</td></tr>
+    <tr><th>Response</th><td><code>200 OK</code> · <code>application/json; charset=utf-8</code> · <strong>all 5 fields are strings</strong><br>
+        <code>question_id</code> · <code>question</code> · <code>retrieved_context</code> · <code>think_trace</code> · <code>answer</code></td></tr>
+    <tr><th><code>retrieved_context</code></th><td>Each <code>[근거 n]</code> (“evidence n”) block carries the referenced view (Korean name · view name) · data reference date · <strong>count</strong> · the executed SQL/SPARQL/search terms · the referenced product codes and names.
+        When capped, it is marked separately as <strong>“N in total (200 shown)”</strong></td></tr>
+    <tr><th><code>think_trace</code></th><td>Numbered processing steps: pre-analysis (entities · themes · ontology validation) → round-0 routing decision and its reasons → each round’s tool calls and result sizes → final status · elapsed time</td></tr>
+    <tr><th>Error handling</th><td><strong>HTTP 500 is never returned.</strong> Even on internal errors, LLM failures or timeouts, the response is 200 + the same schema, carrying the evidence gathered so far</td></tr>
+    <tr><th>Auxiliary endpoint</th><td><code>GET /health</code> — status · table reference dates · index sizes · graph <code>kg_asserted</code>/<code>kg_inferred</code> · vector backend</td></tr>
+    <tr><th>Response time</th><td>Per the organizers, more than 300 s counts as no response. The server’s internal budget is <strong>120 s · max 8 rounds</strong>; when it is exceeded, the server answers immediately with the evidence gathered. <strong>Measured: 0 cases over 300 s</strong></td></tr>
+  </tbody>
+</table>
+
+<div class="box" style="font-family:Consolas,'D2Coding',monospace; font-size:8.6pt; line-height:1.5">
+<div style="font-family:inherit"><strong>Example call</strong></div>
+curl -G "http://223.130.161.217/answer" \<br>
+&nbsp;&nbsp;--data-urlencode "question_id=Q-001" \<br>
+&nbsp;&nbsp;--data-urlencode "question=현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘"<br>
+# question = “List the KRW bonds currently available for purchase that are rated AA- or higher”<br><br>
+<div style="font-family:inherit"><strong>Response (same schema · 200 OK even for unverifiable queries; the Korean string values are shown in English translation)</strong></div>
+{<br>
+&nbsp;&nbsp;"question_id": "Q-031",<br>
+&nbsp;&nbsp;"question": "Find bonds with a credit rating of AAAA",<br>
+&nbsp;&nbsp;"retrieved_context": "No data referenced",<br>
+&nbsp;&nbsp;"think_trace": "1. Pre-analysis: no product mention; 1 ontology violation\n2. Round 1: final_answer(status=cannot_confirm)\n3. Final: status=cannot_confirm, 0 evidence items, elapsed 6.1s",<br>
+&nbsp;&nbsp;"answer": "This cannot be confirmed from the provided data. Credit rating 'AAAA' is not a valid value. Valid credit ratings: AAA, AA+, AA0, AA-, A+, … D"<br>
+}
+</div>
+
+<h3>06-C. Evaluation reproduction procedure</h3>
+<table>
+  <caption>Table 12. Steps the graders can run as is</caption>
+  <thead><tr><th style="width:24%">Purpose</th><th style="width:44%">Command</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><th>Environment setup</th><td><code>pip install -r requirements.txt</code><br><code>cp .env.example .env</code></td><td>Python 3.11+ · 4 GB of memory or more</td></tr>
+    <tr><th>Data loading</th><td><code>python scripts/build_store.py</code></td><td>Excel → SQLite, about 1–2 min</td></tr>
+    <tr><th>(Optional) warm-up</th><td><code>python scripts/warmup.py</code></td><td>Vector cache. Cuts later startups by about 80 s</td></tr>
+    <tr><th>Run the server</th><td><code>uvicorn finagent.api:app --host 0.0.0.0 --port 8000 --app-dir src</code></td><td>Builds the indices, vectors and graph + inferences at startup (about 1 min 30 s with the cache)</td></tr>
+    <tr><th>Docker (same as the evaluation server)</th><td><code>docker compose up -d --build</code></td><td>Loading + warm-up are done at image build time. Container 8000 → host 80</td></tr>
+    <tr><th><strong>Answer-key grading</strong></th><td><code>python scripts/eval_truth.py --compute</code><br><code>python scripts/eval_truth.py --base http://127.0.0.1:8000</code></td>
+        <td>The first line recomputes only the answer key from the data, <strong>without the LLM</strong>. Results go to <code>data/eval/truth_results.jsonl</code></td></tr>
+    <tr><th>Retrieval audit (no LLM needed)</th><td><code>python scripts/audit_vector.py --sections BC</code></td><td>Re-measures lexical/vector/fused recall on 1,313 queries. <strong>Fixed seed</strong></td></tr>
+    <tr><th>Inspect the stores directly</th><td><code>python scripts/explore.py health</code><br><code>python scripts/explore.py pre "신용등급 AAAA인 채권 찾아줘"</code></td><td>Check each store and the pre-analysis output directly, without an LLM key (the sample question means “Find bonds with a credit rating of AAAA”)</td></tr>
+    <tr><th>Tests</th><td><code>python -m pytest -q</code></td><td><strong>194 passing</strong> (stub LLM · small store). <code>-m slow</code> for full ETL verification</td></tr>
+  </tbody>
+</table>
+
+<h3>06-D. Data and system limitations</h3>
+<div class="box warn" style="margin-top:.4em">
+  <p style="margin:0">This is the list of <strong>what this system cannot do</strong>.
+  Each item below is actually used as the grounds for a <code>cannot_confirm</code> response.</p>
+</div>
+<table>
+  <caption>Table 13. Complete list of limitations</caption>
+  <thead><tr><th style="width:24%">Item</th><th>Details</th></tr></thead>
+  <tbody>
+    <tr><th>Basis of the accuracy figures</th><td>Because the organizers did not disclose the evaluation set, the figures are based on <strong>54 self-built questions</strong>. They are not performance on the organizers’ evaluation set.</td></tr>
+    <tr><th>Ambiguous definition of “how many”</th><td><strong>One fund row = one class</strong>, and <strong>a bond has several LOT rows per issue</strong>. Whether “how many funds” means the number of classes or of families is decided by definition, not by the data. <strong>4 of the 7 wrong answers stem from this</strong> (Table 8).</td></tr>
+    <tr><th>Net contribution of the vector leg</th><td>Limited to <strong>+3.5 pp recall@10 on thematic queries</strong> (87.0 → 90.5). recall@1 · @5 are identical to lexical alone, and <strong>typo tolerance comes from the BM25 Hangul bigrams (93.1%), not from the vector index (45.0%)</strong>. It exists and works as a required component, but in this corpus the range in which semantic search beats lexical search is narrow.</td></tr>
+    <tr><th>Affiliate ≠ subsidiary</th><td>The 608 <code>affiliateOf</code> edges derived from group-stock ETFs (8 groups, 65 companies, 0 false positives) <strong>record membership of the same business group, not equity ownership.</strong> The data has no shareholding ratios, so the levels cannot be told apart, and answers therefore also say “affiliate.” The hand-written <code>subsidiaryOf</code> consists of <strong>just 4 edges</strong>, and we do not claim “multi-level subsidiary traversal” as a general capability. Unlisted affiliates are invisible, and only 2 Hyundai Motor Group companies are captured (the matching tokens were kept narrow to avoid false positives). SK Group is not covered because its ETF has no constituent rows.</td></tr>
+    <tr><th>SHACL not validated at runtime</th><td>The 13 NodeShapes <strong>are declared, but because <code>pyshacl</code> is not a dependency, no actual validation is performed at load time.</strong> Value blocking is handled in the pre-analysis stage by the validator generated from the ontology’s enumerations.</td></tr>
+    <tr><th>Constituent coverage</th><td>Constituents exist <strong>only for domestic ETFs</strong> (collected for 1,162 of 1,235). There are no constituent data for foreign ETFs or public funds, and such questions are answered as unverifiable. Also, <strong>only the top holdings are included</strong>, so this is not a complete holdings list (the cause of wrong answer G-037).</td></tr>
+    <tr><th>Reference-date mismatch</th><td>The constituents’ <code>as_of</code> is <strong>2026-09-05</strong>, while the product masters are as of <strong>2026-08-21</strong> (foreign ETFs 08-22). When an answer mixes the two sources, the difference in timing is stated as well.</td></tr>
+    <tr><th>Low-coverage columns</th><td>Only <strong>18%</strong> of domestic ETF TERs and <strong>about 30%</strong> of fund returns are populated. The unit of the fund fee columns is <strong>undisclosed</strong>, so only <strong>relative comparisons</strong> between classes are allowed. Foreign ETFs have no 1-year return, so they are excluded from cross-product comparisons, and the answer says so.</td></tr>
+    <tr><th>Missing fund managers</th><td>91.2% filled; <strong>2,084 rows are still NULL</strong>. We built no manager-rename mapping table — without fund inception dates, there is no way to determine which spelling is the current name.</td></tr>
+    <tr><th>Size of the external documents</th><td>Only <strong>3 files, 39 chunks</strong> (ETF terms and metrics, general ETF risk factors, an overview of the National Growth Fund). They do not cover descriptive questions broadly, and questions that need background knowledge absent from the masters are answered as unverifiable.</td></tr>
+    <tr><th>Provided data vs. task description</th><td>The task-description PDF states about 145,000 records across the four datasets with a reference date of 2026-07-11, but the files actually distributed total <strong>53,375 records · reference date 2026-08-21</strong>. This implementation is based on <strong>the files actually provided</strong>; if the evaluation data is updated, re-running <code>python scripts/build_store.py</code> is all it takes to pick it up (assuming the same schema).</td></tr>
+    <tr><th>What we did not measure</th><td><strong>Container startup time</strong> (needs re-measuring after the constituents table was added and the graph rebuilt) · retrieval quality after switching to commercial embeddings · concurrent throughput (not measured, since the organizers specified sequential calls). <strong>Since we did not measure them, we give no figures.</strong></td></tr>
+  </tbody>
+</table>
+
+<h3>06-E. Deliverables mapping</h3>
+<table>
+  <caption>Table 14. The organizers’ required components ↔ where they are implemented</caption>
+  <thead><tr><th style="width:34%">Task requirement</th><th>Implementation</th></tr></thead>
+  <tbody>
+    <tr><th>① Structured/unstructured analysis &amp; cleansing + a product-domain-specific Ontology<br><span class="t-tiny">([Parsing] pdf·ppt → Markdown)</span></th>
+        <td><code>src/finagent/etl/</code> (4 structured datasets + constituents) · <code>scripts/parse_docs.py</code> (PDF/PPTX → Markdown, with provenance and reference date in the front-matter) · <strong>6</strong> <code>ontology/*.ttl</code> files</td></tr>
+    <tr><th>② Financial-product KnowledgeBase <strong>RDB + Vector + Graph</strong><br><span class="t-tiny">([Extraction]·[EntityResolution])</span></th>
+        <td>RDB = SQLite <strong>5 views · 215 columns</strong> / Vector = <code>kb/vector.py</code> (TF-IDF+LSA, 384 dimensions) / Graph = <code>kb/graph.py</code> (1,082,874 triples, inferences included) / Entity Resolution = <code>kb/entity.py</code> + <code>data/enrichment/*.yaml</code>. Lexical and vector indices hold <strong>75,089 documents</strong></td></tr>
+    <tr><th>③ Intent Analysis &amp; Retrieval Engine<br><span class="t-tiny">([NL2SQL]·[Retrieval])</span></th>
+        <td>Pre-analysis (intent · entities · ontology validation) becomes the <strong>retrieval execution plan</strong>, deterministically running only the needed stores in round 0 → holding those results as facts, the LLM finishes aggregation and sorting with <code>sql_query</code> (NL2SQL). The key is <strong>not leaving store selection to the whims of the model</strong></td></tr>
+    <tr><th>④ Answer Generator (evidence-based · hallucination prevention)</th>
+        <td><code>final_answer</code> three-state enforcement + <code>retrieved_context</code> evidence blocks + <strong>rejection of zero-lookup answers</strong> + unverifiable / clarifying-question policy</td></tr>
+    <tr><th>⑤ LLM — NCP HyperCLOVA X mandatory</th>
+        <td><code>LLM_PROVIDER=clova</code> by default; function calling through the CLOVA Studio OpenAI-compatible endpoint (<code>HCX-005</code>). Thanks to the adapter design, switching providers costs ≈ 0</td></tr>
+  </tbody>
+</table>
+
+<hr>
+<p style="font-size:9pt; color:#5c6b80; text-align:center; margin-top:1.2em">
+<strong>Wolves of Walnut Street</strong> · David Seheon Chang (장세헌) · Violette Gimenez · Lee Ho-jeong (이호정) &nbsp;|&nbsp;
+10th Mirae Asset Securities AI Festival 2026 · Financial Product Agent &nbsp;|&nbsp; 2026-09-06<br>
+<code>http://223.130.161.217/answer</code> &nbsp;·&nbsp;
+<code>github.com/miraeasset-aifestival-2026-product/fin-004</code>
+</p>
+</section>
+
+</body>
+</html>

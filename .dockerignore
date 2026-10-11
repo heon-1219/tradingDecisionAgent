@@ -8,4 +8,8 @@ data/store/kg.ttl
 data/external/cache/
 data/eval/results.jsonl
 docs/superpowers/
-.env
+# Every env file (.env, .env.local, ...) and the env file's atomic-write temp files (..env.*.tmp);
+# only the documented template is kept.
+.env*
+..env.*.tmp
+!.env.example

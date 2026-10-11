@@ -117,7 +117,7 @@ def _en(g: rdflib.Graph, s, p) -> str:
 # column exists, what it means, which view it lives in — come from the graph.
 
 _STRIP = re.compile(r"[\s()\[\]{}·,.'\"/\\%~\-_:;!?]+")
-# 기간 표기. '개월' 을 '월' 보다, '주일' 을 '주' 보다 먼저 두어야 '18개월' 이 '18개' 로 잘리지 않는다.
+# Period expressions.  '개월' must come before '월' and '주일' before '주', so that '18개월' is not cut to '18개'.
 _PERIOD = re.compile(r"(\d+)\s*(개월|주일|일|주|년|달)|연초대비|ytd", re.I)
 _UNIT_CANON = {"달": "개월", "주일": "주"}
 
@@ -262,15 +262,16 @@ class Ontology:
         return p.enum if p else []
 
     def schema_card(self, view: str, columns: list[str] | None = None, compact: bool = False) -> str:
-        """뷰의 컬럼 설명표.
+        """Column description table of a view.
 
-        `columns` 를 주면 그 컬럼만 **그 순서대로**, `compact=True` 면 설명문을 빼고 라벨·단위·
-        허용값만 남긴다.  순서를 따르는 이유: props_for 는 컬럼명 알파벳순이라 식별자·분류·수치·
-        날짜가 뒤섞여 나온다.  호출자가 준 순서를 그대로 쓰면 뷰 정의 순서(식별자 → 분류 → 수치 →
-        날짜)로 읽히므로 모델이 컬럼을 찾기 쉽다.
+        With `columns`, only those columns, **in that order**; with `compact=True`, the comments are dropped
+        and only label, unit and allowed values remain.  Why follow the order: props_for is alphabetical by
+        column name, which mixes identifiers, classifications, numbers and dates.  Keeping the caller's order
+        reads in view-definition order (identifiers → classifications → numbers → dates), so the model finds
+        columns more easily.
         """
         t = self.table(view)
-        head = f"### {view} — {t.label_ko} (원천 {t.source_id})" if t else f"### {view}"
+        head = f"### {view} — {t.label_ko} (source {t.source_id})" if t else f"### {view}"
         lines = [head]
         props = self.props_for(view)
         if columns:
@@ -283,9 +284,9 @@ class Ontology:
             seen.add(p.column)
             extra = []
             if p.unit:
-                extra.append(f"단위:{p.unit}")
+                extra.append(f"unit:{p.unit}")
             if p.enum:
-                extra.append("값:" + "/".join(e.code for e in p.enum))
+                extra.append("values:" + "/".join(e.code for e in p.enum))
             if p.comment and not compact:
                 extra.append(p.comment)
             lines.append(f"- {p.column}: {p.label_ko}" + (f" ({'; '.join(extra)})" if extra else ""))
@@ -333,10 +334,10 @@ class Ontology:
                     changed = True
         return sorted(out.values(), key=lambda c: c.name)
 
-    # --- holdings (편입종목) --------------------------------------------
-    # 이 세 accessor 가 "어느 상품군이 편입종목 데이터를 갖는가" 를 그래프에서 읽어 온다.
-    # 하드코딩 목록이 아니라 fp:hasConstituent 의 rdfs:domain / fp:constituentOf 의 rdfs:range /
-    # fp:HoldingProductShape 의 sh:class 를 합집합으로 읽으므로, TTL 한 곳만 고쳐도 답이 따라온다.
+    # --- holdings (constituents) ----------------------------------------
+    # These three accessors read "which product group has holdings data" from the graph.
+    # Not a hard-coded list: they union fp:hasConstituent's rdfs:domain / fp:constituentOf's rdfs:range /
+    # fp:HoldingProductShape's sh:class, so fixing the TTL in one place is enough for the answer to follow.
     def holding_classes(self) -> list[ClassInfo]:
         """Product classes that actually carry constituent (holdings) data.
 
@@ -376,9 +377,9 @@ class Ontology:
         return any(d.iri in hold for d in self.descendants(ref))
 
     # --- measure (ranking criterion) resolution -------------------------
-    # 정렬 기준이 될 수 있는 값의 타입. 순위·최대·최소를 매길 수 있어야 기준이므로 수치와 날짜만
-    # 남긴다. 이 필터가 없으면 "판매중인 상품 기준으로" 의 '상품' 이 pd_nm·product_type 같은
-    # 문자열 컬럼에 걸려, 기준이 아닌 것을 기준이라고 주입한다.
+    # Value types that can serve as a ranking criterion.  A criterion must support rank / max / min, so only
+    # numbers and dates remain.  Without this filter the '상품' of "판매중인 상품 기준으로" matches string
+    # columns such as pd_nm and product_type, injecting something that is not a criterion as one.
     _ORDERABLE = {
         "http://www.w3.org/2001/XMLSchema#decimal", "http://www.w3.org/2001/XMLSchema#integer",
         "http://www.w3.org/2001/XMLSchema#float", "http://www.w3.org/2001/XMLSchema#double",
@@ -392,7 +393,7 @@ class Ontology:
             for p in self.properties:
                 if not (p.table and p.column):
                     continue
-                graded = any(e.rank is not None for e in p.enum)  # fp:gradeRank ⇒ 순위를 매길 수 있는 열거형
+                graded = any(e.rank is not None for e in p.enum)  # fp:gradeRank ⇒ an enumeration that can be ranked
                 if p.range_iri not in self._ORDERABLE and not p.unit and not graded:
                     continue
                 period, base = _split_period(p.label_ko)
@@ -421,9 +422,10 @@ class Ontology:
                 label = int(88 * len(lbase) / len(qbase))
             else:
                 label = int(_dice(qbase, lbase) * 80)
-        # 주석 본문 매칭은 3자 이상부터. 2자짜리 흔한 말('다른', '규모')은 아무 주석에나 들어 있어서
-        # 무엇이든 72점으로 맞춘다 — 실제로 '서로 다른 종목' 의 '다른' 이 has_buy_yield·hdge_fd_yn 을
-        # 정렬 기준 후보로 끌어올렸다. 2자 질의는 라벨로만 판정한다('비중'→편입비중은 라벨로 걸린다).
+        # Comment-body matching starts at 3 characters.  Common 2-character words ('다른', '규모') appear in
+        # any comment and would score anything at 72 — in practice the '다른' of '서로 다른 종목' lifted
+        # has_buy_yield and hdge_fd_yn into criterion candidates.  2-character queries are judged by label only
+        # ('비중' → 편입비중 is caught by its label).
         ctx = 0
         if len(qbase) >= 3:
             ctx = 72 if qbase in text else int(_coverage(qbase, text) * 68)
@@ -488,7 +490,7 @@ class Ontology:
     def validate_credit_grade(self, v) -> tuple[bool, str]:
         codes = [e.code for e in self.credit_grades()]
         s = str(v).strip().upper()
-        return (s in codes, f"유효한 신용등급: {', '.join(codes)}")
+        return (s in codes, f"Valid credit grades: {', '.join(codes)}")
 
     def credit_grades_at_or_above(self, v: str) -> list[str]:
         grades = self.credit_grades()
@@ -505,7 +507,7 @@ class Ontology:
         codes = [e.code for e in self.risk_grades()]
         s = str(v).strip()
         rng = f"{codes[0]}~{codes[-1]}" if codes else "?"
-        return (s in codes, f"위험등급은 {rng}등급만 존재합니다 (1등급이 가장 높은 위험).")
+        return (s in codes, f"Only risk grades {rng} exist (grade 1 is the highest risk).")
 
 
 _FALLBACK_CREDIT = ["AAA", "AA+", "AA0", "AA-", "A+", "A0", "A-", "BBB+", "BBB0", "BBB-", "BB+", "BB0", "BB-", "B+", "B0", "B-", "CCC", "CC", "C0", "D"]
@@ -528,10 +530,10 @@ class FallbackValidators:
     validate_risk_grade = Ontology.validate_risk_grade
 
     def schema_card(self, view: str) -> str:
-        return f"### {view} (온톨로지 미로딩 — table_info 의 컬럼 목록 참조)"
+        return f"### {view} (ontology not loaded — see the column list from table_info)"
 
     def summary(self) -> str:
-        return "(온톨로지 미로딩)"
+        return "(ontology not loaded)"
 
     def tables(self):
         return []

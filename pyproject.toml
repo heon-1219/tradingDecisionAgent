@@ -1,7 +1,7 @@
 [project]
 name = "finagent"
 version = "0.1.0"
-description = "금융상품 Agent - Financial Product Analyst API (2026 미래에셋증권 AI Festival)"
+description = "Financial Product Agent — Financial Product Analyst API (2026 Mirae Asset Securities AI Festival) / 금융상품 Agent"
 requires-python = ">=3.11"
 
 [build-system]

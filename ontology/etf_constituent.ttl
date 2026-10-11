@@ -1,30 +1,30 @@
 # ============================================================================
-# etf_constituent.ttl — 국내 ETF 편입종목 (v_etf_constituent) TBox
+# etf_constituent.ttl — domestic ETF holdings (v_etf_constituent) TBox
 #
-# 목적
-#   "삼성전자를 보유한 ETF 중 순자산 상위 3개" 처럼 관계와 수치를 함께 묻는 질의를 한 번의
-#   SQL 조인으로 풀 수 있게, 편입종목을 정형 테이블로 문서화한다.
+# Purpose
+#   Documents the holdings as a structured table so that a query combining a relation and a number,
+#   such as "삼성전자를 보유한 ETF 중 순자산 상위 3개" (top 3 ETFs holding 삼성전자 by net assets), is one SQL join.
 #
-# 왜 별도 뷰인가
-#   편입종목은 주최측 4종 마스터에 없다. 네이버금융에서 수집해 1,162개 국내 ETF · 22,599행을
-#   확보했고, 이전에는 지식그래프에만 실려 있었다. 그 결과 그래프는 관계를 알지만 SQL 은 순자산을
-#   알아서 둘을 잇지 못했고, 에이전트는 없는 조인을 지어냈다(v_etf_kr.pd_ticker 에 종목코드를 걸어
-#   0건). 같은 사실을 두 곳에서 각자 해석한 것이 원인이므로, 적재는 ETL 한 곳에서만 한다.
+# Why a separate view
+#   Holdings are not in the organizers' four masters. They were collected from Naver Finance (1,162 domestic ETFs, 22,599 rows)
+#   and used to live only in the knowledge graph. So the graph knew the relation and SQL knew the net assets,
+#   nothing connected the two, and the agent invented a join that does not exist (a stock code put on
+#   v_etf_kr.pd_ticker -> 0 rows). The cause was two places interpreting the same fact, so loading happens only in the ETL.
 #
-# 신원(identity)
-#   company_code 는 출처가 준 종목코드다(79% 수록). 삼성전자 005930 과 삼성전자우 005935 는
-#   서로 다른 종목이며 코드로만 구분된다. 코드가 없는 행(해외 종목·현금)은 출처가 게시한 이름을
-#   그대로 신원으로 쓴다. 이름 유사도로 종목을 합치지 않는다 — 그렇게 했을 때 'LG' 가
-#   신한금융지주로, 'KT' 가 SK텔레콤으로 귀속되는 오염이 677행 발생했다.
+# Identity
+#   company_code is the stock code the source provides (present on 79% of rows). 삼성전자 005930 and 삼성전자우 005935
+#   are different stocks, told apart only by code. Rows without a code (foreign stocks, cash) use the name the
+#   source published as their identity. Stocks are never merged by name similarity — doing so attributed 'LG' to
+#   신한금융지주 and 'KT' to SK텔레콤, corrupting 677 rows.
 #
 # TBox / ABox
-#   d:etf_kr/<ISIN> --fp:hasConstituent--> d:company/<id> 로 그래프에도 동시에 반영된다.
-#   그래프와 이 뷰는 같은 테이블에서 만들어지므로 개수가 어긋날 수 없다.
+#   Also reflected in the graph as d:etf_kr/<ISIN> --fp:hasConstituent--> d:company/<id>.
+#   The graph and this view are built from the same table, so their counts cannot diverge.
 #
-# 데이터 특성 (as_of 2026-09-03)
-#   - is_cash=1 은 원화현금·설정현금액 등 종목이 아닌 행. 종목을 셀 때는 is_cash=0 을 건다.
-#   - weight_pct 는 비중(%)이며 ETF 별 상위 편입종목만 수집되어 합이 100% 가 되지 않는다.
-#   - 해외ETF(v_etf_gl)·공모펀드(v_fund_pub)는 편입종목 데이터가 없다.
+# Data characteristics (as_of 2026-09-03)
+#   - is_cash=1 marks non-stock rows such as 원화현금 and 설정현금액. Filter on is_cash=0 when counting stocks.
+#   - weight_pct is the weight (%); only each ETF's top holdings were collected, so the weights do not sum to 100%.
+#   - Foreign ETFs (v_etf_gl) and public funds (v_fund_pub) have no holdings data.
 # ============================================================================
 
 @prefix fp:   <http://mafest.ai/product#> .
@@ -34,7 +34,7 @@
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
 # ----------------------------------------------------------------------------
-# 1. 테이블 클래스
+# 1. Table class
 # ----------------------------------------------------------------------------
 
 fp:ETFHolding a owl:Class ;
@@ -44,7 +44,7 @@ fp:ETFHolding a owl:Class ;
     fp:sourceId "naver_finance" .
 
 # ----------------------------------------------------------------------------
-# 2. 속성
+# 2. Properties
 # ----------------------------------------------------------------------------
 
 fp:holdingEtfIsin a owl:DatatypeProperty ;

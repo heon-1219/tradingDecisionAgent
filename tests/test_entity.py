@@ -21,7 +21,7 @@ def test_resolver_marks_unknown_product_as_inexact_with_candidates():
     r = EntityResolver(_idx(), Lexicon.load(ENRICH)).resolve("KODEX AI로봇 ETF 정보 알려줘")
     assert not r.exact
     assert r.products[0].title == "KODEX 로봇액티브"
-    assert "유사 상품 후보" in r.summary()
+    assert "Similar product candidates" in r.summary()
 
 
 def test_extract_product_mentions():
@@ -32,6 +32,18 @@ def test_extract_product_mentions():
     assert "TIGER 2차전지테마" in extract_product_mentions("TIGER 2차전지테마의 보수율과 위험을 알려줘")
     assert extract_product_mentions("현재 판매가능한 원화채권 중 AA- 이상 종목 알려줘") == []
     assert "VanEck China Semiconductor ETF" in extract_product_mentions("VanEck China Semiconductor ETF 총보수는?")
+
+
+def test_extract_product_mentions_english_questions():
+    """English questions must not turn a leading question/stop word into part of the product mention,
+    and must stop before a trailing lower-case English word that is plain sentence text, not part of
+    the product name (Task 0.1)."""
+    from finagent.kb.entity import extract_product_mentions
+
+    assert extract_product_mentions("Which domestic ETF has the largest net assets among Korean equity ETFs?") == []
+    assert extract_product_mentions("Which ETF tracks the KOSPI 200 index?") == []
+    assert extract_product_mentions("Will KODEX 200 rise next year?") == ["KODEX 200"]
+    assert extract_product_mentions("What is the expense ratio of TIGER 미국S&P500?") == ["TIGER 미국S&P500"]
 
 
 def test_resolver_exact_match():
@@ -48,12 +60,12 @@ def test_resolver_company_and_theme():
 
 
 def test_resolution_flags_nonexistent_product_in_summary():
-    """도구 출력과 사전분석이 같은 기준으로 '존재하지 않음'을 경고해야 한다."""
+    """The tool output and the pre-analysis must warn 'does not exist' by the same criterion."""
     lx = Lexicon.load(ENRICH)
     r = EntityResolver(_idx(), lx).resolve("KODEX AI로봇")
-    assert not r.resolved and "존재하지 않습니다" in r.summary()
+    assert not r.resolved and "exists in the data" in r.summary()
     ok = EntityResolver(_idx(), lx).resolve("KODEX 로봇액티브")
-    assert ok.resolved and "존재하지 않습니다" not in ok.summary()
+    assert ok.resolved and "exists in the data" not in ok.summary()
 
 
 def test_mention_resolves_tolerates_prefix_and_suffix():

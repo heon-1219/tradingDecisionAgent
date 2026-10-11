@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en" data-rail="collapsed" data-drawer="closed" data-panel="closed">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>FinAgent · Paper trading</title>
+  <link rel="icon" type="image/svg+xml" href="/app/favicon.svg">
+  <link rel="stylesheet" href="/app/app.css">
+  <link rel="stylesheet" href="/app/components.css">
+  <script src="/app/js/boot.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#composer-input" data-i18n="skip_to_composer">Skip to the message box</a>
+
+  <div class="app" id="app">
+    <nav class="rail" id="rail" aria-label="Chats" data-i18n-aria-label="rail_label">
+      <div class="rail-head">
+        <button type="button" class="icon-btn" id="rail-toggle" aria-controls="rail" aria-expanded="false"
+                aria-label="Expand sidebar" data-i18n-aria-label="rail_expand">
+          <span class="icon" data-icon="rail"></span>
+        </button>
+        <span class="brand">
+          <span class="icon brand-mark" data-icon="logo" data-icon-size="18"></span>
+          <span data-i18n="app_name">FinAgent</span>
+        </span>
+      </div>
+
+      <button type="button" class="new-chat" id="new-chat">
+        <span class="icon" data-icon="plus" data-icon-size="18"></span>
+        <span class="rail-label" data-i18n="new_chat">New chat</span>
+      </button>
+
+      <div class="rail-body">
+        <h2 class="rail-heading" data-i18n="recent">Recent</h2>
+        <ul class="session-list" id="session-list"></ul>
+        <p class="rail-status" id="session-status" data-i18n="sessions_loading">Loading chats…</p>
+      </div>
+    </nav>
+
+    <div class="main" id="main">
+      <header class="topbar">
+        <button type="button" class="icon-btn menu-button" id="menu-button" aria-controls="rail" aria-expanded="false"
+                aria-label="Open chats" data-i18n-aria-label="menu_open">
+          <span class="icon" data-icon="menu"></span>
+        </button>
+        <h1 class="session-title" id="session-title" data-i18n="new_chat">New chat</h1>
+        <span class="badge-paper" title="Paper trading: orders go to a simulated Alpaca paper account. No real money moves."
+              data-i18n-title="paper_title">
+          <span class="badge-dot" aria-hidden="true"></span>
+          <span data-i18n="paper">PAPER</span>
+        </span>
+        <span class="badge-demo" id="demo-badge" role="img" hidden></span>
+        <span class="chip-model" id="model-chip" hidden></span>
+        <button type="button" class="chip-mode" id="mode-chip" aria-expanded="false" hidden></button>
+        <span class="turn-stats" id="turn-stats" hidden></span>
+        <span class="topbar-spacer"></span>
+        <div class="lang-toggle" role="group" aria-label="Interface language" data-i18n-aria-label="lang_group">
+          <button type="button" id="lang-en" lang="en" aria-pressed="true"
+                  title="Show the interface in English" data-i18n-title="lang_en_label">EN</button>
+          <button type="button" id="lang-ko" lang="ko" aria-pressed="false"
+                  title="Show the interface in Korean" data-i18n-title="lang_ko_label">한국어</button>
+        </div>
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Switch to the light theme"
+                data-i18n-aria-label="theme_to_light">
+          <span class="icon" id="theme-icon-sun" data-icon="sun"></span>
+          <span class="icon" id="theme-icon-moon" data-icon="moon" hidden></span>
+        </button>
+        <button type="button" class="icon-btn" id="panel-toggle" aria-controls="panel" aria-expanded="false"
+                aria-label="Show the side panel" data-i18n-aria-label="panel_show">
+          <span class="icon" data-icon="panel"></span>
+        </button>
+      </header>
+
+      <main class="chat" id="chat">
+        <div class="scroller" id="scroller" role="region" tabindex="0" aria-label="Conversation"
+             data-i18n-aria-label="thread_label">
+          <div class="thread" id="thread"></div>
+        </div>
+
+        <div class="composer-zone">
+          <div class="composer-inner">
+            <div class="toasts" id="toasts"></div>
+            <form class="composer" id="composer" novalidate>
+              <label class="sr-only" for="composer-input" data-i18n="composer_label">Message</label>
+              <textarea id="composer-input" rows="1" maxlength="16000" autocomplete="off" enterkeyhint="send"
+                        placeholder="Ask about a stock, an ETF or a strategy…"
+                        data-i18n-placeholder="composer_placeholder"></textarea>
+              <div class="composer-bar">
+                <span class="composer-hint" data-i18n="composer_hint">Enter to send · Shift+Enter for a new line</span>
+                <button type="button" class="btn-stop" id="stop-button" hidden>
+                  <span class="icon" data-icon="stop" data-icon-size="18"></span>
+                  <span data-i18n="stop">Stop</span>
+                </button>
+                <button type="submit" class="btn-send" id="send-button" disabled aria-label="Send"
+                        data-i18n-aria-label="send">
+                  <span class="icon" data-icon="send"></span>
+                </button>
+              </div>
+            </form>
+            <p class="disclaimer" data-i18n="disclaimer">Paper trading only. Not investment advice.</p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <aside class="panel" id="panel" aria-label="Account and settings" data-i18n-aria-label="panel_label">
+      <div class="panel-head">
+        <div class="tabs" role="tablist" aria-label="Account and settings" data-i18n-aria-label="panel_label">
+          <button type="button" class="tab" role="tab" id="tab-portfolio" data-tab="portfolio"
+                  aria-controls="tabpanel-portfolio" aria-selected="true" data-i18n="tab_portfolio">Portfolio</button>
+          <button type="button" class="tab" role="tab" id="tab-orders" data-tab="orders"
+                  aria-controls="tabpanel-orders" aria-selected="false" tabindex="-1" data-i18n="tab_orders">Orders</button>
+          <button type="button" class="tab" role="tab" id="tab-mandate" data-tab="mandate"
+                  aria-controls="tabpanel-mandate" aria-selected="false" tabindex="-1" data-i18n="tab_mandate">Mandate</button>
+          <button type="button" class="tab" role="tab" id="tab-settings" data-tab="settings"
+                  aria-controls="tabpanel-settings" aria-selected="false" tabindex="-1" data-i18n="tab_settings">Settings</button>
+        </div>
+        <button type="button" class="icon-btn panel-close" id="panel-close" aria-label="Close the panel"
+                data-i18n-aria-label="panel_close">
+          <span class="icon" data-icon="close"></span>
+        </button>
+      </div>
+
+      <div class="panel-body">
+        <!-- The components mount their views into these tab panels (registerPanel in js/registry.js). -->
+        <section class="tabpanel" role="tabpanel" id="tabpanel-portfolio" aria-labelledby="tab-portfolio" tabindex="0"></section>
+        <section class="tabpanel" role="tabpanel" id="tabpanel-orders" aria-labelledby="tab-orders" tabindex="0" hidden></section>
+        <section class="tabpanel" role="tabpanel" id="tabpanel-mandate" aria-labelledby="tab-mandate" tabindex="0" hidden></section>
+        <section class="tabpanel" role="tabpanel" id="tabpanel-settings" aria-labelledby="tab-settings" tabindex="0" hidden></section>
+      </div>
+    </aside>
+
+    <div class="scrim" id="scrim"></div>
+  </div>
+
+  <div class="sr-only" id="announcer" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/app/vendor/purify.min.js"></script>
+  <script type="module" src="/app/js/main.js"></script>
+</body>
+</html>
